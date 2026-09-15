@@ -1,0 +1,118 @@
+version: "3"
+
+vars:
+  ENV_FILE: .env
+  TERRAFORM_DIR: infra
+  API_DIR: api
+  WORKER_DIR: worker
+  WEB_DIR: web
+  DOCKER_COMPOSE_FILE: "{{.TERRAFORM_DIR}}/docker-compose.yaml"
+
+dotenv: [".env"]
+
+tasks:
+  default:
+    desc: Lista os comandos disponíveis
+    cmds:
+      - task --list
+
+  infra:up:
+    desc: Sobe o container de emulação local Floci (S3, SNS, SQS, DynamoDB, RDS, ElastiCache)
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d
+
+  infra:down:
+    desc: Encerra os containers locais
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+
+  infra:logs:
+    desc: Acompanha os logs dos containers locais
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+
+  infra:clean:
+    desc: Remove containers, volumes, and networks
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans
+
+  infra:clean:all:
+    desc: Remove containers, volumes, networks, e imagens
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans --rmi all
+
+  tf:init:
+    desc: Inicializa o diretório do Terraform
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform init
+
+  tf:apply:local:
+    desc: Provisiona recursos locais apontando para o Floci
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform apply -var="use_localstack=true" -auto-approve
+
+  tf:apply:aws:
+    desc: Provisiona recursos reais no AWS Academy
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform apply -var="use_localstack=false"
+
+  tf:destroy:aws:
+    desc: Destrói recursos no AWS Academy para evitar cobrança de créditos
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform destroy -var="use_localstack=false" -auto-approve
+
+  tf:refresh:
+    desc: Atualiza o estado do Terraform com os recursos reais no AWS Academy
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform refresh -var="use_localstack=false"
+
+  tf:output:
+    desc: Exibe os outputs do Terraform
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform output
+
+  dev:api:
+    desc: Executa a API Go em modo desenvolvimento
+    dir: "{{.API_DIR}}"
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      DATABASE_URL: postgres://app_user:app_password@localhost:5432/estacionamento?sslmode=disable
+      REDIS_URL: localhost:6379
+    cmds:
+      - go run main.go
+
+  dev:worker:
+    desc: Executa o worker OCR Python em ambiente virtual
+    dir: "{{.WORKER_DIR}}"
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      DATABASE_URL: postgresql://app_user:app_password@localhost:5432/estacionamento
+    cmds:
+      - python3 worker.py
+
+  dev:web:
+    desc: Inicia o servidor de desenvolvimento do React/Vite
+    dir: "{{.WEB_DIR}}"
+    cmds:
+      - npm run dev
+
+  build:web:
+    desc: Gera o bundle estático do frontend
+    dir: "{{.WEB_DIR}}"
+    cmds:
+      - npm run build
+
+  bootstrap:local:
+    desc: Prepara o ambiente local completo (Docker + Terraform local)
+    cmds:
+      - task: infra:up
+      - cmd: sleep 5
+      - task: tf:init
+      - task: tf:apply:local
+      - echo "Ambiente local provisionado com sucesso via Floci!"

@@ -1,0 +1,32 @@
+# Auto-detect text files and normalize line endings to LF (Linux default)
+* text=auto eol=lf
+
+# Code and configuration files with explicit diff and LF
+*.go text diff=golang eol=lf
+*.py text diff=python eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yaml text diff=yaml eol=lf
+*.yml text diff=yaml eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.tf text diff=terraform eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+.env* text eol=lf
+Taskfile.yaml text diff=yaml eol=lf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.tar binary
+*.gz binary
+*.zip binary
