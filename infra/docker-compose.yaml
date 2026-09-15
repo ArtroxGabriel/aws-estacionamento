@@ -1,0 +1,62 @@
+services:
+  ministack:
+    image: ministackorg/ministack:latest
+    container_name: ministack_aws
+    ports:
+      - "4566:4566"
+    environment:
+      - AWS_DEFAULT_REGION=us-east-1
+      - PERSIST_STATE=1
+      - S3_PERSIST=1
+    volumes:
+      - ministack_state:/tmp/ministack-state
+      - ministack_s3:/tmp/ministack-data/s3
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: rds_local
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=estacionamento
+      - POSTGRES_USER=app_user
+      - POSTGRES_PASSWORD=app_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d estacionamento"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:alpine
+    container_name: elasticache_local
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+  redis_data:
+  ministack_state:
+  ministack_s3:
