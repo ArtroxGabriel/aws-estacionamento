@@ -31,21 +31,41 @@ tasks:
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
 
+  tf:clean:
+    desc: Remove arquivos de estado e cache locais do Terraform
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - rm -rf .terraform .terraform.lock.hcl terraform.tfstate terraform.tfstate.backup
+
   infra:clean:
-    desc: Remove containers, volumes, and networks
+    desc: Remove containers, volumes, networks locais e limpa o estado do Terraform
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans
+      - task: tf:clean
 
   infra:clean:all:
-    desc: Remove containers, volumes, networks, e imagens
+    desc: Remove containers, volumes, networks, imagens e limpa o estado do Terraform
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans --rmi all
+      - task: tf:clean
 
   tf:init:
     desc: Inicializa o diretório do Terraform
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
       - terraform init
+
+  tf:plan:local:
+    desc: Gera o plano de execução do Terraform apontando para o Floci
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform plan -var="use_localstack=true"
+
+  tf:plan:aws:
+    desc: Gera o plano de execução do Terraform para o AWS Academy
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform plan -var="use_localstack=false"
 
   tf:apply:local:
     desc: Provisiona recursos locais apontando para o Floci
@@ -82,10 +102,25 @@ tasks:
     dir: "{{.API_DIR}}"
     env:
       AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_ACCESS_KEY_ID: mock_key
+      AWS_SECRET_ACCESS_KEY: mock_secret
       DATABASE_URL: postgres://app_user:app_password@localhost:5432/estacionamento?sslmode=disable
       REDIS_URL: localhost:6379
+      SNS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:novo-veiculo-topico
     cmds:
-      - go run main.go
+      - go run ./cmd/api
+
+  test:api:
+    desc: Executa os testes unitários da API Go
+    dir: "{{.API_DIR}}"
+    cmds:
+      - go test -v ./...
+
+  build:api:
+    desc: Compila o binário da API Go
+    dir: "{{.API_DIR}}"
+    cmds:
+      - go build -v -o bin/api ./cmd/api
 
   dev:worker:
     desc: Executa o worker OCR Python em ambiente virtual

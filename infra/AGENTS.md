@@ -25,9 +25,12 @@ infra/
 ## Common Commands
 
 - `task tf:init`: Inicializa provedores Terraform
+- `task tf:plan:local`: Gera plano de execução do Terraform apontando para o Floci
+- `task tf:plan:aws`: Gera plano de execução do Terraform para o AWS Academy
 - `task tf:apply:local`: Provisiona recursos no Floci local
 - `task tf:apply:aws`: Provisiona recursos na AWS Academy
 - `task tf:destroy:aws`: Destrói recursos na AWS Academy (preservar créditos)
+- `task tf:clean`: Limpa cache e arquivos de estado locais do Terraform (.terraform, .lock, .tfstate)
 
 ## Architecture Conventions
 
