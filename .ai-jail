@@ -1,0 +1,11 @@
+# ai-jail sandbox configuration
+# https://github.com/akitaonrails/ai-jail
+# Edit freely. Regenerate with: ai-jail --clean --init
+
+command = [
+    "ai-memory",
+    "run",
+    "antigravity-cli",
+]
+no_docker = false
+ssh = true

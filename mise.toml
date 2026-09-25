@@ -1,7 +1,7 @@
 [tools]
 go = "1.27"
 node = "26"
+opentofu = "1.12"
 python = "3.14"
 task = "3.53"
-terraform = "1.15"
 uv = "0.12"

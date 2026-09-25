@@ -32,70 +32,70 @@ tasks:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
 
   tf:clean:
-    desc: Remove arquivos de estado e cache locais do Terraform
+    desc: Remove arquivos de estado e cache locais do OpenTofu/Terraform
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - rm -rf .terraform .terraform.lock.hcl terraform.tfstate terraform.tfstate.backup
+      - rm -rf .terraform .tofu .terraform.lock.hcl terraform.tfstate terraform.tfstate.backup
 
   infra:clean:
-    desc: Remove containers, volumes, networks locais e limpa o estado do Terraform
+    desc: Remove containers, volumes, networks locais e limpa o estado do OpenTofu
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans
       - task: tf:clean
 
   infra:clean:all:
-    desc: Remove containers, volumes, networks, imagens e limpa o estado do Terraform
+    desc: Remove containers, volumes, networks, imagens e limpa o estado do OpenTofu
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} down -v --remove-orphans --rmi all
       - task: tf:clean
 
   tf:init:
-    desc: Inicializa o diretório do Terraform
+    desc: Inicializa o diretório do OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform init
+      - tofu init
 
   tf:plan:local:
-    desc: Gera o plano de execução do Terraform apontando para o Floci
+    desc: Gera o plano de execução do OpenTofu apontando para o Floci
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform plan -var="use_localstack=true"
+      - tofu plan -var="use_localstack=true"
 
   tf:plan:aws:
-    desc: Gera o plano de execução do Terraform para o AWS Academy
+    desc: Gera o plano de execução do OpenTofu para o AWS Academy
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform plan -var="use_localstack=false"
+      - tofu plan -var="use_localstack=false"
 
   tf:apply:local:
-    desc: Provisiona recursos locais apontando para o Floci
+    desc: Provisiona recursos locais apontando para o Floci via OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform apply -var="use_localstack=true" -auto-approve
+      - tofu apply -var="use_localstack=true" -auto-approve
 
   tf:apply:aws:
-    desc: Provisiona recursos reais no AWS Academy
+    desc: Provisiona recursos reais no AWS Academy via OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform apply -var="use_localstack=false"
+      - tofu apply -var="use_localstack=false"
 
   tf:destroy:aws:
     desc: Destrói recursos no AWS Academy para evitar cobrança de créditos
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform destroy -var="use_localstack=false" -auto-approve
+      - tofu destroy -var="use_localstack=false" -auto-approve
 
   tf:refresh:
-    desc: Atualiza o estado do Terraform com os recursos reais no AWS Academy
+    desc: Atualiza o estado do OpenTofu com os recursos reais no AWS Academy
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform refresh -var="use_localstack=false"
+      - tofu refresh -var="use_localstack=false"
 
   tf:output:
-    desc: Exibe os outputs do Terraform
+    desc: Exibe os outputs do OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - terraform output
+      - tofu output
 
   dev:api:
     desc: Executa a API Go em modo desenvolvimento
@@ -144,7 +144,7 @@ tasks:
       - npm run build
 
   bootstrap:local:
-    desc: Prepara o ambiente local completo (Docker + Terraform local)
+    desc: Prepara o ambiente local completo (Docker + OpenTofu local)
     cmds:
       - task: infra:up
       - cmd: sleep 5

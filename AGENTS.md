@@ -44,11 +44,11 @@
 
 ## Tech Stack
 
-- **Orquestração e Ferramentas**: Taskfile (`task 3.53`), mise (Go 1.27, Python 3.14, Node 26, Terraform 1.15, UV 0.12)
+- **Orquestração e Ferramentas**: Taskfile (`task 3.53`), mise (Go 1.27, Python 3.14, Node 26, OpenTofu latest, UV 0.12)
 - **API Backend**: Go 1.27 (REST, AWS SDK v2, drivers Postgres e Redis)
 - **Worker Assíncrono**: Python 3.14 + `uv` (Boto3, Tesseract OCR, Pillow/OpenCV, driver PostgreSQL)
 - **Frontend**: React + Vite (Node 26)
-- **Infraestrutura**: Terraform 1.15 + Docker Compose (Floci 4566 com emulação de S3, SNS, SQS, DynamoDB, RDS PostgreSQL 5432 e ElastiCache Redis 6379 via Docker socket)
+- **Infraestrutura**: OpenTofu + Docker Compose (Floci 4566 com emulação de S3, SNS, SQS, DynamoDB, RDS PostgreSQL 5432 e ElastiCache Redis 6379 via Docker socket)
 
 ## File Structure
 
@@ -59,22 +59,22 @@
 ├── api/                    # API REST em Go
 ├── worker/                 # Worker assíncrono OCR em Python
 ├── web/                    # Frontend React + Vite
-├── infra/                  # Terraform e Docker Compose
+├── infra/                  # OpenTofu e Docker Compose
 └── docs/                   # Especificações da disciplina
 ```
 
 - `api/`: API REST responsável pelas rotas `/entradas`, `/vagas/disponiveis` e `/saidas/:id/pagar`.
 - `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e atualizar o RDS/Redis.
 - `web/`: Interface para o operador e totem de entrada.
-- `infra/`: Definições IaC (Terraform) e ambiente local (Docker Compose com Floci).
+- `infra/`: Definições IaC (OpenTofu) e ambiente local (Docker Compose com Floci).
 
 ## Common Commands
 
 - **Ambiente Local Completo**:
   - `task bootstrap:local`: Sobe containers e provisiona recursos no Floci
   - `task infra:up` / `task infra:down` / `task infra:logs`
-- **Terraform**:
-  - `task tf:init`: Inicializa diretório Terraform
+- **OpenTofu**:
+  - `task tf:init`: Inicializa diretório OpenTofu
   - `task tf:apply:local`: Provisiona no Floci (`use_localstack=true`)
   - `task tf:apply:aws`: Provisiona recursos na AWS Academy
   - `task tf:destroy:aws`: Destrói recursos na AWS Academy
@@ -107,6 +107,7 @@ Configurar variáveis locais no `.env`:
 
 ## Changelog
 
+- 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md raiz com pipeline detalhado dos 6 serviços AWS.
 
 <!-- ai-memory:start -->

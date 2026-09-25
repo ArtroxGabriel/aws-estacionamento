@@ -1,14 +1,14 @@
-# AGENTS.md - Infraestrutura (Terraform & Docker)
+# AGENTS.md - Infraestrutura (OpenTofu & Docker)
 
 ## Project Overview
 
-- Gerencia a infraestrutura como código (IaC) via Terraform para os 6 serviços centrais da AWS (S3, SNS/SQS, DynamoDB, RDS, ElastiCache) e provê o ambiente de emulação local via Docker Compose com Floci.
-- RDS (PostgreSQL) e ElastiCache (Redis) são provisionados via Terraform gerenciados pelo Floci localmente e pela AWS Academy em nuvem, eliminando containers dedicados de banco no Compose.
+- Gerencia a infraestrutura como código (IaC) via OpenTofu para os 6 serviços centrais da AWS (S3, SNS/SQS, DynamoDB, RDS, ElastiCache) e provê o ambiente de emulação local via Docker Compose com Floci.
+- RDS (PostgreSQL) e ElastiCache (Redis) são provisionados via OpenTofu gerenciados pelo Floci localmente e pela AWS Academy em nuvem, eliminando containers dedicados de banco no Compose.
 - Prepara a infraestrutura para a **Parte 2** com Application Load Balancer e Auto Scaling Group (1 a 3 réplicas).
 
 ## Tech Stack
 
-- **IaC**: Terraform 1.15
+- **IaC**: OpenTofu (latest / 1.12+)
 - **Containers**: Docker Compose (`floci/floci:latest` com Docker socket para instanciar RDS PostgreSQL e ElastiCache Redis sob demanda)
 
 ## File Structure
@@ -24,13 +24,13 @@ infra/
 
 ## Common Commands
 
-- `task tf:init`: Inicializa provedores Terraform
-- `task tf:plan:local`: Gera plano de execução do Terraform apontando para o Floci
-- `task tf:plan:aws`: Gera plano de execução do Terraform para o AWS Academy
-- `task tf:apply:local`: Provisiona recursos no Floci local
-- `task tf:apply:aws`: Provisiona recursos na AWS Academy
+- `task tf:init`: Inicializa provedores OpenTofu
+- `task tf:plan:local`: Gera plano de execução do OpenTofu apontando para o Floci
+- `task tf:plan:aws`: Gera plano de execução do OpenTofu para o AWS Academy
+- `task tf:apply:local`: Provisiona recursos no Floci local via OpenTofu
+- `task tf:apply:aws`: Provisiona recursos na AWS Academy via OpenTofu
 - `task tf:destroy:aws`: Destrói recursos na AWS Academy (preservar créditos)
-- `task tf:clean`: Limpa cache e arquivos de estado locais do Terraform (.terraform, .lock, .tfstate)
+- `task tf:clean`: Limpa cache e arquivos de estado locais do OpenTofu/Terraform (.terraform, .lock, .tfstate)
 
 ## Architecture Conventions
 
@@ -41,4 +41,5 @@ infra/
 
 ## Changelog
 
+- 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md de Infraestrutura com parâmetros de elasticidade.
