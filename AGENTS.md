@@ -13,7 +13,7 @@
 3. **Amazon S3**: Bucket para arquivos binários (fotos dos veículos capturadas na entrada).
 4. **Amazon ElastiCache**: Cluster Redis nó único (`cache.t3.micro`) mantendo em memória o mapa de vagas disponíveis para leituras de alta frequência e baixa latência.
 5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRADA`, `PROCESSAMENTO_OCR`, `SAIDA_PAGAMENTO`).
-6. **Amazon SNS + SQS**: Desacoplamento assíncrono: API publica evento no SNS (`novo-veiculo-topico`), repassado para o SQS (`ocr-processamento-fila`); o worker Python consome a fila para redimensionar a foto e extrair a placa via OCR (Tesseract).
+6. **Amazon SQS**: Desacoplamento assíncrono: API publica mensagem diretamente na fila SQS (`ocr-processamento-fila`); o worker Python consome a fila para redimensionar a foto e extrair a placa via OCR (Tesseract).
 
 ## Pipeline da Solução
 
@@ -21,7 +21,7 @@
 [Totem/Web: React + Vite] ──> POST /entries (com foto)
     ├── 1. API (Go) salva a imagem original no S3
     ├── 2. Registra sessão preliminar no RDS (status: "PROCESSING")
-    ├── 3. Emite evento no SNS ──> Fila SQS
+    ├── 3. Envia evento direto na fila SQS
     ├── 4. Grava log de auditoria no DynamoDB (ação: "ENTRY")
     └── 5. Retorna ticket provisório ao usuário
 
@@ -48,7 +48,7 @@
 - **API Backend**: Go 1.27 (REST, AWS SDK v2, drivers Postgres e Redis)
 - **Worker Assíncrono**: Python 3.14 + `uv` (Boto3, Tesseract OCR, Pillow/OpenCV, driver PostgreSQL)
 - **Frontend**: React + Vite (Node 26)
-- **Infraestrutura**: OpenTofu + Docker Compose (Floci 4566 com emulação de S3, SNS, SQS, DynamoDB, RDS PostgreSQL 5432 e ElastiCache Redis 6379 via Docker socket)
+- **Infraestrutura**: OpenTofu + Docker Compose (Floci 4566 com emulação de S3, SQS, DynamoDB, RDS PostgreSQL 5432 e ElastiCache Redis 6379 via Docker socket)
 
 ## File Structure
 

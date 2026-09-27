@@ -11,6 +11,7 @@ Sistema de Gestão de Vagas de Estacionamento cobrindo 6 serviçoes da AWS, incl
 | Lucas Lopes | Item2.3 |
 | Henrique Viana | Item2.4 |
 
-## Requisitos
+## Documentação & Requisitos
 
-- [especificão](/docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
+- [Especificação Oficial](/docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
+- [Visão Geral & Farol de Revisão de PRs (GOAL.md)](/docs/GOAL.md)
