@@ -19,7 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
@@ -38,14 +38,14 @@ func main() {
 			// 3. AWS Infrastructure
 			NewAWSConfig,
 			NewS3Client,
-			NewSNSClient,
+			NewSQSClient,
 			NewDynamoDBClient,
 
 			// 4. Repositories & Adapters (defined in internal/repository)
 			fx.Annotate(repository.NewPostgresSessionRepo, fx.As(new(repository.SessionRepository))),
 			fx.Annotate(repository.NewRedisSpotsRepo, fx.As(new(repository.SpotsRepository))),
 			fx.Annotate(repository.NewS3BlobStorage, fx.As(new(repository.BlobStorage))),
-			fx.Annotate(repository.NewSNSEventPublisher, fx.As(new(repository.EventPublisher))),
+			fx.Annotate(repository.NewSQSEventPublisher, fx.As(new(repository.EventPublisher))),
 			fx.Annotate(repository.NewDynamoDBAuditLogger, fx.As(new(repository.AuditLogger))),
 
 			// 5. Service (defined in internal/service)
@@ -99,8 +99,8 @@ func NewS3Client(awsCfg aws.Config, cfg config.Config) *s3.Client {
 	})
 }
 
-func NewSNSClient(awsCfg aws.Config, cfg config.Config) *sns.Client {
-	return sns.NewFromConfig(awsCfg, func(o *sns.Options) {
+func NewSQSClient(awsCfg aws.Config, cfg config.Config) *sqs.Client {
+	return sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
 		if cfg.AWSEndpointURL != "" {
 			o.BaseEndpoint = &cfg.AWSEndpointURL
 		}

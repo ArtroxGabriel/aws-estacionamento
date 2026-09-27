@@ -12,7 +12,7 @@ type Config struct {
 	AWSAccessKeyID      string
 	AWSSecretAccessKey  string
 	S3BucketName        string
-	SNSTopicARN         string
+	SQSQueueURL         string
 	DynamoDBTableName   string
 	DatabaseURL         string
 	RedisURL            string
@@ -31,7 +31,7 @@ func LoadConfig() Config {
 		AWSAccessKeyID:     getEnv("AWS_ACCESS_KEY_ID", "mock_key"),
 		AWSSecretAccessKey: getEnv("AWS_SECRET_ACCESS_KEY", "mock_secret"),
 		S3BucketName:       getEnv("S3_BUCKET_NAME", "estacionamento-fotos-veiculos-local"),
-		SNSTopicARN:        getEnv("SNS_TOPIC_ARN", ""),
+		SQSQueueURL:        getEnv("SQS_QUEUE_URL", ""),
 		DynamoDBTableName:  getEnv("DYNAMODB_TABLE_NAME", "AuditoriaEstacionamento"),
 		DatabaseURL:       getEnv("DATABASE_URL", "postgres://app_user:app_password@localhost:5432/estacionamento?sslmode=disable"),
 		RedisURL:          getEnv("REDIS_URL", "localhost:6379"),

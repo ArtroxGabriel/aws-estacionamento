@@ -106,7 +106,7 @@ tasks:
       AWS_SECRET_ACCESS_KEY: mock_secret
       DATABASE_URL: postgres://app_user:app_password@localhost:5432/estacionamento?sslmode=disable
       REDIS_URL: localhost:6379
-      SNS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:novo-veiculo-topico
+      SQS_QUEUE_URL: http://localhost:4566/000000000000/ocr-processamento-fila
     cmds:
       - go run ./cmd/api
 
@@ -127,6 +127,9 @@ tasks:
     dir: "{{.WORKER_DIR}}"
     env:
       AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_ACCESS_KEY_ID: mock_key
+      AWS_SECRET_ACCESS_KEY: mock_secret
+      SQS_QUEUE_URL: http://localhost:4566/000000000000/ocr-processamento-fila
       DATABASE_URL: postgresql://app_user:app_password@localhost:5432/estacionamento
     cmds:
       - python3 worker.py

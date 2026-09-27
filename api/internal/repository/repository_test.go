@@ -185,10 +185,10 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 	})
 }
 
-func TestSNSEventPublisher_EmptyTopic(t *testing.T) {
-	pub := repository.NewSNSEventPublisher(nil, config.Config{SNSTopicARN: ""})
+func TestSQSEventPublisher_EmptyQueue(t *testing.T) {
+	pub := repository.NewSQSEventPublisher(nil, config.Config{SQSQueueURL: ""})
 	err := pub.Publish(context.Background(), map[string]string{"foo": "bar"})
 	if err != nil {
-		t.Fatalf("expected nil error when topic is empty, got %v", err)
+		t.Fatalf("expected nil error when queue URL is empty, got %v", err)
 	}
 }
