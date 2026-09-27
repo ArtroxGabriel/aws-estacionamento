@@ -28,9 +28,9 @@ worker/
 - Polling contínuo via SQS com `WaitTimeSeconds=20`.
 - Imagem temporária tratada em memória (`BytesIO`) ou com remoção garantida após leitura.
 - Após sucesso:
-  1. `UPDATE sessoes SET placa = :placa, status = 'ESTACIONADO' WHERE id = :id` no RDS.
-  2. `DECR vagas:disponiveis` no Redis.
-  3. `PutItem` com ação `PROCESSAMENTO_OCR` no DynamoDB.
+  1. `UPDATE sessions SET license_plate = :license_plate, status = 'PARKED' WHERE id = :id` no RDS.
+  2. `DECR spots:available` no Redis.
+  3. `PutItem` com ação `OCR_PROCESSING` no DynamoDB.
   4. `DeleteMessage` na fila SQS.
 
 ## Changelog

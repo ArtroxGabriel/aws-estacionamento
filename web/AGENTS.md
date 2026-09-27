@@ -26,7 +26,7 @@ web/
 - `npm test`: Testes de componentes
 
 ## Architecture Conventions
-- Integração exclusiva com a API Go (`POST /entradas`, `GET /vagas/disponiveis`, `POST /saidas/:id/pagar`).
+- Integração exclusiva com a API Go (`POST /entries`, `GET /spots/available`, `POST /exits/{id}/pay`, `GET /health`).
 - Polling ou refresh otimizado para manter o contador de vagas sincronizado com o Redis.
 
 ## Changelog
