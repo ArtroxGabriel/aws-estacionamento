@@ -12,10 +12,12 @@ type SessionRepository interface {
 	Create(ctx context.Context, session *model.Session) error
 	GetByID(ctx context.Context, id string) (*model.Session, error)
 	MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error)
+	CountActive(ctx context.Context) (int64, error)
 }
 
 type SpotsRepository interface {
-	GetAvailable(ctx context.Context, defaultCapacity int) (int64, error)
+	GetAvailable(ctx context.Context) (int64, error)
+	SetAvailable(ctx context.Context, count int64) error
 	Increment(ctx context.Context) (int64, error)
 	Decrement(ctx context.Context) (int64, error)
 }

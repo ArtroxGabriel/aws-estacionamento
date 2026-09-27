@@ -50,16 +50,28 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	return s, nil
 }
 
+func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
+	var count int64
+	for _, s := range f.sessions {
+		if s.Status == "PROCESSING" || s.Status == "PARKED" {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // FakeSpotsRepo implements SpotsRepository for testing
 type FakeSpotsRepo struct {
 	spots int64
 }
 
-func (f *FakeSpotsRepo) GetAvailable(ctx context.Context, defaultCap int) (int64, error) {
-	if f.spots == 0 {
-		f.spots = int64(defaultCap)
-	}
+func (f *FakeSpotsRepo) GetAvailable(ctx context.Context) (int64, error) {
 	return f.spots, nil
+}
+
+func (f *FakeSpotsRepo) SetAvailable(ctx context.Context, count int64) error {
+	f.spots = count
+	return nil
 }
 
 func (f *FakeSpotsRepo) Increment(ctx context.Context) (int64, error) {
@@ -210,7 +222,7 @@ func TestCreateEntry_Success(t *testing.T) {
 	}
 
 	if len(publisher.published) == 0 {
-		t.Fatalf("expected event to be published to SNS")
+		t.Fatalf("expected event to be published to SQS")
 	}
 
 	if len(audit.events) == 0 {

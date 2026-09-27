@@ -16,10 +16,12 @@ func NewRedisSpotsRepo(client *redis.Client) *RedisSpotsRepo {
 	return &RedisSpotsRepo{client: client}
 }
 
-func (r *RedisSpotsRepo) GetAvailable(ctx context.Context, defaultCapacity int) (int64, error) {
-	const key = "spots:available"
-	_ = r.client.SetNX(ctx, key, defaultCapacity, 0).Err()
-	return r.client.Get(ctx, key).Int64()
+func (r *RedisSpotsRepo) GetAvailable(ctx context.Context) (int64, error) {
+	return r.client.Get(ctx, "spots:available").Int64()
+}
+
+func (r *RedisSpotsRepo) SetAvailable(ctx context.Context, count int64) error {
+	return r.client.Set(ctx, "spots:available", count, 0).Err()
 }
 
 func (r *RedisSpotsRepo) Increment(ctx context.Context) (int64, error) {

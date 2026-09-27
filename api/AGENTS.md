@@ -3,7 +3,7 @@
 ## Project Overview
 - API RESTful em Go que gerencia o ciclo de vida de veículos e vagas no estacionamento.
 - Implementa os endpoints:
-  - `POST /entries`: Recebe foto, salva no S3, cria sessão no RDS com status `PROCESSING`, grava auditoria no DynamoDB e publica no SNS.
+  - `POST /entries`: Recebe foto, salva no S3, cria sessão no RDS com status `PROCESSING`, grava auditoria no DynamoDB e publica na fila SQS.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
   - `POST /exits/{id}/pay`: Registra saída com tarifa fixa, atualiza status para `PAID` no RDS, incrementa vagas no Redis e grava auditoria no DynamoDB.
   - `GET /health`: Healthcheck simples da aplicação (`{"status":"UP"}`).
@@ -11,7 +11,7 @@
 ## Tech Stack
 - **Linguagem**: Go 1.27
 - **Injeção de Dependências**: `go.uber.org/fx` (Uber Fx) com gerenciamento de ciclo de vida (`fx.Lifecycle`)
-- **AWS SDK**: `aws-sdk-go-v2` (S3, SNS, DynamoDB)
+- **AWS SDK**: `aws-sdk-go-v2` (S3, SQS, DynamoDB)
 - **Bancos**: PostgreSQL driver (`lib/pq`), Redis client (`go-redis/v9`)
 - **Migrações**: `golang-migrate/migrate` via `embed.FS` nativo
 
@@ -37,7 +37,7 @@ api/
 │   │   ├── postgres.go                 # PostgresSessionRepo (RDS)
 │   │   ├── redis.go                    # RedisSpotsRepo (ElastiCache)
 │   │   ├── s3.go                       # S3BlobStorage (S3)
-│   │   ├── sns.go                      # SNSEventPublisher (SNS)
+│   │   ├── sqs.go                      # SQSEventPublisher (SQS)
 │   │   ├── dynamodb.go                 # DynamoDBAuditLogger (DynamoDB)
 │   │   ├── migrate.go                  # Migrações via embed.FS (golang-migrate)
 │   │   ├── migrations/                 # Scripts SQL de migração
@@ -60,7 +60,7 @@ api/
 ## Architecture Conventions
 - **Status da Sessão**: `PROCESSING` (na entrada) -> `PARKED` (definido pelo worker após OCR) -> `PAID` (após cobrança na saída).
 - **Logs no DynamoDB**: Criar registros com chave única contendo timestamp, ação (`ENTRY`, `EXIT_PAYMENT`) e payload resumido.
-- **Redis**: Chave `spots:available` operada via comandos atômicos (`INCR`, `GET`, `SETNX`).
+- **Redis & Anti-Overbooking**: Chave `spots:available` lida em alta frequência. Se o Redis falhar ou a chave sumir (reboot no meio do dia), **a API nunca assume o default 50**: consulta o banco relacional (`totalSpots - count(ativas)`), responde a contagem precisa e reidrata o Redis com `SET spots:available`.
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog

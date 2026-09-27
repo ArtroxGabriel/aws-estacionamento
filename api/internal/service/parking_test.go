@@ -52,20 +52,41 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	return s, nil
 }
 
+func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
+	if f.shouldErr {
+		return 0, errors.New("db error")
+	}
+	var count int64
+	for _, s := range f.sessions {
+		if s.Status == "PROCESSING" || s.Status == "PARKED" {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // FakeSpotsRepo implements repository.SpotsRepository
 type FakeSpotsRepo struct {
 	spots     int64
 	shouldErr bool
 }
 
-func (f *FakeSpotsRepo) GetAvailable(ctx context.Context, defaultCap int) (int64, error) {
+func (f *FakeSpotsRepo) GetAvailable(ctx context.Context) (int64, error) {
 	if f.shouldErr {
 		return 0, errors.New("redis error")
 	}
 	if f.spots == 0 {
-		f.spots = int64(defaultCap)
+		return 0, errors.New("key missing in redis")
 	}
 	return f.spots, nil
+}
+
+func (f *FakeSpotsRepo) SetAvailable(ctx context.Context, count int64) error {
+	if f.shouldErr {
+		return errors.New("redis error")
+	}
+	f.spots = count
+	return nil
 }
 
 func (f *FakeSpotsRepo) Increment(ctx context.Context) (int64, error) {
@@ -159,14 +180,43 @@ func TestGetAvailableSpots_Success(t *testing.T) {
 }
 
 func TestGetAvailableSpots_Error(t *testing.T) {
-	repo := &FakeSessionRepo{sessions: make(map[string]*model.Session)}
+	repo := &FakeSessionRepo{sessions: make(map[string]*model.Session), shouldErr: true}
 	spots := &FakeSpotsRepo{shouldErr: true}
 	cfg := config.Config{TotalParkingSpots: 50}
 	svc := service.NewParkingService(repo, spots, nil, nil, nil, cfg)
 
 	_, err := svc.GetAvailableSpots(context.Background())
 	if err == nil {
-		t.Fatal("expected error from redis, got nil")
+		t.Fatal("expected error when both redis and db fail, got nil")
+	}
+}
+
+func TestGetAvailableSpots_RedisRecovery(t *testing.T) {
+	repo := &FakeSessionRepo{sessions: make(map[string]*model.Session)}
+	// 12 active cars in parking lot
+	for i := 0; i < 10; i++ {
+		id := string(rune('a' + i))
+		repo.sessions[id] = &model.Session{ID: id, Status: "PARKED"}
+	}
+	repo.sessions["proc1"] = &model.Session{ID: "proc1", Status: "PROCESSING"}
+	repo.sessions["proc2"] = &model.Session{ID: "proc2", Status: "PROCESSING"}
+	repo.sessions["paid1"] = &model.Session{ID: "paid1", Status: "PAID"} // should not count
+
+	// Redis fell/rebooted (empty/missing key)
+	spots := &FakeSpotsRepo{spots: 0}
+	cfg := config.Config{TotalParkingSpots: 50}
+	svc := service.NewParkingService(repo, spots, nil, nil, nil, cfg)
+
+	// Redis returns error -> Service verifies DB -> 50 - 12 = 38 -> Updates Redis with 38
+	available, err := svc.GetAvailableSpots(context.Background())
+	if err != nil {
+		t.Fatalf("expected successful recovery from DB, got %v", err)
+	}
+	if available != 38 {
+		t.Fatalf("expected 38 recovered spots, got %d", available)
+	}
+	if spots.spots != 38 {
+		t.Fatalf("expected redis to be updated with 38, got %d", spots.spots)
 	}
 }
 

@@ -77,3 +77,10 @@ func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedA
 	}
 	return &s, nil
 }
+
+func (r *PostgresSessionRepo) CountActive(ctx context.Context) (int64, error) {
+	query := `SELECT COUNT(*) FROM sessions WHERE status IN ('PROCESSING', 'PARKED')`
+	var count int64
+	err := r.db.QueryRowContext(ctx, query).Scan(&count)
+	return count, err
+}

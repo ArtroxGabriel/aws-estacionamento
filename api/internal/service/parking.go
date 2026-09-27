@@ -48,7 +48,25 @@ func NewParkingService(
 }
 
 func (s *ParkingService) GetAvailableSpots(ctx context.Context) (int64, error) {
-	return s.spotsRepo.GetAvailable(ctx, s.totalSpots)
+	spots, err := s.spotsRepo.GetAvailable(ctx)
+	if err == nil {
+		return spots, nil
+	}
+
+	// Redis falhou ou reiniciou (chave inexistente). Reconcilia com o banco relacional para evitar overbooking.
+	activeCount, dbErr := s.sessionRepo.CountActive(ctx)
+	if dbErr != nil {
+		return 0, fmt.Errorf("failed to recover spot count from database: %w", dbErr)
+	}
+
+	calculated := int64(s.totalSpots) - activeCount
+	if calculated < 0 {
+		calculated = 0
+	}
+
+	_ = s.spotsRepo.SetAvailable(ctx, calculated)
+
+	return calculated, nil
 }
 
 func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, photoBody io.Reader, contentType string) (*model.Session, error) {
