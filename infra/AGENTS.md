@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-- Gerencia a infraestrutura como código (IaC) via OpenTofu para os 6 serviços centrais da AWS (S3, SNS/SQS, DynamoDB, RDS, ElastiCache) e provê o ambiente de emulação local via Docker Compose com Floci.
+- Gerencia a infraestrutura como código (IaC) via OpenTofu para os 6 serviços centrais da AWS (S3, SQS, DynamoDB, RDS, ElastiCache, EC2) e provê o ambiente de emulação local via Docker Compose com Floci.
 - RDS (PostgreSQL) e ElastiCache (Redis) são provisionados via OpenTofu gerenciados pelo Floci localmente e pela AWS Academy em nuvem, eliminando containers dedicados de banco no Compose.
 - Prepara a infraestrutura para a **Parte 2** com Application Load Balancer e Auto Scaling Group (1 a 3 réplicas).
 
@@ -16,8 +16,8 @@
 ```text
 infra/
 ├── docker-compose.yaml     # Floci (4566, proxy RDS 5432-5440, proxy ElastiCache 6379-6399)
-├── provider.tf             # Provider AWS com chaveamento para Floci (S3, SNS, SQS, DynamoDB, RDS, ElastiCache)
-├── main.tf                 # Buckets S3, Tópico SNS, Fila SQS, DynamoDB, RDS PostgreSQL e ElastiCache Redis
+├── provider.tf             # Provider AWS com chaveamento para Floci (S3, SQS, DynamoDB, RDS, ElastiCache)
+├── main.tf                 # Buckets S3, Fila SQS, DynamoDB, RDS PostgreSQL e ElastiCache Redis
 ├── outputs.tf              # ARNs e URLs dos recursos provisionados
 └── autoscaling.tf          # (Parte 2) Launch Template, ASG, ALB e CloudWatch Alarms
 ```
