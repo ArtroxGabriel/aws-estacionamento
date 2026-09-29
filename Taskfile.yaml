@@ -127,12 +127,16 @@ tasks:
     dir: "{{.WORKER_DIR}}"
     env:
       AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: mock_key
       AWS_SECRET_ACCESS_KEY: mock_secret
       SQS_QUEUE_URL: http://localhost:4566/000000000000/ocr-processamento-fila
       DATABASE_URL: postgresql://app_user:app_password@localhost:5432/estacionamento
+      REDIS_URL: redis://localhost:6379
+      S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
+      DYNAMODB_TABLE_NAME: AuditoriaEstacionamento
     cmds:
-      - python3 worker.py
+      - uv run python worker.py
 
   dev:web:
     desc: Inicia o servidor de desenvolvimento do React/Vite

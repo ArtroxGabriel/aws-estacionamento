@@ -10,14 +10,14 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
 
 ## Tasks
 
-- [ ] 1. Set up the `uv` project scaffold and package structure
+- [x] 1. Set up the `uv` project scaffold and package structure
   - Create `worker/pyproject.toml` for Python 3.14 managed by `uv` with runtime deps (`boto3`, `pytesseract`, `Pillow`, `psycopg`, `redis`) and dev deps (`pytest`, `hypothesis`, `moto`, `ruff`)
   - Configure `pytest` (test path `tests/`) and `ruff` (lint + format) in `pyproject.toml`
   - Create package directories with `__init__.py`: `worker/ocr/`, `worker/storage/`, and `tests/` mirroring the module layout
   - _Requirements: 14.1_
 
-- [ ] 2. Implement configuration loading and validation (pure)
-  - [ ] 2.1 Implement `Config` dataclass and `load_config` in `worker/config.py`
+- [x] 2. Implement configuration loading and validation (pure)
+  - [x] 2.1 Implement `Config` dataclass and `load_config` in `worker/config.py`
     - Define frozen `Config` dataclass with all fields from the design (endpoint, region, credentials, SQS/DB/Redis URLs, bucket, table)
     - Read all env vars listed in Req 14.1; treat `AWS_ENDPOINT_URL` as optional (absent/empty => default endpoints)
     - Raise `ConfigError` naming **every** missing/empty required var (collected, not first-fail) and preventing loop start with a non-zero startup path
@@ -41,8 +41,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Cover `AWS_ENDPOINT_URL` optional, malformed URL/scheme rejection, and endpoint-empty-and-region-empty abort
     - _Requirements: 14.3, 14.4, 15.2, 15.3, 15.4_
 
-- [ ] 3. Implement license plate normalization (pure)
-  - [ ] 3.1 Implement `Plate_Normalizer` in `worker/ocr/clean.py`
+- [x] 3. Implement license plate normalization (pure)
+  - [x] 3.1 Implement `Plate_Normalizer` in `worker/ocr/clean.py`
     - Define `PlateResult` dataclass and the Mercosul (`ABC1D23`) and Old_Format (`ABC1234`, hyphen stripped) regexes
     - `normalize(raw)`: strip non-alphanumeric, uppercase letters, cap at 7 chars, match a format; return canonical plate or an unreadable result with `plate=None` (never padded/partial)
     - Ensure idempotence on already-valid plates
@@ -66,8 +66,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - **Validates: Requirements 5.4, 5.5**
     - _Requirements: 5.4, 5.5_
 
-- [ ] 4. Implement OCR processing (pure over image bytes)
-  - [ ] 4.1 Implement `OCR_Processor` in `worker/ocr/processor.py`
+- [x] 4. Implement OCR processing (pure over image bytes)
+  - [x] 4.1 Implement `OCR_Processor` in `worker/ocr/processor.py`
     - Define `OcrResult` dataclass and `extract_text(image_bytes, timeout_s=10.0)`
     - Apply rescale -> grayscale -> binary threshold (in that order) then Tesseract; return raw text on success
     - Return typed errors (never raise for domain outcomes): `decode` on undecodable bytes (skip Tesseract), `no_text` on empty OCR output, `timeout` when >10s
@@ -77,8 +77,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Assert transform order, fixture image -> known text, undecodable bytes skip Tesseract, empty-output error, timeout abort
     - _Requirements: 4.1, 4.2, 4.4, 4.5, 4.6_
 
-- [ ] 5. Implement message parsing and validation (pure)
-  - [ ] 5.1 Implement `Session_Message` parse/validate in `worker/worker.py`
+- [x] 5. Implement message parsing and validation (pure)
+  - [x] 5.1 Implement `Session_Message` parse/validate in `worker/worker.py`
     - Parse the raw SQS body as JSON without unwrapping any SNS envelope; extract `session_id` and `s3_key` as UTF-8 strings
     - Validate: `session_id` exactly 32 hex chars, `s3_key` non-empty and <= 1024 chars; classify every other body as poison/invalid with a specific reason, leaving the original body unmodified
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
@@ -89,11 +89,11 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6**
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
 
-- [ ] 6. Checkpoint - Ensure all pure-layer tests pass
+- [x] 6. Checkpoint - Ensure all pure-layer tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Implement the AWS client factory
-  - [ ] 7.1 Implement `worker/storage/clients.py`
+- [x] 7. Implement the AWS client factory
+  - [x] 7.1 Implement `worker/storage/clients.py`
     - `build_boto3_session(cfg)` plus `s3_client`/`sqs_client`/`dynamodb_client` applying identical endpoint resolution (`cfg.aws_endpoint_url or None`) to every client
     - _Requirements: 15.1, 15.5_
 
@@ -103,8 +103,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - **Validates: Requirements 15.5**
     - _Requirements: 15.1, 15.5_
 
-- [ ] 8. Implement the S3 connector
-  - [ ] 8.1 Implement `S3_Connector` in `worker/storage/s3_store.py`
+- [x] 8. Implement the S3 connector
+  - [x] 8.1 Implement `S3_Connector` in `worker/storage/s3_store.py`
     - `download(key)` within 10s, cap at 10MB via `ContentLength` check + bounded read, 3 retries on transient errors
     - Raise `RetrievalError('not_found'|'too_large'|'invalid_params'|'unavailable')`; guard empty/absent params before download; discard buffer on overflow; release content on success or failure
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
@@ -113,8 +113,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Cover invalid-params guard, near-limit buffer, oversize abort + release, 3-retry exhaustion, buffer release on success/failure, not-found
     - _Requirements: 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
-- [ ] 9. Implement the Session repository (RDS)
-  - [ ] 9.1 Implement `Session_Repository` in `worker/storage/session_repo.py`
+- [x] 9. Implement the Session repository (RDS)
+  - [x] 9.1 Implement `Session_Repository` in `worker/storage/session_repo.py`
     - `SessionRow` mapping the exact `sessions` schema; read `DATABASE_URL`; `get(session_id)` returns row or None
     - `mark_parked(session_id, plate)`: conditional `UPDATE sessions SET license_plate=%s, status='PARKED' WHERE id=%s AND status='PROCESSING'`; return True iff exactly one row updated (the idempotency gate); leave record unchanged on connection/query error
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 11.5_
@@ -123,8 +123,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Cover not-found path, injected DB error leaves record unchanged, non-PROCESSING status yields no update, `id`/`status` mapping to the exact schema
     - _Requirements: 6.3, 6.5, 6.6_
 
-- [ ] 10. Implement the Spots counter (Redis)
-  - [ ] 10.1 Implement `Spots_Counter` in `worker/storage/spots.py`
+- [x] 10. Implement the Spots counter (Redis)
+  - [x] 10.1 Implement `Spots_Counter` in `worker/storage/spots.py`
     - `decrement()`: atomic `DECR spots:available` within 500ms; on result `< 0`, `SET spots:available 0` and emit underflow error; retry up to 3x on connection error with message unacknowledged
     - Read Redis target from `REDIS_URL`; fail startup if absent/empty
     - _Requirements: 7.1, 7.2, 7.3, 7.5, 7.6_
@@ -133,8 +133,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Cover underflow clamp at 0 + error, 3-retry on connection error, exact key `spots:available`
     - _Requirements: 7.5, 7.6_
 
-- [ ] 11. Implement the Audit logger (DynamoDB)
-  - [ ] 11.1 Implement `Audit_Logger` in `worker/storage/audit.py`
+- [x] 11. Implement the Audit logger (DynamoDB)
+  - [x] 11.1 Implement `Audit_Logger` in `worker/storage/audit.py`
     - `log_ocr(session_id, plate)`: PutItem with `action=OCR_PROCESSING`, `id=f'{session_id}#{time.time_ns()}'`, `entity_id=session_id`, `timestamp` RFC3339Nano, `details={'license_plate','session_id'}`; conditional put on `attribute_not_exists(id)`; 3 retries
     - `log_poison(session_id, reason)` for poison classification records; read `DYNAMODB_TABLE_NAME`, fail init if missing
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 12.1_
@@ -149,11 +149,11 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Assert `id` format `<session_id>#<timestamp_nano>`, details contain plate + session_id, retry-then-error path
     - _Requirements: 8.2, 8.3, 8.5_
 
-- [ ] 12. Checkpoint - Ensure all connector tests pass
+- [x] 12. Checkpoint - Ensure all connector tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 13. Implement the Poller orchestration and outcome mapping
-  - [ ] 13.1 Implement `Poller` core in `worker/worker.py`
+- [x] 13. Implement the Poller orchestration and outcome mapping
+  - [x] 13.1 Implement `Poller` core in `worker/worker.py`
     - Constructor injecting cfg + all connectors + ocr + normalizer; `Outcome` enum (`DELETE`/`RETAIN`/`POISON`)
     - `_handle(msg)`: parse/validate -> session lookup -> idempotency branch (PARKED/PAID/not-found => DELETE; lookup failure => RETAIN) -> S3 download -> OCR -> normalize -> ordered side effects (RDS conditional UPDATE -> Redis DECR only when `mark_parked()==True` -> DynamoDB PutItem -> SQS DeleteMessage)
     - Map every error per the design taxonomy: fail safe toward RETAIN; unreadable plate leaves status PROCESSING and does not delete
@@ -177,8 +177,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - **Validates: Requirements 13.3**
     - _Requirements: 13.3_
 
-- [ ] 14. Implement poison classification and receive-count handling
-  - [ ] 14.1 Implement poison classification in `worker/worker.py`
+- [x] 14. Implement poison classification and receive-count handling
+  - [x] 14.1 Implement poison classification in `worker/worker.py`
     - `_receive_count(msg)` reads SQS system attribute `ApproximateReceiveCount`; classify as `POISON` when it exceeds the configured max receive count (3)
     - On poison: record reason via `Audit_Logger.log_poison` (retry up to 3x, then continue), rely on SQS redrive to move the message; continue the loop within 1s without terminating
     - _Requirements: 10.4, 12.1, 12.2, 12.3, 12.4, 12.5_
@@ -189,8 +189,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - **Validates: Requirements 10.4, 12.2**
     - _Requirements: 10.4, 12.2_
 
-- [ ] 15. Implement the polling loop, resilience, and graceful shutdown
-  - [ ] 15.1 Implement `run()`, `_receive()`, and signal handling in `worker/worker.py`
+- [x] 15. Implement the polling loop, resilience, and graceful shutdown
+  - [x] 15.1 Implement `run()`, `_receive()`, and signal handling in `worker/worker.py`
     - `_receive()` long-polls with `WaitTimeSeconds=20`, max 10 messages; empty receive re-polls within 1s; process each message sequentially
     - On receive connection/authorization error, back off <=30s and continue without terminating; per-message exceptions are caught, logged with failed step + dependency, loop continues within 1s
     - `request_stop` handles SIGTERM/SIGINT: stop new receives within 1s, finish in-flight within a 30s bound (abandon without delete if exceeded), close RDS/Redis/AWS connections continuing past individual close failures, return exit code 0 iff all in-flight completed else non-zero
@@ -200,8 +200,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Cover empty-receive re-poll, receive-error retry-and-continue, signal stops new receives, in-flight completion within 30s, abandon-on-timeout, connection-close resilience and exit code
     - _Requirements: 1.2, 1.5, 12.4, 13.4, 16.1, 16.2, 16.3, 16.4, 16.5_
 
-- [ ] 16. Wire the entrypoint together
-  - [ ] 16.1 Implement `worker/worker.py` `__main__` startup
+- [x] 16. Wire the entrypoint together
+  - [x] 16.1 Implement `worker/worker.py` `__main__` startup
     - Load config (fail fast, non-zero exit on `ConfigError`), build clients via the factory, construct connectors + OCR + normalizer, install signal handlers, and run the Poller returning its exit code
     - Ensure no orphaned modules: every component from tasks 2–15 is constructed and injected here
     - _Requirements: 1.7, 6.2, 7.3, 8.6, 14.2, 16.4_
@@ -210,12 +210,12 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Assert all env vars read (Req 14.1), queue configured with 300s visibility expectation surfaced (Req 9.4), and startup aborts on missing required config
     - _Requirements: 14.1, 9.4_
 
-- [ ] 17. Update tooling and entrypoint integration
-  - [ ] 17.1 Update the `dev:worker` Taskfile command for uv
+- [x] 17. Update tooling and entrypoint integration
+  - [x] 17.1 Update the `dev:worker` Taskfile command for uv
     - Change `worker/` `dev:worker` command from `python3 worker.py` to `uv run python worker.py`, keeping the existing local env vars; add missing `REDIS_URL`, `S3_BUCKET_NAME`, and `DYNAMODB_TABLE_NAME` env entries to match the loaded config
     - _Requirements: 14.1, 1.6, 6.2, 7.2, 8.6_
 
-- [ ] 18. Final checkpoint - Ensure all tests pass
+- [x] 18. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass with `uv run pytest`, run `uv run ruff check .`, ask the user if questions arise.
 
 ## Notes
