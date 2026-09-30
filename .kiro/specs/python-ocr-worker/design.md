@@ -298,7 +298,7 @@ class SpotsCounter:
         rolled back (Req 13.3)."""
 ```
 
-Underflow handling: after `DECR`, if the returned value is `< 0`, the counter is reset to `0` (`SET spots:available 0`) and an underflow error is emitted (Req 7.5). Because the DECR is gated behind `parking_transition` yielding `True`, it fires exactly once per session.
+Absent key: `DECR`/`INCR` run as Lua scripts that do nothing when `spots:available` does not exist (Req 7.7), so after a Redis restart the API rebuilds the count from RDS. Underflow handling: after `DECR`, if the returned value is `< 0`, the counter is reset to `0` (`SET spots:available 0`) and an underflow error is emitted (Req 7.5). Because the DECR is gated behind `parking_transition` yielding `True`, it fires exactly once per session.
 
 ### Audit_Logger (`storage/audit.py`)
 
@@ -468,7 +468,7 @@ Errors are modeled as explicit typed results/exceptions at the connector boundar
 ### Loop resilience and shutdown
 
 - Any per-message exception is caught by the loop, logged with the failed step and dependency, and the loop continues to the next message within 1 s (Req 12.4, 13.4).
-- On `SIGTERM`/`SIGINT`, the loop sets a stop flag, stops requesting new messages within 1 s (Req 16.1), completes or fails the in-flight message within a 30 s bound (Req 16.2), abandons without deleting if the bound is exceeded (Req 16.3), then closes RDS/Redis/AWS connections — continuing past any individual close failure (Req 16.5) — and exits `0` if all in-flight work completed, non-zero otherwise (Req 16.4).
+- On `SIGTERM`/`SIGINT` the handler sets a stop flag and, only while the loop is in an interruptible wait (SQS long poll or receive back-off), raises `_Interrupted` (a `BaseException`, so botocore's retry handlers cannot swallow it) to end the wait at once (Req 16.1). A message being processed is never interrupted (Req 16.2); the batch's remaining messages are released with `ChangeMessageVisibilityBatch(VisibilityTimeout=0)` (Req 16.3); connections are closed, continuing past individual close failures, and the exit code is 0 (Req 16.4, 16.5). The container runs `tini` as PID 1 so an early SIGTERM is not dropped.
 
 ## Testing Strategy
 

@@ -61,16 +61,20 @@ class FakeSessionRepository:
 
 
 class FakeSpotsCounter:
-    def __init__(self, value: int = 10) -> None:
+    """``value=None`` models the ``spots:available`` key being absent."""
+
+    def __init__(self, value: int | None = 10) -> None:
         self.value = value
         self.fail_decrement = 0
         self.decrements = 0
         self.increments = 0
 
-    def decrement(self) -> int:
+    def decrement(self) -> int | None:
         if self.fail_decrement:
             self.fail_decrement -= 1
             raise SpotsDecrementError(3)
+        if self.value is None:
+            return None
         self.decrements += 1
         self.value -= 1
         if self.value < 0:
@@ -79,7 +83,9 @@ class FakeSpotsCounter:
             raise SpotsUnderflowError(observed)
         return self.value
 
-    def increment(self) -> int:
+    def increment(self) -> int | None:
+        if self.value is None:
+            return None
         self.increments += 1
         self.value += 1
         return self.value
@@ -109,9 +115,25 @@ class FakeS3:
 class FakeSQS:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.released: list[str] = []
+        self.receives = 0
+        # Each receive pops the next batch; ``on_receive`` runs inside the call
+        # (e.g. to deliver a stop signal while the long poll is blocked).
+        self.batches: list[list[dict]] = []
+        self.on_receive = None
+
+    def receive_message(self, **kwargs) -> dict:
+        self.receives += 1
+        if self.on_receive is not None:
+            self.on_receive()
+        return {"Messages": self.batches.pop(0) if self.batches else []}
 
     def delete_message(self, QueueUrl: str, ReceiptHandle: str) -> None:  # noqa: N803
         self.deleted.append(ReceiptHandle)
+
+    def change_message_visibility_batch(self, QueueUrl: str, Entries: list[dict]) -> None:  # noqa: N803
+        assert all(e["VisibilityTimeout"] == 0 for e in Entries)
+        self.released.extend(e["ReceiptHandle"] for e in Entries)
 
 
 BASE_ENV = {

@@ -61,15 +61,21 @@ MAX_MESSAGES = 10
 # never terminating (Req 1.5). The back-off is capped at 30 s.
 MAX_RECEIVE_BACKOFF_SECONDS = 30
 
-# Graceful shutdown bound (Req 16.2, 16.3): after a stop signal, the in-flight
-# message must finish within this many seconds or be abandoned (no delete).
-SHUTDOWN_TIMEOUT_SECONDS = 30
-
 # The queue visibility timeout the Worker expects while a message is in flight
 # (Req 9.4). This is an infra-configured value the Worker documents rather than
 # sets; it bounds how long a retained/abandoned message stays invisible before
 # redelivery.
 VISIBILITY_TIMEOUT_SECONDS = 300
+
+
+class _Interrupted(BaseException):
+    """Raised by the stop signal handler to cut a blocking wait short.
+
+    Only raised while the loop sits in an interruptible wait (SQS long poll or
+    receive back-off), never while a message is being processed. It derives
+    from BaseException so botocore's retry handlers, which catch Exception,
+    cannot swallow it.
+    """
 
 
 @dataclass(frozen=True)
@@ -248,15 +254,11 @@ class Poller:
 
         # --- Loop / shutdown state ---------------------------------------
         # ``request_stop`` sets this flag from a signal handler; the loop reads
-        # it before every receive so new receives stop within 1 s (Req 16.1).
+        # it before every receive and before every message (Req 16.1).
         self._stop = False
-        # Wall-clock deadline for the in-flight message once a stop is
-        # requested; ``None`` while no shutdown is pending (Req 16.2, 16.3).
-        self._shutdown_deadline: float | None = None
-        # Set to True if a stop arrives while a message is mid-flight and that
-        # message could not finish within the bound — it is abandoned without
-        # deletion, which forces a non-zero exit code (Req 16.3, 16.4).
-        self._abandoned = False
+        # True while the loop sits in a wait that the stop signal may cut short
+        # (the SQS long poll and the receive back-off).
+        self._interruptible = False
         # Consecutive receive back-off, doubled on each connection/auth error
         # and capped at MAX_RECEIVE_BACKOFF_SECONDS (Req 1.5).
         self._receive_backoff = 1.0
@@ -472,8 +474,10 @@ class Poller:
 
                 step = "Redis"
                 try:
-                    self._spots.decrement()
-                    decremented = True
+                    # None: the counter key is absent (e.g. Redis restarted);
+                    # the API rebuilds it from RDS, which will count this
+                    # session once the transaction commits.
+                    decremented = self._spots.decrement() is not None
                 except SpotsUnderflowError as exc:
                     # Counter clamped at 0 (net effect zero): nothing to
                     # compensate, and the transition proceeds.
@@ -544,31 +548,27 @@ class Poller:
         :meth:`_receive` (Req 1.5), so this loop never terminates on transient
         failure — only on a stop signal.
 
-        On stop the loop stops requesting new messages (Req 16.1), finishes the
-        current message within the shutdown bound (Req 16.2), then closes all
-        connections and returns the exit code: ``0`` iff no in-flight message
-        was abandoned, non-zero otherwise (Req 16.4).
+        On stop (Req 16.1-16.4): a long poll or back-off in progress is cut short
+        at once; a message being processed runs to completion (every step has
+        its own timeout, and its RDS transaction makes an external kill safe);
+        messages of the batch not yet started are released back to the queue
+        with visibility 0 so another instance picks them up immediately instead
+        of after the 300 s visibility timeout. Then connections are closed and
+        the exit code is ``0``.
         """
 
         try:
             while not self._stop:
                 messages = self._receive()
-                for msg in messages:
-                    # Honor a stop that arrived mid-batch: stop starting new
-                    # messages within the bound so shutdown stays prompt.
-                    if self._stop and self._shutdown_expired():
-                        logger.warning(
-                            "shutdown bound exceeded; abandoning remaining "
-                            "%d message(s) in batch without deletion",
-                            len(messages),
-                        )
-                        self._abandoned = True
+                for index, msg in enumerate(messages):
+                    if self._stop:
+                        self._release(messages[index:])
                         break
                     self._process_one(msg)
         finally:
             self.close()
 
-        return 0 if not self._abandoned else 1
+        return 0
 
     def _process_one(self, msg: dict[str, Any]) -> None:
         """Handle one message and apply its SQS action, never raising.
@@ -612,22 +612,28 @@ class Poller:
             return []
 
         try:
-            response = self._sqs.receive_message(
-                QueueUrl=self._cfg.sqs_queue_url,
-                WaitTimeSeconds=RECEIVE_WAIT_SECONDS,
-                MaxNumberOfMessages=MAX_MESSAGES,
-                AttributeNames=["ApproximateReceiveCount"],
-            )
-        except Exception as exc:  # noqa: BLE001 - connection/auth error -> back off
-            backoff = self._receive_backoff
-            logger.error(
-                "SQS receive failed: dependency=SQS; backing off %.1fs: %s",
-                backoff,
-                exc,
-            )
-            self._sleep(backoff)
-            # Exponential back-off, capped so the loop retries within 30 s.
-            self._receive_backoff = min(backoff * 2, float(MAX_RECEIVE_BACKOFF_SECONDS))
+            try:
+                response = self._interruptibly(
+                    self._sqs.receive_message,
+                    QueueUrl=self._cfg.sqs_queue_url,
+                    WaitTimeSeconds=RECEIVE_WAIT_SECONDS,
+                    MaxNumberOfMessages=MAX_MESSAGES,
+                    AttributeNames=["ApproximateReceiveCount"],
+                )
+            except Exception as exc:  # noqa: BLE001 - connection/auth error -> back off
+                backoff = self._receive_backoff
+                logger.error(
+                    "SQS receive failed: dependency=SQS; backing off %.1fs: %s",
+                    backoff,
+                    exc,
+                )
+                # Exponential back-off, capped so the loop retries within 30 s.
+                self._receive_backoff = min(backoff * 2, float(MAX_RECEIVE_BACKOFF_SECONDS))
+                self._interruptibly(self._sleep, backoff)
+                return []
+        except _Interrupted:
+            # Messages a cut-short receive may have taken become visible again
+            # after the visibility timeout (at-least-once delivery).
             return []
 
         # Successful receive: reset the back-off window.
@@ -659,27 +665,58 @@ class Poller:
                 exc,
             )
 
+    def _release(self, messages: list[dict[str, Any]]) -> None:
+        """Make unprocessed messages visible again right away (best-effort).
+
+        On failure they simply reappear after the visibility timeout.
+        """
+
+        entries = [
+            {"Id": str(i), "ReceiptHandle": msg["ReceiptHandle"], "VisibilityTimeout": 0}
+            for i, msg in enumerate(messages)
+            if msg.get("ReceiptHandle")
+        ]
+        if not entries:
+            return
+        logger.info("stopping; releasing %d unprocessed message(s) to the queue", len(entries))
+        try:
+            self._sqs.change_message_visibility_batch(
+                QueueUrl=self._cfg.sqs_queue_url, Entries=entries
+            )
+        except Exception as exc:  # noqa: BLE001 - they come back after the timeout
+            logger.error(
+                "failed to release messages; they return after the visibility "
+                "timeout: dependency=SQS: %s",
+                exc,
+            )
+
+    def _interruptibly(self, call: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run a blocking wait that a stop signal may cut short (Req 16.1)."""
+
+        self._interruptible = True
+        try:
+            if self._stop:
+                raise _Interrupted
+            return call(*args, **kwargs)
+        finally:
+            self._interruptible = False
+
     def request_stop(self, signum: Any = None, frame: Any = None) -> None:
         """Signal handler for SIGTERM/SIGINT that requests a graceful stop.
 
-        Sets the stop flag so the loop stops requesting new messages within 1 s
-        (Req 16.1) and arms the shutdown deadline that bounds finishing the
-        in-flight message (Req 16.2). Safe to call more than once; the first
-        call fixes the deadline.
+        Sets the stop flag, which the loop checks before every receive and
+        every message (Req 16.1). If the loop is blocked in an interruptible
+        wait (SQS long poll or receive back-off), raises :class:`_Interrupted`
+        so the wait ends now instead of after up to 20-30 s. A message being
+        processed is never interrupted (Req 16.2). Safe to call more than once.
         """
 
         if not self._stop:
             logger.info("stop requested (signal=%s); draining", signum)
         self._stop = True
-        if self._shutdown_deadline is None:
-            self._shutdown_deadline = self._now() + SHUTDOWN_TIMEOUT_SECONDS
-
-    def _shutdown_expired(self) -> bool:
-        """Return True once the graceful-shutdown bound has elapsed (Req 16.3)."""
-
-        if self._shutdown_deadline is None:
-            return False
-        return self._now() >= self._shutdown_deadline
+        if self._interruptible:
+            self._interruptible = False
+            raise _Interrupted
 
     def close(self) -> None:
         """Close RDS/Redis/AWS connections, surviving individual failures.
@@ -710,11 +747,6 @@ class Poller:
                     dependency,
                     exc,
                 )
-
-    def _now(self) -> float:
-        """Monotonic clock for shutdown timing; overridable in tests."""
-
-        return time.monotonic()
 
     def _sleep(self, seconds: float) -> None:
         """Sleep for the receive back-off; overridable in tests."""

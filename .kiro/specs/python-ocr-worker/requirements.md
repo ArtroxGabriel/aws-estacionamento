@@ -124,6 +124,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 4. IF the same message is redelivered after its Session_Record already has status `PARKED`, THEN THE Spots_Counter SHALL NOT decrement the Spots_Key value again.
 5. IF the atomic decrement would reduce the Spots_Key value below zero, THEN THE Spots_Counter SHALL leave the Spots_Key value at zero and SHALL emit an error indicating a counter underflow condition.
 6. IF the Redis connection is unavailable when the decrement is attempted, THEN THE Spots_Counter SHALL retry the decrement operation up to 3 times with the message remaining unacknowledged, and SHALL emit an error indicating the decrement failed after retries when all attempts are exhausted.
+7. IF the Spots_Key does not exist when the decrement (or its compensating increment) is attempted, THEN THE Spots_Counter SHALL leave it absent, atomically on the Redis server, so that the API rebuilds the count from RDS instead of reading a counter the Worker created at zero.
 
 ### Requirement 8: Immutable Audit Logging in DynamoDB
 
@@ -228,8 +229,8 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Poller SHALL stop requesting new messages from the SQS_Queue within 1 second.
-2. WHILE a message is being processed at the time a termination signal is received, THE Poller SHALL complete or fail the current message before the process exits, subject to a graceful shutdown timeout of 30 seconds.
-3. IF the current message processing does not complete within the 30-second graceful shutdown timeout, THEN THE Worker SHALL abandon the in-flight message without deleting it from the SQS_Queue and proceed to exit, leaving the message available for redelivery after its visibility timeout expires.
-4. WHEN the Worker exits, THE Worker SHALL close its RDS, Redis, and AWS client connections, and SHALL exit with a success status code (0) if all in-flight messages completed, or a non-success status code if any message was abandoned.
+1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Poller SHALL stop requesting new messages and SHALL end an SQS long poll or receive back-off in progress within 1 second.
+2. WHILE a message is being processed at the time a termination signal is received, THE Poller SHALL complete or fail that message before the process exits, without interrupting it.
+3. WHEN a termination signal is received while a batch still has messages not yet started, THE Poller SHALL release those messages back to the SQS_Queue with a visibility timeout of 0 so another consumer receives them immediately.
+4. WHEN the Worker exits, THE Worker SHALL close its RDS, Redis, and AWS client connections and SHALL exit with a success status code (0). A process killed externally mid-message leaves the RDS transaction uncommitted and the message for redelivery.
 5. IF closing any RDS, Redis, or AWS client connection fails during exit, THEN THE Worker SHALL record an error indication identifying the failed connection and SHALL continue closing the remaining connections before exiting.

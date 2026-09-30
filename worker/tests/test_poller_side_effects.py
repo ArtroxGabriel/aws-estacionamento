@@ -129,3 +129,17 @@ def test_unreadable_plate_retains_and_keeps_processing():
     assert sessions.rows[SESSION_ID].status == "PROCESSING"
     assert sessions.rows[SESSION_ID].license_plate is None
     assert spots.decrements == 0
+
+
+def test_missing_counter_key_still_parks_without_touching_the_counter():
+    """After a Redis restart the key is absent until the API rebuilds it from
+    RDS; the Worker must neither create it nor compensate a DECR it never did."""
+    poller, sessions, spots, audit, sqs = make_poller(spots=FakeSpotsCounter(value=None))
+    audit.fail_ocr = 1
+
+    assert poller._handle(make_message(receive_count=1)) is Outcome.RETAIN
+    assert (spots.value, spots.increments) == (None, 0)
+
+    assert poller._handle(make_message(receive_count=2)) is Outcome.DELETE
+    assert sessions.rows[SESSION_ID].status == "PARKED"
+    assert spots.value is None

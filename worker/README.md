@@ -41,9 +41,10 @@ compartilha a rede do `floci_aws` (assim `localhost` é o emulador):
 docker build -t estacionamento-worker ./worker
 docker run -d --name ocr-worker --network container:floci_aws --env-file worker/floci.env estacionamento-worker
 docker logs -f ocr-worker
-docker stop -t 30 ocr-worker
+docker stop ocr-worker
 ```
 
-Use `-t 30` no `stop`: um long poll do SQS em andamento dura até 20 s.
+O `stop` encerra em menos de 1 s quando o worker está ocioso; uma mensagem em
+processamento termina antes, e as demais do lote voltam à fila na hora.
 Na AWS, passe as variáveis com os valores das saídas do OpenTofu e sem
 `AWS_ENDPOINT_URL`/chaves estáticas (o instance profile fornece as credenciais).

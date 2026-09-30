@@ -38,6 +38,21 @@ MAX_RETRIES = 3
 # The decrement must complete within 500 ms of the status update (Req 7.1).
 DECREMENT_TIMEOUT_SECONDS = 0.5
 
+# Lua scripts run atomically on the server. A missing key yields nil (None):
+# the counter is never created by the Worker, only by the API's rebuild from RDS.
+# The decrement returns the raw value (possibly -1) after clamping the key at 0,
+# so the caller can report the underflow (Req 7.5).
+_DECR_IF_EXISTS = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return nil end
+local value = redis.call('DECR', KEYS[1])
+if value < 0 then redis.call('SET', KEYS[1], 0) end
+return value
+"""
+_INCR_IF_EXISTS = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return nil end
+return redis.call('INCR', KEYS[1])
+"""
+
 
 class SpotsError(Exception):
     """Base error for available-spots counter operations."""
@@ -106,59 +121,62 @@ class SpotsCounter:
             socket_connect_timeout=DECREMENT_TIMEOUT_SECONDS,
         )
 
-    def decrement(self) -> int:
-        """Atomically ``DECR spots:available`` and return the resulting count.
+    def decrement(self) -> int | None:
+        """Atomically decrement ``spots:available`` if the key exists.
+
+        Runs a Lua script, atomic on the Redis server: when the key exists it
+        is decremented and clamped at zero; when it does not (e.g. Redis
+        restarted and nobody asked for the count yet) nothing is written. A
+        plain ``DECR`` would create the key as ``-1``, clamped to ``0``: the
+        API would then report a full lot and never rebuild the real count from
+        RDS, because it only does so when the key is missing.
 
         Retries up to ``max_retries`` times on a Redis connection/timeout error
-        with the message left unacknowledged (Req 7.6). When the DECR drives the
-        counter below zero, the key is reset to ``0`` and a
-        :class:`SpotsUnderflowError` is emitted (Req 7.5). The DECR is atomic on
-        the single-node Redis server, so no distributed lock is required.
+        with the message left unacknowledged (Req 7.6).
 
         Returns:
-            The clamped counter value (always ``>= 0``).
+            The counter value after the decrement (``>= 0``), or ``None`` when
+            the key is absent and nothing was changed.
 
         Raises:
             SpotsDecrementError: connection failed after all retries (Req 7.6).
-            SpotsUnderflowError: the decrement underflowed and was clamped
-                to zero (Req 7.5).
+            SpotsUnderflowError: the decrement went below zero and the key was
+                clamped to ``0`` (Req 7.5); the net effect is zero, so the
+                caller must not compensate it with an increment.
         """
 
-        value = self._with_retries(self._client.decr)
-
-        if value < 0:
-            # Underflow: restore the invariant (>= 0) then signal the
-            # condition. The net effect on the counter is zero, so the caller
-            # must not compensate it with an increment (Req 7.5).
-            self._client.set(SPOTS_KEY, 0)
+        value = self._with_retries(_DECR_IF_EXISTS)
+        if value is not None and value < 0:
             raise SpotsUnderflowError(value)
-
         return value
 
-    def increment(self) -> int:
-        """Atomically ``INCR spots:available`` and return the resulting count.
+    def increment(self) -> int | None:
+        """Atomically increment ``spots:available`` if the key exists.
 
         Used by the Poller to compensate a successful :meth:`decrement` whose
-        RDS transaction was rolled back afterwards, so the counter never drifts
-        from the committed session state. Retries like :meth:`decrement`.
+        RDS transaction was rolled back afterwards. If the key vanished in the
+        meantime, the API's rebuild from RDS already has the right count, so
+        nothing is written. Retries like :meth:`decrement`.
 
         Raises:
             SpotsDecrementError: connection failed after all retries.
         """
 
-        return self._with_retries(self._client.incr)
+        return self._with_retries(_INCR_IF_EXISTS)
 
-    def _with_retries(self, op) -> int:
-        """Run ``op(SPOTS_KEY)``, retrying on connection/timeout errors (Req 7.6)."""
+    def _with_retries(self, script: str) -> int | None:
+        """Run a Lua ``script`` on ``SPOTS_KEY``, retrying connection errors (Req 7.6)."""
 
         for attempt in range(1, self._max_retries + 1):
             try:
-                return int(op(SPOTS_KEY))
+                result = self._client.eval(script, 1, SPOTS_KEY)
             except (RedisConnectionError, RedisTimeoutError) as exc:
                 # Transient connectivity problem: retry, leaving the SQS message
                 # unacknowledged so it can be redelivered (Req 7.6).
                 if attempt == self._max_retries:
                     raise SpotsDecrementError(self._max_retries, exc) from exc
+                continue
+            return None if result is None else int(result)
         raise AssertionError("unreachable")
 
     def close(self) -> None:

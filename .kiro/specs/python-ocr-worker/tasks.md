@@ -232,7 +232,8 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
   - [x] 20.1 `tofu fmt`/`validate`/`apply` against Floci (2026-09-29): queue has `VisibilityTimeout=300` and the redrive policy; a probe message was received 3 times (counts 1, 2, 3) and then landed in the DLQ
   - [x] 20.2 End-to-end run against Floci with real photos (2026-09-30): API container -> S3 -> SQS -> worker container (Tesseract 5.5). A rendered Mercosul plate and a real 1920x1080 car photo of `FTR5I05` both park with the correct plate (~1 s); the pre-localization worker sent that photo to the DLQ with a `POISON_MESSAGE` audit after 3 deliveries, as designed. Also verified: idempotent redelivery, and DynamoDB failure -> RDS rollback + compensated counter
   - [ ] 20.3 Remaining optional tests: 2.3 (P11), 5.2 (P4), 8.2, 9.2, 10.2, 11.2/11.3, 13.3, 15.2, 16.2
-  - [ ] 20.4 Graceful shutdown gaps vs Req 16 (in-flight long poll up to 20 s, so `docker stop` needs `-t 30`; remaining batch keeps processing after SIGTERM). The container image runs `tini` as PID 1 so an early SIGTERM is not dropped; verified `docker stop -t 30` exits 0
+  - [x] 20.4 Graceful shutdown (2026-09-30): the stop signal ends an SQS long poll/back-off at once, the in-flight message completes, and unstarted batch messages are released with visibility 0. Verified: `docker stop` (default 10 s) now exits 0 in ~0.5 s. Tests: `tests/test_shutdown.py`
+  - [x] 20.6 Counter key absent (Redis restart): `DECR`/`INCR` via Lua only when `spots:available` exists; previously the Worker created it as -1 -> 0 and the API reported a full lot without rebuilding from RDS. Verified against Floci: key stays absent, API rebuilds 50 - 11 active = 39. Tests: `tests/test_spots.py`, `tests/test_poller_side_effects.py`
   - [x] 20.5 `worker/Dockerfile` (Python 3.14 slim + uv + Tesseract 5.5 + tini, non-root) and `worker/floci.env` for local runs
 
 ## Notes

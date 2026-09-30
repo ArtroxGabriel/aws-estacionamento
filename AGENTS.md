@@ -107,7 +107,6 @@ Configurar variáveis locais no `.env`:
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
 - **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
-- **Parar o Worker**: use `docker stop -t 30`; um long poll do SQS em andamento dura até 20 s.
 
 ## Changelog
 
