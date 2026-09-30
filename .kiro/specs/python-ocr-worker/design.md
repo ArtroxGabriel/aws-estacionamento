@@ -191,6 +191,16 @@ class Outcome(enum.Enum):
     POISON = "poison"      # exceeded receive count / malformed -> rely on SQS redrive
 ```
 
+### Plate localization (`ocr/locate.py`) — pure
+
+```python
+def find_mercosul_plates(image: Image.Image) -> list[Image.Image]:
+    """Crops of the character strip below each Mercosul blue band (OpenCV HSV
+    mask + shape filters), largest first, at most 3."""
+```
+
+Tesseract cannot read a plate that is a small part of a car photo, and a global threshold rarely separates it from the car body. The Mercosul blue band is found by color; the characters are the strip below it, whose height is a fixed fraction of the band width (plate 400 x 130 mm).
+
 ### OCR_Processor (`ocr/processor.py`) — pure
 
 ```python
@@ -199,10 +209,18 @@ class OcrResult:
     ok: bool
     raw_text: str | None
     error: str | None       # "decode" | "no_text" | "timeout"
+    mercosul: bool = False  # a Mercosul plate was located by its band
 
 def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
-    """Rescale -> grayscale -> binary threshold -> Tesseract (Req 4.1-4.6)."""
+    """For each located strip, then the whole photo:
+    rescale -> grayscale -> Otsu threshold -> Tesseract (Req 4.1-4.6),
+    all within one shared timeout budget."""
 ```
+
+- Located strip: trimmed of the "BR"/QR zone, rescaled to 100 px high, white margin, `--psm 8/13/7`.
+- Whole photo: longer side rescaled into 1000–2000 px, `--psm 7/6/11`.
+- Every Tesseract call uses a `A-Z0-9` whitelist and the remaining budget as its `timeout` (pytesseract kills the subprocess).
+- Outputs are joined one per line, strips first.
 
 ### Plate_Normalizer (`ocr/clean.py`) — pure
 
@@ -216,10 +234,17 @@ class PlateResult:
 MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")   # ABC1D23
 OLD       = re.compile(r"^[A-Z]{3}[0-9]{4}$")            # ABC1234 (canonical, no hyphen)
 
-def normalize(raw: str) -> PlateResult:
-    """Strip non-alnum, uppercase letters, cap at 7 chars, match a format.
-    Idempotent on already-valid plates (Req 5.1-5.6)."""
+def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
+    """Search every 7-char window (each line, then the whole text) for an exact
+    plate; otherwise fit windows to the LLLDLDD / LLLDDDD templates with
+    positional swaps (O->0, 1->I, S->5, ...). Idempotent on valid plates
+    (Req 5.1-5.7)."""
 ```
+
+- Exact matches win over corrected ones.
+- Corrections: at most 2 swaps, fewest swaps wins; Mercosul only when the text contains `BRASIL`/`MERCOSUL`.
+- `mercosul=True` (plate located by its band): Mercosul only, up to 3 swaps. This is what reads the Mercosul typeface, whose `5`, `I` and slashed `0` Tesseract reads as `S`, `1` and `O`.
+- Known limit: letter/letter confusions (`I` vs `L`) cannot be corrected by position.
 
 Note on Old_Format: the requirement describes the *pattern* `ABC-1234`. Since normalization strips non-alphanumeric characters, the hyphen is removed and the canonical stored value is `ABC1234` (7 alphanumeric chars). The `sessions.license_plate` column is `VARCHAR(16)`, so both formats fit within the 1–16 constraint (Req 6.4).
 

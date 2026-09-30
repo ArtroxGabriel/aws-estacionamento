@@ -220,17 +220,20 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
 
 - [x] 19. Post-review fixes (2026-09-29)
   - [x] 19.1 Transactional side effects: `SessionRepository.parking_transition` keeps the RDS transaction open across Redis `DECR` and the DynamoDB audit; rollback + compensating `INCR` on any failure (previously a Redis/DynamoDB failure after the RDS commit lost the decrement/audit forever). Tests: `tests/test_poller_side_effects.py`
-  - [x] 19.2 Real OCR timeout via `pytesseract.image_to_string(timeout=...)` (the thread-pool timeout blocked until Tesseract finished); Tesseract config `--psm 11` + plate whitelist. Tests: `tests/test_processor.py`
+  - [x] 19.2 Real OCR timeout via `pytesseract.image_to_string(timeout=...)` (the thread-pool timeout blocked until Tesseract finished); Tesseract runs `--psm 7`, `6` and `11` (plate whitelist) within one shared budget and joins their outputs: with `--psm 11` alone a binarized Mercosul crop returned no text (found against real Tesseract 5.5). Tests: `tests/test_processor.py`
   - [x] 19.3 Plate search inside OCR text instead of truncating to the first 7 chars (`"BRASIL ABC1D23"` on two OCR lines was rejected). Tests: `tests/test_clean.py`
   - [x] 19.4 Optional static AWS credentials + `AWS_SESSION_TOKEN` for AWS Academy. Tests: `tests/test_config.py`
   - [x] 19.5 Poison classified and audited on the last delivery (`receive_count >= 3`), matching the redrive policy; no reprocessing/re-audit beyond it. Tests: `tests/test_poison.py`
-  - _Requirements: 5.1, 6.5, 7.4, 9.3, 12.1, 12.2, 13.3, 14.2, 14.6_
+  - [x] 19.6 Positional character correction in the Plate_Normalizer (<= 2 swaps, Mercosul-only when `BRASIL`/`MERCOSUL` is read) and Otsu threshold in the OCR_Processor. On a real 1920x1080 photo of `FTR5I05` the plate is still not read: Otsu picked 127 (no change vs 128) and the fixed 2x upscale is the blocker; at 1x the read is `LFTR5LO5` -> `FTR5L05` (I read as L). Next: target-size rescaling, then plate localization
+  - [x] 19.7 Plate localization by the Mercosul blue band (`ocr/locate.py`, OpenCV) with OCR on the character strip (fixed height, BR/QR trim, white margin) before the whole photo, adaptive whole-photo rescaling (longer side 1000-2000 px) instead of the fixed 2x, and a `mercosul` hint to the normalizer (Mercosul-only, up to 3 swaps). The real 1920x1080 photo of `FTR5I05` now parks as `FTR5I05` end to end through the API (~1 s). Tests: `tests/test_locate.py`, `tests/test_processor.py`, `tests/test_clean.py`. Not covered: Old_Format plates in whole-car photos (no band to locate them)
+  - _Requirements: 4.1, 5.1, 5.7, 6.5, 7.4, 9.3, 12.1, 12.2, 13.3, 14.2, 14.6_
 
 - [ ] 20. Remaining verification
   - [x] 20.1 `tofu fmt`/`validate`/`apply` against Floci (2026-09-29): queue has `VisibilityTimeout=300` and the redrive policy; a probe message was received 3 times (counts 1, 2, 3) and then landed in the DLQ
-  - [ ] 20.2 End-to-end run against Floci with a real plate photo (needs the Tesseract binary). Done so far with real S3/SQS/RDS/Redis/DynamoDB connectors and stubbed OCR: happy path (PARKED, counter 10->9, one audit entry, queue empty), idempotent redelivery, and DynamoDB failure -> RDS rollback + compensated counter, then success on redelivery
+  - [ ] 20.2 End-to-end run against Floci with a real plate photo. Done with a rendered Mercosul plate through API container -> SQS -> worker container with Tesseract 5.5 (PARKED `ABC1D23`, redelivery after the 300 s visibility timeout also parked). Pending: real camera photos. Before that with real S3/SQS/RDS/Redis/DynamoDB connectors and stubbed OCR: happy path (PARKED, counter 10->9, one audit entry, queue empty), idempotent redelivery, and DynamoDB failure -> RDS rollback + compensated counter, then success on redelivery
   - [ ] 20.3 Remaining optional tests: 2.3 (P11), 5.2 (P4), 8.2, 9.2, 10.2, 11.2/11.3, 13.3, 15.2, 16.2
-  - [ ] 20.4 Graceful shutdown gaps vs Req 16 (in-flight long poll up to 20 s; remaining batch keeps processing after SIGTERM)
+  - [ ] 20.4 Graceful shutdown gaps vs Req 16 (in-flight long poll up to 20 s, so `docker stop` needs `-t 30`; remaining batch keeps processing after SIGTERM). The container image runs `tini` as PID 1 so an early SIGTERM is not dropped; verified `docker stop -t 30` exits 0
+  - [x] 20.5 `worker/Dockerfile` (Python 3.14 slim + uv + Tesseract 5.5 + tini, non-root) and `worker/floci.env` for local runs
 
 ## Notes
 

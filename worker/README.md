@@ -12,6 +12,7 @@ worker/
 ├── config.py               # Config_Loader (carregamento/validação de env)
 ├── worker.py               # Poller: loop SQS, orquestração e shutdown
 ├── ocr/                    # Camada pura (sem I/O)
+│   ├── locate.py           # Localização da placa Mercosul (OpenCV)
 │   ├── processor.py        # OCR_Processor (Tesseract)
 │   └── clean.py            # Plate_Normalizer (Mercosul/Antiga)
 ├── storage/                # Conectores de I/O
@@ -30,3 +31,19 @@ worker/
 - `uv run pytest` — roda os testes
 - `uv run ruff check .` / `uv run ruff format .` — lint e formatação
 - `task dev:worker` — executa o worker com as variáveis locais
+
+## Docker
+
+A imagem inclui o binário do Tesseract. Contra o Floci local, o container
+compartilha a rede do `floci_aws` (assim `localhost` é o emulador):
+
+```bash
+docker build -t estacionamento-worker ./worker
+docker run -d --name ocr-worker --network container:floci_aws --env-file worker/floci.env estacionamento-worker
+docker logs -f ocr-worker
+docker stop -t 30 ocr-worker
+```
+
+Use `-t 30` no `stop`: um long poll do SQS em andamento dura até 20 s.
+Na AWS, passe as variáveis com os valores das saídas do OpenTofu e sem
+`AWS_ENDPOINT_URL`/chaves estáticas (o instance profile fornece as credenciais).

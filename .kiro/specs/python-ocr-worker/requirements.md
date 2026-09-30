@@ -78,7 +78,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN an image byte stream is available, THE OCR_Processor SHALL apply rescaling, grayscale conversion, and binary thresholding to the image, in that order, before invoking OCR.
+1. WHEN an image byte stream is available, THE OCR_Processor SHALL locate Mercosul plates by their blue band and, for each located character strip and for the whole image, apply rescaling (strip to a fixed height; whole image so its longer side is between 1000 and 2000 px), grayscale conversion, and binary thresholding (with the threshold chosen per image by Otsu's method), in that order, before invoking OCR; text from located strips SHALL come first, and the result SHALL indicate whether a Mercosul plate was located.
 2. WHEN pre-processing completes, THE OCR_Processor SHALL run Tesseract OCR on the pre-processed image and produce raw text within 10 seconds per image.
 3. WHEN Tesseract OCR produces raw text, THE OCR_Processor SHALL return the raw text to the Poller.
 4. IF the image byte stream cannot be decoded into a valid image, THEN THE OCR_Processor SHALL return an image-decoding error to the Poller indicating the decode failure, and SHALL NOT invoke Tesseract OCR.
@@ -97,6 +97,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 4. IF no 7-character window of the normalized text matches the Mercosul_Format or the Old_Format pattern, THEN THE Plate_Normalizer SHALL return an unreadable-plate result that indicates normalization failed and SHALL NOT return a partial or padded plate value.
 5. WHEN raw OCR text is empty or contains no letters or digits after removing disallowed characters, THE Plate_Normalizer SHALL return an unreadable-plate result.
 6. WHEN a license plate value already in Mercosul_Format or Old_Format is provided as input, THE Plate_Normalizer SHALL return that same plate value unchanged (idempotence).
+7. IF no window matches either pattern exactly, THEN THE Plate_Normalizer SHALL try each window against the Mercosul_Format and Old_Format position templates, replacing commonly confused characters with the character kind the position requires (e.g. `O` -> `0` in a digit position, `1` -> `I` in a letter position), with at most 2 replacements per plate, choosing the window with the fewest replacements; WHERE the OCR text contains `BRASIL` or `MERCOSUL`, only the Mercosul_Format template SHALL be used; WHERE the OCR_Processor located a Mercosul plate, only the Mercosul_Format template SHALL be used with at most 3 replacements.
 
 ### Requirement 6: Session Update in RDS
 

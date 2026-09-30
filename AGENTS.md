@@ -13,7 +13,7 @@
 3. **Amazon S3**: Bucket para arquivos binários (fotos dos veículos capturadas na entrada).
 4. **Amazon ElastiCache**: Cluster Redis nó único (`cache.t3.micro`) mantendo em memória o mapa de vagas disponíveis para leituras de alta frequência e baixa latência.
 5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRADA`, `PROCESSAMENTO_OCR`, `SAIDA_PAGAMENTO`).
-6. **Amazon SQS**: Desacoplamento assíncrono: API publica mensagem diretamente na fila SQS (`ocr-processamento-fila`); o worker Python consome a fila para redimensionar a foto e extrair a placa via OCR (Tesseract).
+6. **Amazon SQS**: Desacoplamento assíncrono: API publica mensagem diretamente na fila SQS (`ocr-processamento-fila`, visibility timeout 300 s); o worker Python consome a fila, localiza a placa (OpenCV) e extrai o texto via OCR (Tesseract). Após 3 recebimentos sem sucesso a mensagem vai para a DLQ `ocr-processamento-fila-dlq`.
 
 ## Pipeline da Solução
 
@@ -81,6 +81,7 @@
 - **Execução dos Serviços**:
   - `task dev:api`: Executa a API Go
   - `task dev:worker`: Executa o Worker Python
+  - `docker build -t estacionamento-worker ./worker` + `docker run --network container:floci_aws --env-file worker/floci.env estacionamento-worker`: Worker em container com Tesseract (ver `worker/README.md`)
   - `task dev:web`: Inicia servidor local Vite
   - `task build:web`: Gera bundle estático do frontend
 
@@ -95,7 +96,7 @@ Configurar variáveis locais no `.env`:
 
 ## Architecture Conventions
 
-- **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica no SNS e libera a requisição HTTP.
+- **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila SQS e libera a requisição HTTP.
 - **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRADA`, `PROCESSAMENTO_OCR`, `SAIDA_PAGAMENTO`).
 - **Cache de Alta Frequência**: A consulta de vagas disponíveis bate exclusivamente no ElastiCache (Redis).
 - **Consistência de Contadores**: O decremento ocorre no término do OCR e o incremento ocorre na liberação da vaga após pagamento.
@@ -104,9 +105,13 @@ Configurar variáveis locais no `.env`:
 
 - **Créditos AWS Academy**: Sempre executar `task tf:destroy:aws` ao encerrar os testes em nuvem.
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
+- **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
+- **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
+- **Parar o Worker**: use `docker stop -t 30`; um long poll do SQS em andamento dura até 20 s.
 
 ## Changelog
 
+- 2026-09-30: Worker com Dockerfile (Tesseract + OpenCV), localização da placa Mercosul, DLQ na fila de OCR e efeitos colaterais transacionais.
 - 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md raiz com pipeline detalhado dos 6 serviços AWS.
 

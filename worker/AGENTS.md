@@ -5,13 +5,14 @@
 
 ## Tech Stack
 - **Linguagem / Runtime**: Python 3.14 (`uv`)
-- **Bibliotecas**: `boto3`, `pytesseract`, `Pillow`, `psycopg` / `sqlalchemy`, `redis`
+- **Bibliotecas**: `boto3`, `pytesseract`, `Pillow`, `opencv-python-headless`, `psycopg`, `redis`
 
 ## File Structure
 ```text
 worker/
 ├── worker.py               # Loop principal de consumo SQS
 ├── ocr/
+│   ├── locate.py           # Localização da placa Mercosul pela faixa azul (OpenCV)
 │   ├── processor.py        # Redimensionamento e extração de placa com Tesseract
 │   └── clean.py            # Normalização de caracteres da placa (Mercosul/Antiga)
 ├── storage/                # Conectores com S3, RDS, Redis e DynamoDB
@@ -23,6 +24,7 @@ worker/
 - `task dev:worker`: Executa o worker com as variáveis locais
 - `uv run pytest`: Roda testes do processador OCR
 - `uv run ruff check .` e `uv run ruff format .`: Verificação e formatação de código
+- `docker build -t estacionamento-worker ./worker`: Imagem com Tesseract (ver README, seção Docker, para rodar contra o Floci com `floci.env`)
 
 ## Architecture Conventions
 - Polling contínuo via SQS com `WaitTimeSeconds=20`.
@@ -36,7 +38,9 @@ worker/
 - Mensagem que falha na 3ª entrega (`MAX_RECEIVE_COUNT` = `maxReceiveCount` da redrive policy em `infra/main.tf`) é auditada como `POISON_MESSAGE`; o SQS a move para `ocr-processamento-fila-dlq`. Os dois valores devem mudar juntos.
 - Credenciais AWS estáticas são opcionais: sem `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` o boto3 usa a cadeia padrão (instance profile `LabRole` no EC2). Com credenciais temporárias da AWS Academy, defina também `AWS_SESSION_TOKEN`.
 - O Tesseract é chamado com `timeout` do próprio `pytesseract` (mata o subprocesso); não envolva a chamada em threads.
+- OCR de foto real: a placa Mercosul é localizada pela faixa azul e o Tesseract roda primeiro no recorte dos caracteres (altura fixa de 100 px, sem a área BR/QR, com margem branca), depois na foto inteira. A fonte da placa confunde o Tesseract (`5`→`S`, `I`→`1`/`L`, `0`→`O`); o normalizador corrige por posição (até 3 trocas quando a placa foi localizada como Mercosul). Calibre mudanças de escala com fotos reais no container, não só com placas sintéticas.
 
 ## Changelog
 - 2026-09-15: Criação do AGENTS.md do Worker com fluxo de OCR e auditoria.
 - 2026-09-29: Efeitos colaterais transacionais com compensação, poison na última entrega, busca da placa no texto do OCR, timeout real do Tesseract e credenciais AWS opcionais + `AWS_SESSION_TOKEN`.
+- 2026-09-30: Dockerfile (Tesseract + tini, não-root), `floci.env`, localização da placa Mercosul (OpenCV), escala adaptativa, limiar de Otsu e correção de caracteres por posição.
