@@ -27,7 +27,7 @@ affected ``session_id`` without touching the Session_Record (Req 8.5).
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -69,15 +69,12 @@ class AuditWriteError(AuditError):
     left for the Poller to handle per its retry policy.
     """
 
-    def __init__(
-        self, session_id: str, attempts: int, cause: Exception | None = None
-    ) -> None:
+    def __init__(self, session_id: str, attempts: int, cause: Exception | None = None) -> None:
         self.session_id = session_id
         self.attempts = attempts
         self.__cause__ = cause
         super().__init__(
-            f"failed to write audit entry for session {session_id!r} "
-            f"after {attempts} attempt(s)"
+            f"failed to write audit entry for session {session_id!r} after {attempts} attempt(s)"
         )
 
 
@@ -103,8 +100,7 @@ class AuditLogger:
             # Fail fast at startup — no table name means the loop must not begin
             # (Req 8.6). The message identifies the missing configuration.
             raise AuditError(
-                "DYNAMODB_TABLE_NAME is unset or empty; cannot resolve the "
-                "audit table name"
+                "DYNAMODB_TABLE_NAME is unset or empty; cannot resolve the audit table name"
             )
 
         self._client = dynamodb_client
@@ -154,9 +150,7 @@ class AuditLogger:
             },
         )
 
-    def _put(
-        self, session_id: str, action: str, details: dict[str, Any]
-    ) -> None:
+    def _put(self, session_id: str, action: str, details: dict[str, Any]) -> None:
         """PutItem the audit record, idempotent and retried (Req 8.4, 8.5).
 
         Builds the AttributeValue item with a unique ``id`` per attempt so a
@@ -213,7 +207,7 @@ def _rfc3339_nano(timestamp_nano: int) -> str:
     """
 
     seconds, nanos = divmod(timestamp_nano, 1_000_000_000)
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    moment = datetime.fromtimestamp(seconds, tz=UTC)
     base = moment.strftime("%Y-%m-%dT%H:%M:%S")
     return f"{base}.{nanos:09d}Z"
 

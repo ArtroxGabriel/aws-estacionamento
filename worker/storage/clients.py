@@ -34,16 +34,20 @@ __all__ = [
 def build_boto3_session(cfg: Config) -> boto3.Session:
     """Build a boto3 session using the region and credentials from ``cfg``.
 
-    The session carries the static credentials and region so that every client
+    The session carries the credentials and region so that every client
     created from it (S3, SQS, DynamoDB) shares the same authentication and
-    regional configuration (Req 15.2). The endpoint is *not* set on the session;
-    it is applied per client so the resolution is identical and explicit for
-    each service (Req 15.5).
+    regional configuration (Req 15.2). The session token is forwarded for the
+    temporary credentials AWS Academy issues; when no static keys are
+    configured (all ``None``) boto3 resolves credentials through its default
+    chain, e.g. the EC2 instance profile. The endpoint is *not* set on the
+    session; it is applied per client so the resolution is identical and
+    explicit for each service (Req 15.5).
     """
 
     return boto3.Session(
         aws_access_key_id=cfg.aws_access_key_id,
         aws_secret_access_key=cfg.aws_secret_access_key,
+        aws_session_token=cfg.aws_session_token,
         region_name=cfg.aws_region,
     )
 

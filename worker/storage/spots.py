@@ -15,8 +15,6 @@ left unacknowledged (Req 7.6).
 
 from __future__ import annotations
 
-import time
-
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -57,8 +55,7 @@ class SpotsUnderflowError(SpotsError):
     def __init__(self, observed: int) -> None:
         self.observed = observed
         super().__init__(
-            f"spots counter underflow: DECR {SPOTS_KEY} returned {observed}; "
-            "clamped to 0"
+            f"spots counter underflow: DECR {SPOTS_KEY} returned {observed}; clamped to 0"
         )
 
 
@@ -72,9 +69,7 @@ class SpotsDecrementError(SpotsError):
     def __init__(self, attempts: int, cause: Exception | None = None) -> None:
         self.attempts = attempts
         self.__cause__ = cause
-        super().__init__(
-            f"failed to decrement {SPOTS_KEY} after {attempts} attempt(s)"
-        )
+        super().__init__(f"failed to decrement {SPOTS_KEY} after {attempts} attempt(s)")
 
 
 class SpotsCounter:
@@ -129,30 +124,42 @@ class SpotsCounter:
                 to zero (Req 7.5).
         """
 
-        last_error: Exception | None = None
+        value = self._with_retries(self._client.decr)
+
+        if value < 0:
+            # Underflow: restore the invariant (>= 0) then signal the
+            # condition. The net effect on the counter is zero, so the caller
+            # must not compensate it with an increment (Req 7.5).
+            self._client.set(SPOTS_KEY, 0)
+            raise SpotsUnderflowError(value)
+
+        return value
+
+    def increment(self) -> int:
+        """Atomically ``INCR spots:available`` and return the resulting count.
+
+        Used by the Poller to compensate a successful :meth:`decrement` whose
+        RDS transaction was rolled back afterwards, so the counter never drifts
+        from the committed session state. Retries like :meth:`decrement`.
+
+        Raises:
+            SpotsDecrementError: connection failed after all retries.
+        """
+
+        return self._with_retries(self._client.incr)
+
+    def _with_retries(self, op) -> int:
+        """Run ``op(SPOTS_KEY)``, retrying on connection/timeout errors (Req 7.6)."""
+
         for attempt in range(1, self._max_retries + 1):
             try:
-                value = int(self._client.decr(SPOTS_KEY))
+                return int(op(SPOTS_KEY))
             except (RedisConnectionError, RedisTimeoutError) as exc:
                 # Transient connectivity problem: retry, leaving the SQS message
                 # unacknowledged so it can be redelivered (Req 7.6).
-                last_error = exc
-                if attempt < self._max_retries:
-                    continue
-                raise SpotsDecrementError(self._max_retries, exc) from exc
-
-            if value < 0:
-                # Underflow: restore the invariant (>= 0) then signal the
-                # condition. The transition already committed, so we do not
-                # retry the message on this basis (Req 7.5).
-                self._client.set(SPOTS_KEY, 0)
-                raise SpotsUnderflowError(value)
-
-            return value
-
-        # Unreachable: the loop either returns, raises underflow, or raises the
-        # decrement error on the final attempt. Kept for exhaustiveness.
-        raise SpotsDecrementError(self._max_retries, last_error)
+                if attempt == self._max_retries:
+                    raise SpotsDecrementError(self._max_retries, exc) from exc
+        raise AssertionError("unreachable")
 
     def close(self) -> None:
         """Release the underlying Redis connection (Req 16.4)."""

@@ -25,7 +25,7 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Implement `redact()` returning a fixed marker for secret values
     - _Requirements: 14.1, 14.2, 14.3, 14.4, 15.2, 15.3, 15.4_
 
-  - [ ]* 2.2 Write property test for missing-variable reporting completeness
+  - [x]* 2.2 Write property test for missing-variable reporting completeness
     - **Feature: python-ocr-worker, Property 10: Missing-variable reporting is complete**
     - Generate subsets of required env vars to remove/empty; assert the error names exactly that subset and blocks loop start
     - **Validates: Requirements 14.2**
@@ -48,19 +48,19 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Ensure idempotence on already-valid plates
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
 
-  - [ ]* 3.2 Write property test for normalization output invariant
+  - [x]* 3.2 Write property test for normalization output invariant
     - **Feature: python-ocr-worker, Property 1: Normalization output invariant**
     - Arbitrary strings: output is uppercase-alnum only, length <= 7, and `normalize(normalize(x)) == normalize(x)`
     - **Validates: Requirements 5.1, 5.6**
     - _Requirements: 5.1, 5.6_
 
-  - [ ]* 3.3 Write property test for valid-plate acceptance and idempotence
+  - [x]* 3.3 Write property test for valid-plate acceptance and idempotence
     - **Feature: python-ocr-worker, Property 2: Valid plates are accepted, canonicalized, and idempotent**
     - Generate valid Mercosul/Old_Format plates; assert `ok=True`, value unchanged, length within 1–16
     - **Validates: Requirements 5.2, 5.3, 5.6, 6.4**
     - _Requirements: 5.2, 5.3, 5.6, 6.4_
 
-  - [ ]* 3.4 Write property test for unmatchable input rejection
+  - [x]* 3.4 Write property test for unmatchable input rejection
     - **Feature: python-ocr-worker, Property 3: Unmatchable input yields an unreadable result with no padded value**
     - Generate inputs whose normalized form matches neither pattern (incl. empty/non-alnum); assert `ok=False`, `plate=None`
     - **Validates: Requirements 5.4, 5.5**
@@ -73,7 +73,7 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - Return typed errors (never raise for domain outcomes): `decode` on undecodable bytes (skip Tesseract), `no_text` on empty OCR output, `timeout` when >10s
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6_
 
-  - [ ]* 4.2 Write example tests for OCR_Processor
+  - [x]* 4.2 Write example tests for OCR_Processor
     - Assert transform order, fixture image -> known text, undecodable bytes skip Tesseract, empty-output error, timeout abort
     - _Requirements: 4.1, 4.2, 4.4, 4.5, 4.6_
 
@@ -97,7 +97,7 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - `build_boto3_session(cfg)` plus `s3_client`/`sqs_client`/`dynamodb_client` applying identical endpoint resolution (`cfg.aws_endpoint_url or None`) to every client
     - _Requirements: 15.1, 15.5_
 
-  - [ ]* 7.2 Write property test for uniform endpoint resolution
+  - [x]* 7.2 Write property test for uniform endpoint resolution
     - **Feature: python-ocr-worker, Property 12: Uniform endpoint resolution across AWS clients**
     - Generate valid configs (with/without endpoint); assert S3/SQS/DynamoDB clients resolve to the same endpoint
     - **Validates: Requirements 15.5**
@@ -183,7 +183,7 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
     - On poison: record reason via `Audit_Logger.log_poison` (retry up to 3x, then continue), rely on SQS redrive to move the message; continue the loop within 1s without terminating
     - _Requirements: 10.4, 12.1, 12.2, 12.3, 12.4, 12.5_
 
-  - [ ]* 14.2 Write property test for poison classification boundary
+  - [x]* 14.2 Write property test for poison classification boundary
     - **Feature: python-ocr-worker, Property 8: Poison classification is driven by receive count**
     - Generate receive counts around the threshold; assert poison iff count exceeds max, not on count alone below/at threshold
     - **Validates: Requirements 10.4, 12.2**
@@ -218,13 +218,27 @@ Property-based tests use `hypothesis` with a minimum of 100 examples each and ar
 - [x] 18. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass with `uv run pytest`, run `uv run ruff check .`, ask the user if questions arise.
 
+- [x] 19. Post-review fixes (2026-09-29)
+  - [x] 19.1 Transactional side effects: `SessionRepository.parking_transition` keeps the RDS transaction open across Redis `DECR` and the DynamoDB audit; rollback + compensating `INCR` on any failure (previously a Redis/DynamoDB failure after the RDS commit lost the decrement/audit forever). Tests: `tests/test_poller_side_effects.py`
+  - [x] 19.2 Real OCR timeout via `pytesseract.image_to_string(timeout=...)` (the thread-pool timeout blocked until Tesseract finished); Tesseract config `--psm 11` + plate whitelist. Tests: `tests/test_processor.py`
+  - [x] 19.3 Plate search inside OCR text instead of truncating to the first 7 chars (`"BRASIL ABC1D23"` on two OCR lines was rejected). Tests: `tests/test_clean.py`
+  - [x] 19.4 Optional static AWS credentials + `AWS_SESSION_TOKEN` for AWS Academy. Tests: `tests/test_config.py`
+  - [x] 19.5 Poison classified and audited on the last delivery (`receive_count >= 3`), matching the redrive policy; no reprocessing/re-audit beyond it. Tests: `tests/test_poison.py`
+  - _Requirements: 5.1, 6.5, 7.4, 9.3, 12.1, 12.2, 13.3, 14.2, 14.6_
+
+- [ ] 20. Remaining verification
+  - [x] 20.1 `tofu fmt`/`validate`/`apply` against Floci (2026-09-29): queue has `VisibilityTimeout=300` and the redrive policy; a probe message was received 3 times (counts 1, 2, 3) and then landed in the DLQ
+  - [ ] 20.2 End-to-end run against Floci with a real plate photo (needs the Tesseract binary). Done so far with real S3/SQS/RDS/Redis/DynamoDB connectors and stubbed OCR: happy path (PARKED, counter 10->9, one audit entry, queue empty), idempotent redelivery, and DynamoDB failure -> RDS rollback + compensated counter, then success on redelivery
+  - [ ] 20.3 Remaining optional tests: 2.3 (P11), 5.2 (P4), 8.2, 9.2, 10.2, 11.2/11.3, 13.3, 15.2, 16.2
+  - [ ] 20.4 Graceful shutdown gaps vs Req 16 (in-flight long poll up to 20 s; remaining batch keeps processing after SIGTERM)
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP, but each maps a design property or example scenario to the requirements it validates.
 - **Property coverage:** Properties 1–3 (task 3), 4 (task 5), 5/6/9 (task 13), 7 (task 11), 8 (task 14), 10/11 (task 2), 12 (task 7). All 12 correctness properties are covered.
 - Each task references specific requirements for traceability; the pure layers are built and tested before any I/O connector.
-- **Infra dependency (not a worker/ code task):** The Worker depends on an SQS **DLQ + redrive policy** with `maxReceiveCount = 3`, which `infra/main.tf` does not currently define (it has only `ocr_queue` with `message_retention_seconds`). Requirements 9.3, 12.2, 12.3, and 13.5 cannot be satisfied at runtime until the infra module adds a second `aws_sqs_queue` (the DLQ) and a `redrive_policy` on `ocr_queue`. This lives in the `infra/` module, outside `worker/`, so it is tracked here as a blocking dependency rather than a worker coding task. The DLQ/redrive integration test is likewise blocked until then.
-- **Requirement discrepancies flagged in design (confirm with owner):** `maxReceiveCount` 3 (Req 12.2/12.3) vs 5 delivery attempts (Req 9.3/13.5) — design treats 3 as the SQS redrive threshold and 5 as an application-side upper bound. Visibility timeout 300s (Req 9.4) vs 30s (Req 13.2) — design uses 300s configured, treating 30s as the minimum redelivery latency expectation.
+- **Infra dependency (done 2026-09-29):** `infra/main.tf` now defines `ocr-processamento-fila-dlq` and a `redrive_policy` (`maxReceiveCount = 3`) plus `visibility_timeout_seconds = 300` on `ocr_queue`. Validated against Floci (task 20.1).
+- **Requirement discrepancies (resolved 2026-09-29):** all thresholds now use `maxReceiveCount = 3` and a 300 s visibility timeout (Req 9.3, 9.4, 10.4, 12.2, 12.3, 13.2, 13.5 updated).
 - Shared contracts are fixed: `sessions` schema, Redis key `spots:available`, `AuditoriaEstacionamento` item shape, and the `{"session_id","s3_key"}` SQS body — no new names are introduced.
 
 ## Task Dependency Graph

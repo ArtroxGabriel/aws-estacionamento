@@ -19,10 +19,11 @@ __all__ = ["Config", "ConfigError", "load_config", "redact", "REDACTED"]
 REDACTED = "***REDACTED***"
 
 # Required environment variables that must be present and non-empty (Req 14.2).
+# Static AWS credentials are optional: without them boto3 falls back to its
+# default credential chain (e.g. the EC2 instance profile / LabRole in AWS
+# Academy). When supplied, the key id and secret must come as a pair.
 _REQUIRED_VARS = (
     "AWS_REGION",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
     "SQS_QUEUE_URL",
     "DATABASE_URL",
     "REDIS_URL",
@@ -47,8 +48,9 @@ class Config:
 
     aws_endpoint_url: str | None  # None => default AWS endpoints
     aws_region: str
-    aws_access_key_id: str
-    aws_secret_access_key: str
+    aws_access_key_id: str | None  # None => default boto3 credential chain
+    aws_secret_access_key: str | None
+    aws_session_token: str | None  # temporary credentials (AWS Academy)
     sqs_queue_url: str
     database_url: str
     redis_url: str
@@ -107,7 +109,7 @@ def _has_scheme(value: str, allowed: frozenset[str]) -> bool:
 
     try:
         parsed = urlparse(value)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
     if parsed.scheme.lower() not in allowed:
         return False
@@ -131,6 +133,7 @@ def load_config(env: Mapping[str, str]) -> Config:
     region = _clean(env.get("AWS_REGION"))
     access_key = _clean(env.get("AWS_ACCESS_KEY_ID"))
     secret_key = _clean(env.get("AWS_SECRET_ACCESS_KEY"))
+    session_token = _clean(env.get("AWS_SESSION_TOKEN"))
     sqs_queue_url = _clean(env.get("SQS_QUEUE_URL"))
     database_url = _clean(env.get("DATABASE_URL"))
     redis_url = _clean(env.get("REDIS_URL"))
@@ -139,8 +142,6 @@ def load_config(env: Mapping[str, str]) -> Config:
 
     values = {
         "AWS_REGION": region,
-        "AWS_ACCESS_KEY_ID": access_key,
-        "AWS_SECRET_ACCESS_KEY": secret_key,
         "SQS_QUEUE_URL": sqs_queue_url,
         "DATABASE_URL": database_url,
         "REDIS_URL": redis_url,
@@ -150,6 +151,11 @@ def load_config(env: Mapping[str, str]) -> Config:
 
     # Collect every missing/empty required variable (not first-fail, Req 14.2).
     missing = [name for name in _REQUIRED_VARS if not values[name]]
+    # Half a key pair is a misconfiguration: report the absent half.
+    if access_key and not secret_key:
+        missing.append("AWS_SECRET_ACCESS_KEY")
+    if secret_key and not access_key:
+        missing.append("AWS_ACCESS_KEY_ID")
 
     # Collect every malformed URL/connection string among the present values
     # (Req 14.4, 15.3). Only validate a value when it is non-empty so a missing
@@ -172,8 +178,9 @@ def load_config(env: Mapping[str, str]) -> Config:
     return Config(
         aws_endpoint_url=endpoint or None,
         aws_region=region,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
+        aws_access_key_id=access_key or None,
+        aws_secret_access_key=secret_key or None,
+        aws_session_token=session_token or None,
         sqs_queue_url=sqs_queue_url,
         database_url=database_url,
         redis_url=redis_url,

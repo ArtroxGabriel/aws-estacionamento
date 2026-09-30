@@ -9,7 +9,6 @@ outcomes (undecodable bytes, empty OCR output, timeout). See design.md
 from __future__ import annotations
 
 import io
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 
 import pytesseract
@@ -23,6 +22,10 @@ _RESCALE_FACTOR = 2
 # Luminance cut-off for the binary threshold step. Pixels at or above this value
 # become white (255); below it become black (0) (Req 4.1 — binary thresholding).
 _BINARY_THRESHOLD = 128
+
+# Sparse-text page segmentation (the plate is a small block somewhere in a car
+# photo) restricted to the characters a Brazilian plate can contain.
+_TESSERACT_CONFIG = "--psm 11 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 
 @dataclass
@@ -72,17 +75,18 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
     # Pre-process (includes decode). Undecodable bytes short-circuit before OCR.
     try:
         image = _preprocess(image_bytes)
-    except (UnidentifiedImageError, OSError, ValueError):
+    except UnidentifiedImageError, OSError, ValueError:
         return OcrResult(ok=False, raw_text=None, error="decode")
 
-    # Run Tesseract under a timeout guard (Req 4.2, 4.6). A worker thread lets us
-    # abandon the call if it exceeds the per-image budget.
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(pytesseract.image_to_string, image)
-        try:
-            raw_text = future.result(timeout=timeout_s)
-        except FuturesTimeoutError:
-            return OcrResult(ok=False, raw_text=None, error="timeout")
+    # Run Tesseract under a timeout guard (Req 4.2, 4.6). pytesseract kills the
+    # tesseract subprocess when the budget is exceeded and raises RuntimeError,
+    # so a hung OCR never blocks the Poller.
+    try:
+        raw_text = pytesseract.image_to_string(image, config=_TESSERACT_CONFIG, timeout=timeout_s)
+    except RuntimeError as exc:
+        if "timeout" not in str(exc).lower():
+            raise
+        return OcrResult(ok=False, raw_text=None, error="timeout")
 
     # Empty / whitespace-only output is an extraction failure (Req 4.5).
     if raw_text is None or raw_text.strip() == "":

@@ -91,10 +91,10 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN raw OCR text is provided, THE Plate_Normalizer SHALL remove all characters that are not ASCII letters (A-Z, a-z) or digits (0-9), convert all remaining letters to uppercase, and produce a normalized text of at most 7 characters.
-2. WHERE the normalized text matches the Mercosul_Format pattern (exactly 7 characters in the sequence letter-letter-letter-digit-letter-digit-digit), THE Plate_Normalizer SHALL return the plate in Mercosul_Format.
-3. WHERE the normalized text matches the Old_Format pattern (exactly 7 characters in the sequence letter-letter-letter-digit-digit-digit-digit), THE Plate_Normalizer SHALL return the plate in Old_Format.
-4. IF the normalized text matches neither the Mercosul_Format pattern nor the Old_Format pattern, THEN THE Plate_Normalizer SHALL return an unreadable-plate result that indicates normalization failed and SHALL NOT return a partial or padded plate value.
+1. WHEN raw OCR text is provided, THE Plate_Normalizer SHALL remove all characters that are not ASCII letters (A-Z, a-z) or digits (0-9), convert all remaining letters to uppercase, and search the result (each line first, then the whole text) for the first 7-character window matching the Mercosul_Format or Old_Format pattern, so that surrounding OCR text such as the `BRASIL` header does not prevent extraction.
+2. WHERE the matched window is in the Mercosul_Format pattern (exactly 7 characters in the sequence letter-letter-letter-digit-letter-digit-digit), THE Plate_Normalizer SHALL return the plate in Mercosul_Format.
+3. WHERE the matched window is in the Old_Format pattern (exactly 7 characters in the sequence letter-letter-letter-digit-digit-digit-digit), THE Plate_Normalizer SHALL return the plate in Old_Format.
+4. IF no 7-character window of the normalized text matches the Mercosul_Format or the Old_Format pattern, THEN THE Plate_Normalizer SHALL return an unreadable-plate result that indicates normalization failed and SHALL NOT return a partial or padded plate value.
 5. WHEN raw OCR text is empty or contains no letters or digits after removing disallowed characters, THE Plate_Normalizer SHALL return an unreadable-plate result.
 6. WHEN a license plate value already in Mercosul_Format or Old_Format is provided as input, THE Plate_Normalizer SHALL return that same plate value unchanged (idempotence).
 
@@ -145,7 +145,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 1. WHEN the RDS update, the Redis decrement, and the DynamoDB audit write all complete successfully for a message, THE Poller SHALL delete that message from the SQS_Queue within 5 seconds of the final step completing.
 2. IF any step in the OCR pipeline returns an error for a message, THEN THE Poller SHALL leave that message in the SQS_Queue, preserve the message body unchanged, and log an error entry indicating which processing step failed.
-3. IF a message fails processing and its receive count reaches the maximum of 5 delivery attempts, THEN THE Poller SHALL route that message to the dead-letter queue and record an audit entry indicating the message exhausted retries.
+3. IF a message fails processing on the delivery whose receive count equals the configured maximum receive count of 3, THEN THE Poller SHALL record an audit entry indicating the message exhausted retries, and the SQS redrive policy SHALL route that message to the dead-letter queue.
 4. WHILE a message is being processed, THE Poller SHALL retain the message with a visibility timeout of 300 seconds so that no other consumer receives it before processing completes or fails.
 
 ### Requirement 10: Unreadable Plate Handling
@@ -157,7 +157,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 1. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL leave the corresponding Session_Record status unchanged as `PROCESSING` and SHALL NOT write a plate value to the Session_Record.
 2. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL record an unreadable-plate error entry that includes the `session_id` and a reason indicating the plate was unreadable, without modifying any other Session_Record field.
 3. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL leave the SQS message available for redelivery rather than deleting it.
-4. WHEN a message has been redelivered 5 times without producing a readable plate, THE Poller SHALL classify the message as a Poison_Message and SHALL remove it from the active processing flow.
+4. WHEN a message reaches the configured maximum receive count of 3 without producing a readable plate, THE Poller SHALL classify the message as a Poison_Message and SHALL remove it from the active processing flow.
 5. WHEN the Poller classifies a message as a Poison_Message, THE Poller SHALL record a Poison_Message error entry identifying the `session_id` while leaving the corresponding Session_Record status as `PROCESSING`.
 
 ### Requirement 11: Idempotent Message Processing
@@ -179,7 +179,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 #### Acceptance Criteria
 
 1. WHEN a message is classified as a Poison_Message, THE Poller SHALL record the message identifier and a failure reason describing the classification cause in the DynamoDB audit trail.
-2. IF a message is received from the SQS_Queue and its receive count exceeds the configured maximum receive count of 3, THEN THE Poller SHALL classify the message as a Poison_Message.
+2. IF a message fails processing on a delivery whose receive count is equal to or greater than the configured maximum receive count of 3, THEN THE Poller SHALL classify the message as a Poison_Message; a message whose receive count exceeds the maximum SHALL NOT be reprocessed nor audited again.
 3. WHERE a dead-letter queue is configured for the SQS_Queue, THE Poller SHALL rely on the SQS redrive policy to move a Poison_Message to the dead-letter queue after the message reaches the configured maximum receive count of 3.
 4. WHEN a message is classified as a Poison_Message, THE Poller SHALL continue consuming subsequent messages from the SQS_Queue within 1 second without terminating the polling loop.
 5. IF recording the Poison_Message identifier and failure reason fails, THEN THE Poller SHALL retry the record operation up to 3 times and, if all attempts fail, continue consuming subsequent messages without blocking the SQS_Queue.
@@ -191,10 +191,10 @@ The Worker must operate identically against a local emulated environment (Floci 
 #### Acceptance Criteria
 
 1. IF the S3_Connector, Session_Repository, Spots_Counter, or Audit_Logger raises a connection error while processing a message, THEN THE Poller SHALL record the error with an indication identifying the failed dependency and SHALL NOT delete the message from the SQS_Queue.
-2. IF a connection error occurs while processing a message, THEN THE Poller SHALL leave the message in the SQS_Queue so that it becomes available for redelivery after the SQS visibility timeout of 30 seconds elapses.
-3. IF a connection error occurs while processing a message, THEN THE Poller SHALL preserve any partial state changes without committing them, leaving the affected records unchanged from their pre-processing values.
+2. IF a connection error occurs while processing a message, THEN THE Poller SHALL leave the message in the SQS_Queue so that it becomes available for redelivery after the SQS visibility timeout of 300 seconds elapses.
+3. IF a connection error occurs while processing a message, THEN THE Poller SHALL roll back the RDS transition and compensate any Redis decrement already applied, leaving the affected records unchanged from their pre-processing values.
 4. WHEN a connection error occurs while processing a message, THE Poller SHALL continue the polling loop for subsequent messages within 1 second of recording the error.
-5. WHILE a downstream dependency remains unreachable, THE Poller SHALL retry each affected message up to 5 delivery attempts before the SQS_Queue routes the message to the dead-letter queue.
+5. WHILE a downstream dependency remains unreachable, THE Poller SHALL retry each affected message up to 3 delivery attempts before the SQS_Queue routes the message to the dead-letter queue.
 
 ### Requirement 14: Environment-Driven Configuration
 
@@ -202,11 +202,12 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN the Worker starts, THE Config_Loader SHALL read the following environment variables: `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, and `DYNAMODB_TABLE_NAME`.
-2. IF any of the required environment variables `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, or `DYNAMODB_TABLE_NAME` is absent or is an empty string when the Worker starts, THEN THE Config_Loader SHALL write an error indication naming each missing variable, SHALL prevent the polling loop from starting, and SHALL terminate the startup with a non-success exit status.
+1. WHEN the Worker starts, THE Config_Loader SHALL read the following environment variables: `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, and `DYNAMODB_TABLE_NAME`.
+2. IF any of the required environment variables `AWS_REGION`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, or `DYNAMODB_TABLE_NAME` is absent or is an empty string when the Worker starts, THEN THE Config_Loader SHALL write an error indication naming each missing variable, SHALL prevent the polling loop from starting, and SHALL terminate the startup with a non-success exit status.
 3. WHERE `AWS_ENDPOINT_URL` is absent or an empty string, THE Config_Loader SHALL treat it as optional and proceed with startup using the default AWS service endpoints without reporting a missing-variable error.
 4. IF a supplied value for `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, or `AWS_ENDPOINT_URL` does not conform to the expected URL or connection-string structure for that variable, THEN THE Config_Loader SHALL write an error indication naming the invalid variable, SHALL prevent the polling loop from starting, and SHALL terminate the startup with a non-success exit status.
-5. WHEN the Config_Loader writes any log output, THE Config_Loader SHALL exclude the values of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and any credential embedded in `DATABASE_URL` or `REDIS_URL`, substituting a fixed redaction marker in place of each such value.
+5. WHEN the Config_Loader writes any log output, THE Config_Loader SHALL exclude the values of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and any credential embedded in `DATABASE_URL` or `REDIS_URL`, substituting a fixed redaction marker in place of each such value.
+6. WHERE `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are both absent, THE Config_Loader SHALL proceed with startup and the Worker SHALL resolve AWS credentials through the default credential chain (e.g. the EC2 instance profile); IF only one of them is supplied, THEN THE Config_Loader SHALL report the other as missing. WHERE `AWS_SESSION_TOKEN` is supplied, THE Worker SHALL use it together with the static keys.
 
 ### Requirement 15: Dual-Mode AWS Endpoint Support
 

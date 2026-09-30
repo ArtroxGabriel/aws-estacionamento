@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Maximum number of alphanumeric characters retained from the raw OCR text.
+# Length of a plate in both formats once the Old_Format hyphen is stripped.
 _MAX_LEN = 7
 
 
@@ -35,23 +35,48 @@ _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
 
 
 def normalize(raw: str) -> PlateResult:
-    """Strip non-alnum, uppercase letters, cap at 7 chars, match a format.
+    """Find a Mercosul or Old_Format plate in raw OCR text.
+
+    OCR of a real plate returns surrounding text (the ``BRASIL`` header of a
+    Mercosul plate, frame noise), so the plate is searched for rather than
+    assumed to be the first 7 characters. Each line is tried first, so text
+    from neighbouring lines cannot glue onto the plate, then the whole text
+    (the plate itself may be split across lines). Within a candidate, every
+    7-character window of the cleaned (alphanumeric-only, uppercase) text is
+    tested left to right (Req 5.1).
 
     Idempotent on already-valid plates: a value already in Mercosul_Format or
-    Old_Format is returned unchanged (Req 5.6). Input matching neither pattern
-    (including empty or non-alphanumeric-only input) yields an unreadable result
-    with ``plate=None`` — never a partial or padded value (Req 5.4, 5.5).
+    Old_Format is returned unchanged (Req 5.6). Input with no matching window
+    (including empty or non-alphanumeric-only input) yields an unreadable
+    result with ``plate=None`` — never a partial or padded value (Req 5.4, 5.5).
     """
-    # Req 5.1: remove disallowed chars, uppercase, cap at 7 characters.
-    cleaned = _NON_ALNUM.sub("", raw).upper()[:_MAX_LEN]
+    candidates = [_clean(line) for line in raw.splitlines()] + [_clean(raw)]
 
-    if not cleaned:
+    if not any(candidates):
         # Req 5.5: empty / no alphanumeric characters remaining.
         return PlateResult(ok=False, plate=None, reason="empty")
 
-    # Req 5.2 / 5.3 / 5.6: canonical formats are returned as-is (idempotent).
-    if MERCOSUL.match(cleaned) or OLD.match(cleaned):
-        return PlateResult(ok=True, plate=cleaned, reason=None)
+    for cleaned in candidates:
+        plate = _find_plate(cleaned)
+        if plate is not None:
+            # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is.
+            return PlateResult(ok=True, plate=plate, reason=None)
 
-    # Req 5.4: matches neither pattern — unreadable, no padded/partial value.
+    # Req 5.4: no window matches either pattern — unreadable, no padded value.
     return PlateResult(ok=False, plate=None, reason="no_match")
+
+
+def _clean(text: str) -> str:
+    """Remove disallowed characters and uppercase letters (Req 5.1)."""
+
+    return _NON_ALNUM.sub("", text).upper()
+
+
+def _find_plate(cleaned: str) -> str | None:
+    """Return the first 7-character window matching a plate format, if any."""
+
+    for start in range(len(cleaned) - _MAX_LEN + 1):
+        window = cleaned[start : start + _MAX_LEN]
+        if MERCOSUL.match(window) or OLD.match(window):
+            return window
+    return None

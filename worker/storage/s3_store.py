@@ -15,7 +15,6 @@ inspecting boto3 internals.
 from __future__ import annotations
 
 import io
-import socket
 from typing import Any, Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -104,7 +103,7 @@ class S3Connector:
                 if err.kind in ("not_found", "too_large"):
                     raise
                 last_error = err
-            except (ClientError, BotoCoreError, OSError, socket.timeout) as err:
+            except (TimeoutError, ClientError, BotoCoreError, OSError) as err:
                 # Transient S3/network failure: classify not-found vs retry.
                 if _is_not_found(err):
                     raise RetrievalError("not_found", str(err)) from err

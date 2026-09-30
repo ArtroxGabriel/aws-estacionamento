@@ -20,16 +20,9 @@ Two goals dominate the design:
 
 ### Assumptions and Infra Dependencies
 
-- **DLQ + redrive policy (BLOCKING infra work).** Requirements 9.3, 10.4, 12.2, 12.3, and 13.5 reference a dead-letter queue and a `maxReceiveCount`. The current `infra/main.tf` defines only:
-  ```hcl
-  resource "aws_sqs_queue" "ocr_queue" {
-    name                      = "ocr-processamento-fila"
-    message_retention_seconds = 86400
-  }
-  ```
-  It has **no DLQ and no `redrive_policy`**. The infra module MUST be extended with a second `aws_sqs_queue` (the DLQ) and a `redrive_policy` on `ocr_queue` with `maxReceiveCount = 3`. Until that exists, SQS will never move poison messages off the main queue and Requirements 9.3/12.3/13.5 cannot be satisfied at runtime. The Worker is designed to *depend on* SQS redrive rather than reimplement it.
-- **`maxReceiveCount` value.** Requirements contain two different thresholds: Req 9.3/13.5 say "5 delivery attempts" while Req 12.2/12.3 say "maximum receive count of 3". The design treats **3** as the SQS `maxReceiveCount` (the redrive threshold) and treats **5** as an application-side upper bound for the unreadable-plate retry classification (Req 10.4). These are reconciled in Error Handling; this discrepancy should be confirmed with the requirements owner.
-- **Visibility timeout is not uniform in requirements.** Req 9.4 states 300 s while Req 13.2 states 30 s. The design sets the queue visibility timeout to **300 s** (long enough for a full OCR pipeline under load, per Req 9.4) and documents that Req 13.2's "30 seconds" is treated as the *minimum* redelivery latency expectation rather than the configured value. Flagged for confirmation.
+- **DLQ + redrive policy (implemented in `infra/main.tf`).** `ocr-processamento-fila` has `visibility_timeout_seconds = 300` and a `redrive_policy` to `ocr-processamento-fila-dlq` with `maxReceiveCount = 3`. The Worker constant `MAX_RECEIVE_COUNT` MUST stay equal to that `maxReceiveCount`.
+- **`maxReceiveCount` value (resolved 2026-09-29).** The requirements previously mixed "5 delivery attempts" (Req 9.3/10.4/13.5) with "maximum receive count of 3" (Req 12.2/12.3). All of them now use **3**, the SQS redrive `maxReceiveCount`. Because SQS moves the message to the DLQ right after its 3rd receive, the Worker classifies a message as poison when it *fails on* the 3rd delivery (`receive_count >= 3`) and audits it then; a message seen beyond 3 (redrive missing or lagging) is neither reprocessed nor re-audited.
+- **Visibility timeout (resolved 2026-09-29).** Req 9.4 and Req 13.2 now both use **300 s**, configured on the queue in `infra/main.tf`.
 - **Redis is single-node** (`cache.t3.micro`), so `DECR` is atomic on the server and no distributed lock is needed.
 
 ## Architecture
@@ -40,7 +33,7 @@ The Worker is a single long-running process with a clear separation between the 
 graph TD
     subgraph External["AWS / Floci"]
         SQS["SQS: ocr-processamento-fila"]
-        DLQ["SQS: DLQ (redrive, infra dependency)"]
+        DLQ["SQS: ocr-processamento-fila-dlq"]
         S3["S3 bucket (S3_BUCKET_NAME)"]
         RDS["RDS PostgreSQL: sessions"]
         REDIS["Redis: spots:available"]
@@ -111,16 +104,17 @@ sequenceDiagram
                 Note over P,Q: leave PROCESSING; do NOT delete; log unreadable
             else readable plate
                 P->>R: UPDATE ... SET plate, status='PARKED' WHERE status='PROCESSING'
-                R-->>P: rows affected = 1
+                R-->>P: rows affected = 1 (transaction still open)
                 P->>C: DECR spots:available
                 P->>A: PutItem action=OCR_PROCESSING
+                P->>R: COMMIT (on any failure: ROLLBACK + INCR if DECR ran)
                 P->>Q: DeleteMessage
             end
         end
     end
 ```
 
-**Why this order.** RDS is the durable, atomically-gated step. If RDS succeeds but the process crashes before Redis/DynamoDB, redelivery finds `status = PARKED`, does *not* decrement again (Req 7.4, 11.1), and re-runs the remaining idempotent side effects. Redis `DECR` runs only on the transition; DynamoDB write is naturally idempotent by `id` (`<session_id>#<timestamp_nano>`, plus a conditional put); SQS delete is last so any earlier failure leaves the message for redelivery (Req 9.2).
+**Why one transaction.** The RDS conditional `UPDATE` is the idempotency gate, and its transaction stays open while Redis `DECR` and the DynamoDB `PutItem` run; it commits only after both succeed. If either fails, the transaction rolls back (row stays `PROCESSING`) and a `DECR` that already ran is compensated with `INCR`, so the redelivery re-runs the whole pipeline from a clean state. Committing RDS first (the original design) was wrong: a Redis/DynamoDB failure left the row `PARKED`, the redelivery short-circuited on `PARKED` (Req 11.1) and the decrement/audit were lost for good. The `UPDATE` also holds the row lock until COMMIT, so concurrent deliveries on other ASG instances serialize and update zero rows. The only irreversible effect is an audit entry written right before a failed COMMIT (an extra entry, never a missing one). SQS delete is last so any earlier failure leaves the message for redelivery (Req 9.2).
 
 ### Concurrency and Signals
 
@@ -157,10 +151,11 @@ def redact(value: str) -> str:
     """Returns a fixed marker for secrets in logs (Req 14.5)."""
 ```
 
-- Required (must be non-empty): `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, `DYNAMODB_TABLE_NAME`.
+- Required (must be non-empty): `AWS_REGION`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, `DYNAMODB_TABLE_NAME`.
+- Optional: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (as a pair; absent => boto3 default credential chain, e.g. the EC2 instance profile `LabRole`) and `AWS_SESSION_TOKEN` (temporary AWS Academy credentials).
 - Optional: `AWS_ENDPOINT_URL` (absent/empty => default endpoints).
 - URL/scheme validation for `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `AWS_ENDPOINT_URL` (must be `http`/`https` when present).
-- Any log line involving credentials substitutes a redaction marker for `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and credentials embedded in `DATABASE_URL`/`REDIS_URL`.
+- Any log line involving credentials substitutes a redaction marker for `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and credentials embedded in `DATABASE_URL`/`REDIS_URL`.
 
 ### AWS client factory (`storage/clients.py`)
 
@@ -255,14 +250,16 @@ class SessionRow:
 class SessionRepository:
     def get(self, session_id: str) -> SessionRow | None:  # Req 6.3, 11.x lookups
         ...
-    def mark_parked(self, session_id: str, plate: str) -> bool:
-        """Conditional update — the idempotency gate.
+    @contextmanager
+    def parking_transition(self, session_id: str, plate: str) -> Iterator[bool]:
+        """Conditional update inside an open transaction — the idempotency gate.
         UPDATE sessions SET license_plate=%s, status='PARKED'
         WHERE id=%s AND status='PROCESSING';
-        returns True iff exactly one row was updated (Req 6.1, 6.5, 6.6, 11.5)."""
+        yields True iff exactly one row was updated; commits when the with-body
+        succeeds, rolls back when it raises (Req 6.1, 6.5, 6.6, 11.5, 13.3)."""
 ```
 
-The conditional `WHERE status='PROCESSING'` means a redelivered message that already advanced the row updates zero rows, so `mark_parked` returns `False` and the Poller skips the Redis decrement — this is the mechanism behind "exactly-once DECR per session."
+The conditional `WHERE status='PROCESSING'` means a redelivered message that already advanced the row updates zero rows, so `parking_transition` yields `False` and the Poller skips the Redis decrement — this is the mechanism behind "exactly-once DECR per session."
 
 ### Spots_Counter (`storage/spots.py`)
 
@@ -271,9 +268,12 @@ class SpotsCounter:
     def decrement(self) -> int:
         """Atomic DECR spots:available within 500ms, clamp at >=0,
         retry up to 3x on connection error (Req 7.1, 7.5, 7.6)."""
+    def increment(self) -> int:
+        """INCR spots:available — compensates a DECR whose RDS transaction
+        rolled back (Req 13.3)."""
 ```
 
-Underflow handling: after `DECR`, if the returned value is `< 0`, the counter is reset to `0` (`SET spots:available 0`) and an underflow error is emitted (Req 7.5). Because the DECR is gated behind `mark_parked() == True`, it fires exactly once per session.
+Underflow handling: after `DECR`, if the returned value is `< 0`, the counter is reset to `0` (`SET spots:available 0`) and an underflow error is emitted (Req 7.5). Because the DECR is gated behind `parking_transition` yielding `True`, it fires exactly once per session.
 
 ### Audit_Logger (`storage/audit.py`)
 
@@ -386,7 +386,7 @@ The properties below focus on the two areas that are genuinely input-driven and 
 
 ### Property 9: Ordered side effects never partially commit
 
-*For any* processing run where a side effect fails, no side effect ordered after the failed one is applied, and in particular the spots decrement is applied only after the RDS `PROCESSING -> PARKED` transition has committed.
+*For any* processing run where a side effect fails, no side effect ordered after the failed one is applied, the RDS `PROCESSING -> PARKED` transition is rolled back, and any spots decrement already applied is compensated, so the session row and the counter end exactly as before the run; a later successful delivery then applies every side effect exactly once.
 
 **Validates: Requirements 13.3**
 
@@ -418,7 +418,7 @@ Errors are modeled as explicit typed results/exceptions at the connector boundar
 |---|---|---|---|---|
 | Config | Missing/empty required var | `ConfigError(missing=[...])` | abort startup, exit != 0 | 14.2, 1.7, 6.2, 7.3, 8.6 |
 | Config | Malformed URL / bad scheme | `ConfigError(invalid=[...])` | abort startup, exit != 0 | 14.4, 15.3, 15.4 |
-| Message | Non-JSON / missing / bad `session_id` / bad `s3_key` | validation error | RETAIN + poison reason logged; SQS redrive removes | 2.3–2.6 |
+| Message | Non-JSON / missing / bad `session_id` / bad `s3_key` | validation error | RETAIN; poison reason audited on the last delivery; SQS redrive removes | 2.3–2.6 |
 | Lookup | RDS unreachable during `get` | `ConnectionError` | RETAIN, no side effects, log dependency | 11.4, 13.1, 13.2 |
 | Session | status != PROCESSING (PARKED/PAID) | terminal | DELETE, no side effects | 11.1, 11.2 |
 | Session | not found | terminal | DELETE, no side effects | 6.3, 11.3 |
@@ -426,10 +426,11 @@ Errors are modeled as explicit typed results/exceptions at the connector boundar
 | OCR | decode / no_text / timeout | `OcrResult(ok=False, error)` | RETAIN, log step | 4.4, 4.5, 4.6 |
 | Normalizer | unreadable plate | `PlateResult(ok=False)` | RETAIN, status stays PROCESSING, log unreadable | 10.1–10.3 |
 | RDS | update fails / connection | error, 0 rows | RETAIN, record unchanged, no PARKED | 6.5, 13.1 |
-| Redis | connection, after 3 retries | error | RETAIN, message unacked | 7.6, 13.1 |
+| Redis | connection, after 3 retries | error | ROLLBACK RDS, RETAIN, message unacked | 7.6, 13.1, 13.3 |
 | Redis | DECR below zero | clamp to 0 + underflow error | continue (transition already committed) | 7.5 |
-| DynamoDB | write fails after 3 retries | error, session unchanged | RETAIN, log with session_id | 8.5, 13.1 |
-| Poison | receive count > maxReceiveCount (3) | classify | POISON: audit reason (3 retries), rely on SQS redrive | 9.3, 10.4, 12.1–12.3, 13.5 |
+| DynamoDB | write fails after 3 retries | error | ROLLBACK RDS + compensating INCR, RETAIN, log with session_id | 8.5, 13.1, 13.3 |
+| RDS | COMMIT fails | error | compensating INCR, RETAIN | 6.5, 13.3 |
+| Poison | RETAIN outcome on delivery with receive count >= maxReceiveCount (3) | classify | POISON: audit reason once (3 retries), SQS redrive moves to DLQ; count > 3 => POISON without reprocessing or audit | 9.3, 10.4, 12.1–12.3, 13.5 |
 
 ### Retry policy
 
@@ -437,7 +438,7 @@ Errors are modeled as explicit typed results/exceptions at the connector boundar
 - **Redis DECR**: up to 3 attempts on connection error, message stays unacknowledged (Req 7.6).
 - **DynamoDB PutItem**: up to 3 attempts (Req 8.5); poison record write also retried up to 3 times, then the loop continues without blocking (Req 12.5).
 - **SQS receive**: on connection/authorization error, back off and retry within 30 s, never terminating the loop (Req 1.5).
-- Cross-message redelivery beyond application retries is delegated to SQS via the redrive policy (infra dependency; `maxReceiveCount = 3`).
+- Cross-message redelivery beyond application retries is delegated to SQS via the redrive policy (`maxReceiveCount = 3`, `infra/main.tf`).
 
 ### Loop resilience and shutdown
 
@@ -482,7 +483,7 @@ Each is tagged **Feature: python-ocr-worker, Property {n}: {property text}**.
 ### Integration tests against Floci
 
 - End-to-end happy path: seed a `PROCESSING` session + photo in S3, enqueue a `Session_Message`, run one poll cycle, assert `sessions.status = PARKED` with the normalized plate, `spots:available` decremented by one, one `OCR_PROCESSING` audit item, and the SQS message deleted (Req 3.1, 3.6, 4.2, 9.1).
-- **DLQ/redrive integration is blocked** until the infra module adds the DLQ + `redrive_policy` (Assumptions). Once added, add a test that a repeatedly-failing message lands in the DLQ after `maxReceiveCount` (Req 9.3, 12.3, 13.5).
+- **DLQ/redrive integration**: a repeatedly-failing message must land in `ocr-processamento-fila-dlq` after 3 receives with one `POISON_MESSAGE` audit entry (Req 9.3, 12.3, 13.5). Not yet automated.
 
 ### Smoke tests
 

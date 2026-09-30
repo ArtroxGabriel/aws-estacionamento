@@ -1,9 +1,8 @@
 """Python OCR Worker entrypoint and Poller.
 
-This module will eventually hold the full Poller (SQS long-polling loop,
-idempotency branch, ordered side effects, poison classification, and graceful
-shutdown). For now it provides the pure ``Session_Message`` parsing and
-validation layer that later Poller tasks build on.
+Holds the pure ``Session_Message`` parsing/validation layer, the Poller (SQS
+long-polling loop, idempotency branch, transactional side effects, poison
+classification, graceful shutdown) and the ``main`` startup wiring.
 
 Shared contract (from the Go API, see design.md "SQS Session_Message"):
 the SQS message body is a bare JSON object ``{"session_id", "s3_key"}`` with
@@ -23,7 +22,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import Config, ConfigError, load_config
-from ocr.clean import PlateResult, normalize as normalize_plate
+from ocr.clean import PlateResult
+from ocr.clean import normalize as normalize_plate
 from ocr.processor import OcrResult, extract_text
 from storage.audit import AuditError, AuditLogger
 from storage.clients import dynamodb_client, s3_client, sqs_client
@@ -31,7 +31,6 @@ from storage.s3_store import RetrievalError, S3Connector
 from storage.session_repo import SessionRepository
 from storage.spots import (
     SpotsCounter,
-    SpotsDecrementError,
     SpotsError,
     SpotsUnderflowError,
 )
@@ -45,11 +44,10 @@ MAX_BODY_BYTES = 256 * 1024
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 MAX_S3_KEY_LEN = 1024
 
-# A message whose SQS ``ApproximateReceiveCount`` exceeds this threshold is
-# classified as a Poison_Message (Req 12.2). This is the SQS redrive
-# ``maxReceiveCount`` (design.md "maxReceiveCount value"); the Worker relies on
-# the SQS redrive policy — an INFRA dependency, since infra/main.tf does not yet
-# define a DLQ/redrive — to move the message off the queue (Req 12.3, 13.5).
+# Must equal the ``maxReceiveCount`` of the redrive policy on
+# ``ocr-processamento-fila`` (infra/main.tf). SQS moves the message to the DLQ
+# right after its MAX_RECEIVE_COUNT-th receive, so a message that fails on that
+# delivery is classified as a Poison_Message and audited then (Req 12.1-12.3).
 MAX_RECEIVE_COUNT = 3
 
 # --- Loop / shutdown tuning ------------------------------------------------
@@ -118,16 +116,14 @@ def parse_session_message(body: str) -> ValidationResult:
     # Req 2.3: invalid JSON is a poison message with a malformed-JSON reason.
     try:
         parsed = json.loads(body)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return ValidationResult(ok=False, message=None, reason="malformed JSON")
 
     # A bare JSON object is required; anything else (array, string, number,
     # null, SNS envelope treated as a plain object without the expected fields)
     # cannot carry the Session_Message fields (Req 2.1, 2.4).
     if not isinstance(parsed, dict):
-        return ValidationResult(
-            ok=False, message=None, reason="body is not a JSON object"
-        )
+        return ValidationResult(ok=False, message=None, reason="body is not a JSON object")
 
     # Req 2.2 / 2.4: extract session_id and s3_key as UTF-8 strings, rejecting
     # missing, non-string, or empty values with a field-specific reason.
@@ -149,9 +145,7 @@ def parse_session_message(body: str) -> ValidationResult:
 
     # Req 2.5: session_id must be exactly 32 hexadecimal characters.
     if not SESSION_ID_RE.fullmatch(session_id):
-        return ValidationResult(
-            ok=False, message=None, reason="invalid session_id format"
-        )
+        return ValidationResult(ok=False, message=None, reason="invalid session_id format")
 
     # Req 2.6: s3_key must not exceed 1024 characters (emptiness handled above).
     if len(s3_key) > MAX_S3_KEY_LEN:
@@ -163,16 +157,12 @@ def parse_session_message(body: str) -> ValidationResult:
         reason=None,
     )
 
+
 # --- Poller ---------------------------------------------------------------
 #
 # The Poller owns SQS orchestration: the long-polling loop, the idempotency
 # branch, the ordered side effects, message deletion, poison classification,
-# and graceful shutdown. This task (13.1) implements the constructor, the
-# ``Outcome`` enum, and single-message end-to-end handling (``_handle``) plus
-# the private helper for the ordered side effects. The loop (``run``/
-# ``_receive``), poison-by-receive-count classification, and signal handling
-# are added by tasks 14.1 and 15.1; the class is shaped so those slot in
-# without reworking ``_handle``.
+# and graceful shutdown.
 #
 # Session status strings — the shared contract with the Go API. The Worker
 # only ever advances ``PROCESSING`` -> ``PARKED``; ``PAID`` is a terminal
@@ -274,49 +264,64 @@ class Poller:
     def _handle(self, msg: dict[str, Any]) -> Outcome:
         """Process a single SQS message end-to-end and return its outcome.
 
-        ``msg`` is a boto3 SQS message dict; only ``Body`` is consumed here (the
-        ``ReceiptHandle`` is used by the loop to delete). Domain outcomes are
-        returned as :class:`Outcome` values; this method never raises for an
-        expected failure — connector exceptions are caught and mapped to
+        ``msg`` is a boto3 SQS message dict; ``Body`` carries the payload and
+        ``Attributes.ApproximateReceiveCount`` drives poison classification
+        (the ``ReceiptHandle`` is used by the loop to delete). Domain outcomes
+        are returned as :class:`Outcome` values; this method never raises for
+        an expected failure — connector exceptions are caught and mapped to
         ``RETAIN`` per the design taxonomy.
+
+        Poison classification (Req 10.4, 12.1-12.3): the SQS redrive policy
+        moves a message to the DLQ right after its ``MAX_RECEIVE_COUNT``-th
+        receive, so that delivery is the Worker's last chance to see it. A
+        message that fails on that delivery is classified ``POISON`` and its
+        failure reason is audited once. A message seen *beyond* the threshold
+        means the redrive is missing or lagging: it was already audited, so it
+        is neither reprocessed nor re-audited.
         """
 
         body = msg.get("Body", "")
-
-        # 0. Poison-by-receive-count classification (Req 12.2). A message whose
-        # ApproximateReceiveCount has exceeded the configured maximum is a
-        # Poison_Message regardless of payload. Record the reason (best-effort,
-        # AuditLogger retries internally up to 3x then swallows) and return
-        # POISON so the loop leaves the message for SQS redrive to remove
-        # (Req 12.1, 12.3, 12.5). The DLQ/redrive is an infra dependency.
         receive_count = self._receive_count(msg)
+
         if receive_count > MAX_RECEIVE_COUNT:
-            # Best-effort: extract session_id for the audit reason if the body
-            # is well-formed; fall back to "unknown" otherwise.
-            parsed_for_poison = parse_session_message(body)
-            poison_session_id = (
-                parsed_for_poison.message.session_id
-                if parsed_for_poison.ok and parsed_for_poison.message is not None
-                else "unknown"
-            )
-            reason = (
-                f"receive count {receive_count} exceeded max {MAX_RECEIVE_COUNT}"
-            )
             logger.warning(
-                "poison message (session=%s): %s", poison_session_id, reason
+                "message received %d times (max %d); poison already recorded, "
+                "leaving it for the SQS redrive policy",
+                receive_count,
+                MAX_RECEIVE_COUNT,
             )
-            self._log_poison_best_effort(poison_session_id, reason)
             return Outcome.POISON
 
+        outcome, reason = self._process(body)
+
+        if outcome is Outcome.RETAIN and receive_count >= MAX_RECEIVE_COUNT:
+            parsed = parse_session_message(body)
+            session_id = parsed.message.session_id if parsed.message else "unknown"
+            logger.warning(
+                "poison message (session=%s) after %d deliveries: %s",
+                session_id,
+                receive_count,
+                reason,
+            )
+            self._log_poison_best_effort(session_id, reason or "processing failed")
+            return Outcome.POISON
+
+        return outcome
+
+    def _process(self, body: str) -> tuple[Outcome, str | None]:
+        """Drive one message body through the pipeline.
+
+        Returns the outcome plus, for ``RETAIN``, the failure reason that is
+        audited if this turns out to be the message's last delivery.
+        """
+
         # 1. Parse + validate the Session_Message (Req 2.x). A malformed body is
-        # left in the queue; SQS redrive removes it after maxReceiveCount. We
-        # best-effort record the poison reason so it is auditable (Req 12.1).
+        # left in the queue; its poison reason is audited on the last delivery.
         parsed = parse_session_message(body)
         if not parsed.ok or parsed.message is None:
             reason = parsed.reason or "invalid message"
-            logger.warning("poison message: %s", reason)
-            self._log_poison_best_effort("unknown", reason)
-            return Outcome.RETAIN
+            logger.warning("invalid message: %s", reason)
+            return Outcome.RETAIN, reason
 
         message = parsed.message
         session_id = message.session_id
@@ -331,21 +336,21 @@ class Poller:
                 session_id,
                 exc,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, "session lookup failed (RDS)"
 
         # 3. Idempotency branch (Req 11.1, 11.2, 11.3). A missing session or a
         # session already past PROCESSING is terminal: delete without side
         # effects.
         if row is None:
             logger.info("session %s not found; deleting message", session_id)
-            return Outcome.DELETE
+            return Outcome.DELETE, None
         if row.status in _TERMINAL_STATUSES:
             logger.info(
                 "session %s already %s; deleting message (idempotent)",
                 session_id,
                 row.status,
             )
-            return Outcome.DELETE
+            return Outcome.DELETE, None
         if row.status != STATUS_PROCESSING:
             # Any other unexpected status is treated conservatively: leave the
             # message for redelivery rather than deleting a state we do not own.
@@ -354,7 +359,7 @@ class Poller:
                 session_id,
                 row.status,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, f"unexpected session status {row.status}"
 
         # 4. Download the photo from S3 (Req 3.x). Any retrieval error retains
         # the message (fail safe toward redelivery).
@@ -367,7 +372,7 @@ class Poller:
                 message.s3_key,
                 exc.kind,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, f"S3 download failed: {exc.kind}"
         except Exception as exc:  # noqa: BLE001 - unexpected S3 failure -> RETAIN
             logger.error(
                 "S3 download error for %s (key=%s): dependency=S3: %s",
@@ -375,7 +380,7 @@ class Poller:
                 message.s3_key,
                 exc,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, "S3 download failed"
 
         # 5. OCR extraction (Req 4.x). Domain failures come back as an
         # OcrResult with ok=False; retain and log the step.
@@ -386,7 +391,7 @@ class Poller:
                 session_id,
                 ocr_result.error,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, f"OCR failed: {ocr_result.error}"
 
         # 6. Normalize the raw text into a canonical plate (Req 5.x). An
         # unreadable plate leaves the session in PROCESSING and does NOT delete
@@ -398,7 +403,7 @@ class Poller:
                 session_id,
                 plate_result.reason,
             )
-            return Outcome.RETAIN
+            return Outcome.RETAIN, f"unreadable plate: {plate_result.reason}"
 
         # 7. Ordered side effects. The plate is readable and the session is
         # PROCESSING, so apply the durable transition and its follow-on effects.
@@ -421,110 +426,93 @@ class Poller:
             return 1
         try:
             count = int(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return 1
         # Guard against a nonsensical non-positive value from the attribute.
         return count if count >= 1 else 1
 
-    def _apply_side_effects(self, session_id: str, plate: str) -> Outcome:
-        """Apply RDS -> Redis -> DynamoDB in order; the loop deletes SQS last.
+    def _apply_side_effects(self, session_id: str, plate: str) -> tuple[Outcome, str | None]:
+        """Apply RDS -> Redis -> DynamoDB atomically; the loop deletes SQS last.
 
-        The order is load-bearing (design.md "Why this order"):
-          1. RDS conditional ``UPDATE`` is the atomic idempotency gate. It
-             returns ``True`` only on the ``PROCESSING`` -> ``PARKED``
-             transition (Req 6.1, 6.6, 11.5). If it returns ``False`` a
-             concurrent delivery already advanced the row, so we skip the
-             decrement and delete the message (idempotent no-op).
-          2. Redis ``DECR`` runs *only* when ``mark_parked()`` returned ``True``
-             — the exactly-once gate for the counter (Req 7.1, 7.4).
-          3. DynamoDB ``PutItem`` records the audit entry, idempotent by ``id``.
+        The RDS conditional ``UPDATE`` is the idempotency gate (Req 6.1, 6.6,
+        11.5), and its transaction stays open while the follow-on effects run:
 
-        No side effect ordered after a failed one runs (Req 13.3): a failure in
-        any step returns ``RETAIN`` immediately, leaving the message for
-        redelivery. Because RDS commits first, redelivery finds the row already
-        ``PARKED`` and short-circuits at the idempotency branch, so the counter
-        is never decremented twice.
+          1. ``UPDATE ... WHERE status='PROCESSING'`` inside a transaction. Zero
+             rows updated means another delivery already advanced the row, so
+             nothing else runs and the message is deleted.
+          2. Redis ``DECR`` — only on the transition, so exactly once per
+             session (Req 7.1, 7.4). Underflow is clamped by the connector and
+             does not abort the transition (Req 7.5).
+          3. DynamoDB ``PutItem`` with ``action=OCR_PROCESSING`` (Req 8.1).
+          4. ``COMMIT``.
+
+        If any step fails, the transaction rolls back so the row stays
+        ``PROCESSING`` and the message is retained (Req 9.2, 13.3). A DECR that
+        already happened is compensated with an ``INCR``, so the redelivery
+        re-runs the whole pipeline from a clean state instead of finding a
+        ``PARKED`` row whose side effects were never applied. The only effect
+        that cannot be undone is an audit entry written right before a failed
+        COMMIT; that leaves an extra ``OCR_PROCESSING`` entry, never a missing
+        one.
         """
 
-        # Step 1: RDS conditional UPDATE (the idempotency gate).
+        step = "RDS"
+        decremented = False
         try:
-            transitioned = self._sessions.mark_parked(session_id, plate)
-        except Exception as exc:  # noqa: BLE001 - RDS failure -> RETAIN unchanged
-            logger.error(
-                "RDS update failed for %s: dependency=RDS: %s",
-                session_id,
-                exc,
-            )
-            return Outcome.RETAIN
+            with self._sessions.parking_transition(session_id, plate) as transitioned:
+                if not transitioned:
+                    logger.info(
+                        "session %s no longer PROCESSING at update time; "
+                        "skipping side effects, deleting message",
+                        session_id,
+                    )
+                    return Outcome.DELETE, None
 
-        if not transitioned:
-            # Zero rows updated: a concurrent/earlier delivery already advanced
-            # the row (or it left PROCESSING between lookup and update). Do NOT
-            # decrement; the transition — and thus the DECR — happened once.
-            # The message is terminal for us, so delete it (Req 11.5).
-            logger.info(
-                "session %s no longer PROCESSING at update time; "
-                "skipping decrement, deleting message",
-                session_id,
-            )
-            return Outcome.DELETE
+                step = "Redis"
+                try:
+                    self._spots.decrement()
+                    decremented = True
+                except SpotsUnderflowError as exc:
+                    # Counter clamped at 0 (net effect zero): nothing to
+                    # compensate, and the transition proceeds.
+                    logger.error("spots counter underflow for %s: %s", session_id, exc)
 
-        # Step 2: Redis DECR — gated on the transition, so it fires exactly once
-        # per session (Req 7.1, 7.4). Underflow is clamped by the connector and
-        # is not a reason to retry: the transition already committed, so we
-        # continue to the audit step.
-        try:
-            self._spots.decrement()
-        except SpotsUnderflowError as exc:
-            logger.error("spots counter underflow for %s: %s", session_id, exc)
-            # Transition already committed; continue to the audit write.
-        except SpotsDecrementError as exc:
-            logger.error(
-                "spots decrement failed for %s: dependency=Redis: %s",
-                session_id,
-                exc,
-            )
-            return Outcome.RETAIN
-        except Exception as exc:  # noqa: BLE001 - unexpected Redis failure -> RETAIN
-            logger.error(
-                "spots decrement error for %s: dependency=Redis: %s",
-                session_id,
-                exc,
-            )
-            return Outcome.RETAIN
+                step = "DynamoDB"
+                self._audit.log_ocr(session_id, plate)
 
-        # Step 3: DynamoDB audit PutItem (idempotent by id). A write failure
-        # after retries retains the message; redelivery finds PARKED and
-        # re-runs only this idempotent step (Req 8.1, 8.5, 13.1).
-        try:
-            self._audit.log_ocr(session_id, plate)
-        except AuditError as exc:
+                step = "RDS commit"
+        except Exception as exc:  # noqa: BLE001 - any failure rolls back -> RETAIN
             logger.error(
-                "audit write failed for %s: dependency=DynamoDB: %s",
+                "side effects failed for %s at step=%s; RDS rolled back: %s",
                 session_id,
+                step,
                 exc,
             )
-            return Outcome.RETAIN
-        except Exception as exc:  # noqa: BLE001 - unexpected DynamoDB failure -> RETAIN
-            logger.error(
-                "audit write error for %s: dependency=DynamoDB: %s",
-                session_id,
-                exc,
-            )
-            return Outcome.RETAIN
+            if decremented:
+                self._compensate_decrement(session_id)
+            return Outcome.RETAIN, f"{step} failed"
 
-        # All side effects committed. The loop performs the SQS DeleteMessage
-        # last, so any earlier failure would have left the message queued
-        # (Req 9.1, 9.2).
         logger.info("session %s parked with plate %s", session_id, plate)
-        return Outcome.DELETE
+        return Outcome.DELETE, None
+
+    def _compensate_decrement(self, session_id: str) -> None:
+        """Undo a DECR whose RDS transaction rolled back."""
+
+        try:
+            self._spots.increment()
+        except Exception as exc:  # noqa: BLE001 - nothing else can be done here
+            logger.error(
+                "failed to compensate spots decrement for %s; counter is now one "
+                "below the committed state until rehydrated: dependency=Redis: %s",
+                session_id,
+                exc,
+            )
 
     def _log_poison_best_effort(self, session_id: str, reason: str) -> None:
         """Record a poison classification reason without blocking (Req 12.1).
 
-        A failure to write the poison audit record must never stop the Poller;
-        the message is retained regardless, and full poison handling (receive
-        count, redrive reliance, retries) lands in task 14.1.
+        ``AuditLogger`` already retries the write up to 3 times; a final failure
+        is logged and swallowed so the Poller keeps consuming (Req 12.5).
         """
 
         try:
@@ -637,9 +625,7 @@ class Poller:
             )
             self._sleep(backoff)
             # Exponential back-off, capped so the loop retries within 30 s.
-            self._receive_backoff = min(
-                backoff * 2, float(MAX_RECEIVE_BACKOFF_SECONDS)
-            )
+            self._receive_backoff = min(backoff * 2, float(MAX_RECEIVE_BACKOFF_SECONDS))
             return []
 
         # Successful receive: reset the back-off window.
@@ -667,8 +653,7 @@ class Poller:
             )
         except Exception as exc:  # noqa: BLE001 - delete failure -> redelivery
             logger.error(
-                "SQS delete failed; message will be redelivered: "
-                "dependency=SQS: %s",
+                "SQS delete failed; message will be redelivered: dependency=SQS: %s",
                 exc,
             )
 
