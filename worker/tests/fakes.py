@@ -164,7 +164,7 @@ def make_poller(
     def fake_ocr(_image: bytes) -> OcrResult:
         return OcrResult(ok=True, raw_text=plate or "???", error=None)
 
-    def fake_normalizer(_raw: str) -> PlateResult:
+    def fake_normalizer(_raw: str, **_kwargs) -> PlateResult:
         if plate is None:
             return PlateResult(ok=False, plate=None, reason="no_match")
         return PlateResult(ok=True, plate=plate, reason=None)

@@ -94,7 +94,9 @@ def test_all_clients_share_the_custom_endpoint():
     assert {c.meta.endpoint_url for c in build_all(cfg)} == {"http://localhost:4566"}
 
 
-def test_all_clients_use_default_aws_endpoints_without_override():
+def test_all_clients_use_default_aws_endpoints_without_override(monkeypatch):
+    # boto3 itself honors AWS_ENDPOINT_URL from the process environment.
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
     cfg = load_config({**BASE_ENV, "AWS_ENDPOINT_URL": ""})
 
     for client in build_all(cfg):

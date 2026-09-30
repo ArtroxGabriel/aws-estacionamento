@@ -396,7 +396,9 @@ class Poller:
         # 6. Normalize the raw text into a canonical plate (Req 5.x). An
         # unreadable plate leaves the session in PROCESSING and does NOT delete
         # the message (Req 10.1, 10.2, 10.3).
-        plate_result: PlateResult = self._normalizer(ocr_result.raw_text)
+        plate_result: PlateResult = self._normalizer(
+            ocr_result.raw_text, mercosul=ocr_result.mercosul
+        )
         if not plate_result.ok or plate_result.plate is None:
             logger.warning(
                 "unreadable plate for %s: reason=%s; leaving status PROCESSING",
@@ -808,6 +810,11 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, poller.request_stop)
 
     # Step 7: run the loop and return its exit code (Req 16.4).
+    logger.info(
+        "worker started; polling %s (endpoint=%s)",
+        cfg.sqs_queue_url,
+        cfg.aws_endpoint_url or "default AWS",
+    )
     return poller.run()
 
 

@@ -46,7 +46,52 @@ def test_extracts_plate_from_ocr_text(raw, expected):
     assert (result.ok, result.plate) == (True, expected)
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "---", "BRASIL", "AB1234", "ABCD123"])
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Real Tesseract reads of a Mercosul "FTR5I05" photo (typeface confusions).
+        ("4\n\nFFTRS105\nBRASIL", "FTR5I05"),
+        ("BRASIL\nLFTR5LO5", "FTR5L05"),  # I read as L: a letter slot, not fixable
+        # Without the BRASIL header, fewest swaps wins: Old_Format needs one.
+        ("FFTRS105", "FTR5105"),
+        ("ABC12S4", "ABC1254"),
+        ("ABCD123", "ABC0123"),
+    ],
+)
+def test_positional_correction(raw, expected):
+    result = normalize(raw)
+    assert (result.ok, result.plate) == (True, expected)
+
+
+def test_located_mercosul_plate_allows_a_third_swap():
+    """Real read of the band-located strip of a Mercosul "FTR5I05" photo."""
+    assert normalize("FTRS1O5", mercosul=True).plate == "FTR5I05"
+    # Without the hint, 3 swaps are too many for Mercosul; Old_Format needs 2.
+    assert normalize("FTRS1O5").plate == "FTR5105"
+
+
+def test_located_mercosul_plate_is_coerced_to_mercosul_shape():
+    # Without the hint this is the Old_Format "ABC1254" (1 swap).
+    assert normalize("ABC12S4", mercosul=True).plate == "ABC1Z54"
+
+
+def test_exact_match_beats_correction():
+    # "0BC1D23" (zero) is one swap from a plate; the next line is exact.
+    assert normalize("0BC1D23\nABC1D23").plate == "ABC1D23"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "---",
+        "BRASIL",
+        "AB1234",
+        "N\nBRASIL\nOEET\n\nY\n\nBRASIL",  # real read with no plate in it
+        "ABCXYZW",  # needs 3 swaps
+    ],
+)
 def test_unreadable(raw):
     result = normalize(raw)
     assert (result.ok, result.plate) == (False, None)
