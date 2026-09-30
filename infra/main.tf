@@ -5,6 +5,21 @@ resource "aws_s3_bucket" "fotos" {
 resource "aws_sqs_queue" "ocr_queue" {
   name                      = "ocr-processamento-fila"
   message_retention_seconds = 86400
+  # Tempo para o worker concluir S3 + OCR + RDS/Redis/DynamoDB antes que a
+  # mensagem volte a ficar visível para outra instância do ASG.
+  visibility_timeout_seconds = 300
+
+  # Após 3 recebimentos sem sucesso o SQS move a mensagem para a DLQ; o worker
+  # registra a auditoria POISON_MESSAGE na 3ª entrega (MAX_RECEIVE_COUNT).
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.ocr_dlq.arn
+    maxReceiveCount     = 3
+  })
+}
+
+resource "aws_sqs_queue" "ocr_dlq" {
+  name                      = "ocr-processamento-fila-dlq"
+  message_retention_seconds = 1209600
 }
 
 resource "aws_dynamodb_table" "logs" {
