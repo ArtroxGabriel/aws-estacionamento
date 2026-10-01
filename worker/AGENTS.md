@@ -40,7 +40,7 @@ worker/
 - O Worker nunca cria a chave `spots:available`: `DECR`/`INCR` rodam em Lua só se a chave existir. Sem a chave (Redis reiniciado), a API a reconstrói do RDS; um `DECR` simples a criaria como -1 → 0 e o sistema mostraria lotação falsa.
 - Parada (SIGTERM/SIGINT): o handler lança `_Interrupted` apenas durante esperas interrompíveis (long poll do SQS e back-off); a mensagem em processamento nunca é interrompida; o resto do lote volta à fila com `VisibilityTimeout=0`.
 - O Tesseract é chamado com `timeout` do próprio `pytesseract` (mata o subprocesso); não envolva a chamada em threads.
-- OCR de foto real: a placa Mercosul é localizada pela faixa azul e o Tesseract roda primeiro no recorte dos caracteres (altura fixa de 100 px, sem a área BR/QR, com margem branca), depois na foto inteira. A fonte da placa confunde o Tesseract (`5`→`S`, `I`→`1`/`L`, `0`→`O`); o normalizador corrige por posição (até 3 trocas quando a placa foi localizada como Mercosul). Calibre mudanças de escala com fotos reais no container, não só com placas sintéticas.
+- OCR de foto real: a placa é localizada pela faixa azul Mercosul e pelo formato (retângulo com proporção de placa e >= 5 caracteres alinhados, o que cobre placas antigas e Mercosul em carro azul); o Tesseract roda primeiro nos recortes da linha de caracteres e só lê a foto inteira se nenhum recorte der uma placa exata. A fonte da placa confunde o Tesseract (`5`→`S`, `I`→`1`/`L`, `0`→`O`); o normalizador corrige por posição, linha a linha, sem `BRASIL`/`MERCOSUL` (nunca juntar linhas: gera placas falsas). Calibre com fotos reais no container, não só com placas sintéticas.
 
 ## Changelog
 - 2026-09-15: Criação do AGENTS.md do Worker com fluxo de OCR e auditoria.

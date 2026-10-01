@@ -62,11 +62,12 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
 
     OCR of a real plate returns surrounding text (the ``BRASIL`` header of a
     Mercosul plate, frame noise), so the plate is searched for rather than
-    assumed to be the first 7 characters. Each line is tried first, so text
-    from neighbouring lines cannot glue onto the plate, then the whole text
-    (the plate itself may be split across lines). Within a candidate, every
-    7-character window of the cleaned (alphanumeric-only, uppercase) text is
-    tested left to right (Req 5.1).
+    assumed to be the first 7 characters. Each line is a separate candidate,
+    with the ``BRASIL``/``MERCOSUL`` words removed: joining lines or leaving
+    those words in glued unrelated text into false plates (``BRASIL`` +
+    ``B72`` read as ``ASI1B72``). Within a candidate, every 7-character window
+    of the cleaned (alphanumeric-only, uppercase) text is tested left to right
+    (Req 5.1).
 
     Exact matches are searched first across all candidates. Only when none
     exists is a positional correction tried: each window is read against the
@@ -86,19 +87,18 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
     (including empty or non-alphanumeric-only input) yields an unreadable
     result with ``plate=None`` — never a partial or padded value (Req 5.4, 5.5).
     """
-    candidates = [_clean(line) for line in raw.splitlines()] + [_clean(raw)]
-
-    if not any(candidates):
+    if not _clean(raw):
         # Req 5.5: empty / no alphanumeric characters remaining.
         return PlateResult(ok=False, plate=None, reason="empty")
 
+    candidates = _candidates(raw)
     for cleaned in candidates:
         plate = _find_plate(cleaned)
         if plate is not None:
             # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is.
             return PlateResult(ok=True, plate=plate, reason=None)
 
-    mercosul_header = any(marker in candidates[-1] for marker in _MERCOSUL_MARKERS)
+    mercosul_header = any(marker in _clean(raw) for marker in _MERCOSUL_MARKERS)
     templates = (_TEMPLATES[0],) if mercosul or mercosul_header else _TEMPLATES
     max_swaps = _MAX_CORRECTIONS_LOCATED if mercosul else _MAX_CORRECTIONS
     for cleaned in candidates:
@@ -108,6 +108,25 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
 
     # Req 5.4: no window matches either pattern — unreadable, no padded value.
     return PlateResult(ok=False, plate=None, reason="no_match")
+
+
+def has_exact_plate(raw: str) -> bool:
+    """True when some line of ``raw`` holds a plate without any correction."""
+
+    return any(_find_plate(cleaned) is not None for cleaned in _candidates(raw))
+
+
+def _candidates(raw: str) -> list[str]:
+    """One cleaned candidate per line, with the Mercosul header words removed."""
+
+    candidates = []
+    for line in raw.splitlines():
+        cleaned = _clean(line)
+        for marker in _MERCOSUL_MARKERS:
+            cleaned = cleaned.replace(marker, "")
+        if cleaned:
+            candidates.append(cleaned)
+    return candidates
 
 
 def _clean(text: str) -> str:

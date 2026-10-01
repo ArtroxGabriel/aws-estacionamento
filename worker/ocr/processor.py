@@ -5,13 +5,17 @@ dependencies and returns explicit result objects rather than raising for domain
 outcomes (undecodable bytes, empty OCR output, timeout). See design.md
 "OCR_Processor (`ocr/processor.py`) — pure" and Requirement 4.
 
-Two kinds of image go through rescale -> grayscale -> binary threshold ->
+Three kinds of image go through rescale -> grayscale -> binary threshold ->
 Tesseract (Req 4.1), in this order and within one shared timeout budget:
 
-1. The character strip of each Mercosul plate found by ``ocr.locate`` (by its
-   blue band). This is what reads real car photos.
-2. The whole photo, as a fallback for plates without a band (Old_Format) or
-   photos that are already a tight crop.
+1. The character strip below each Mercosul blue band (``find_mercosul_plates``).
+2. The character row of each plate-shaped region, any format
+   (``find_plate_lines``): reads Old_Format plates and Mercosul plates whose
+   band merges with a blue car body.
+3. The whole photo, as a fallback for photos that are already a tight crop.
+
+When a located plate already yields an exact plate match, the whole photo is
+skipped: it costs time and only adds chances of a false match.
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ import pytesseract
 from PIL import Image, ImageOps
 from PIL.Image import UnidentifiedImageError
 
-from ocr.locate import find_mercosul_plates
+from ocr.clean import has_exact_plate
+from ocr.locate import find_mercosul_plates, find_plate_lines
 
 # Characters a Brazilian plate can contain.
 _WHITELIST = "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -35,9 +40,13 @@ _WHITELIST = "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 # nothing for a binarized crop whose "BRASIL" band turned into a black block.
 _TESSERACT_CONFIGS = tuple(f"--psm {psm} {_WHITELIST}" for psm in (7, 6, 11))
 
-# Modes for a located character strip: single word (8), raw line (13) and
-# single line (7).
+# Modes for a Mercosul band strip: single word (8), raw line (13) and single
+# line (7).
 _PLATE_CONFIGS = tuple(f"--psm {psm} {_WHITELIST}" for psm in (8, 13, 7))
+
+# Modes for a tight character row: single line (7), then block (6). Word and
+# raw-line modes break on the wide spacing of plate characters.
+_LINE_CONFIGS = tuple(f"--psm {psm} {_WHITELIST}" for psm in (7, 6))
 
 # The whole photo is rescaled so its longer side lands in this range: the
 # previous fixed 2x upscale made the characters of a 1920 px photo ~400 px
@@ -57,7 +66,7 @@ class OcrResult:
     ok: bool
     raw_text: str | None
     error: str | None  # "decode" | "no_text" | "timeout"
-    # True when a Mercosul plate was located by its blue band, so the text can
+    # True when a located plate is Mercosul (blue band found), so the text can
     # only be a Mercosul plate (lets the Plate_Normalizer rule out Old_Format).
     mercosul: bool = False
 
@@ -100,15 +109,16 @@ def _preprocess(image: Image.Image) -> Image.Image:
     return _binarize(image)
 
 
-def _preprocess_plate(strip: Image.Image) -> Image.Image:
+def _preprocess_plate(strip: Image.Image, *, left_trim: float = _PLATE_LEFT_TRIM) -> Image.Image:
     """Rescale -> grayscale -> binary threshold for a located strip (Req 4.1).
 
-    Drops the "BR"/QR zone and adds a white margin: Tesseract misreads glyphs
-    that touch the image border.
+    Drops the "BR"/QR zone (band strips only; a character row is already
+    tight) and adds a white margin: Tesseract misreads glyphs that touch the
+    image border.
     """
 
     width, height = strip.size
-    strip = strip.crop((int(width * _PLATE_LEFT_TRIM), 0, width, height))
+    strip = strip.crop((int(width * left_trim), 0, width, height))
     width, height = strip.size
     strip = strip.resize(
         (max(1, round(width * _PLATE_HEIGHT / height)), _PLATE_HEIGHT),
@@ -162,16 +172,22 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
     except UnidentifiedImageError, OSError, ValueError:
         return OcrResult(ok=False, raw_text=None, error="decode")
 
-    plates = find_mercosul_plates(image)
-    jobs = [(_preprocess_plate(strip), _PLATE_CONFIGS) for strip in plates]
-    jobs.append((_preprocess(image), _TESSERACT_CONFIGS))
+    bands = find_mercosul_plates(image)
+    lines = find_plate_lines(image)
+    mercosul = bool(bands) or any(line.mercosul for line in lines)
+    # (prepared image, Tesseract modes, is a located plate)
+    jobs = [(_preprocess_plate(strip), _PLATE_CONFIGS, True) for strip in bands]
+    jobs += [(_preprocess_plate(line.image, left_trim=0), _LINE_CONFIGS, True) for line in lines]
+    jobs.append((_preprocess(image), _TESSERACT_CONFIGS, False))
 
     # Run Tesseract under a timeout guard (Req 4.2, 4.6) shared by every call.
     # pytesseract kills the tesseract subprocess when its budget is exceeded
     # and raises RuntimeError, so a hung OCR never blocks the Poller.
     deadline = time.monotonic() + timeout_s
     outputs: list[str] = []
-    for prepared, configs in jobs:
+    for prepared, configs, located in jobs:
+        if not located and has_exact_plate("\n".join(outputs)):
+            break  # a located plate was read exactly; skip the whole photo
         for config in configs:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -191,4 +207,4 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
         return OcrResult(ok=False, raw_text=None, error="no_text")
 
     # Success: return the raw text to the caller (Req 4.3).
-    return OcrResult(ok=True, raw_text="\n".join(outputs), error=None, mercosul=bool(plates))
+    return OcrResult(ok=True, raw_text="\n".join(outputs), error=None, mercosul=mercosul)

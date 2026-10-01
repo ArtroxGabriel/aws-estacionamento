@@ -15,7 +15,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from ocr.clean import normalize
+from ocr.clean import has_exact_plate, normalize
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
@@ -73,6 +73,25 @@ def test_located_mercosul_plate_allows_a_third_swap():
 def test_located_mercosul_plate_is_coerced_to_mercosul_shape():
     # Without the hint this is the Old_Format "ABC1254" (1 swap).
     assert normalize("ABC12S4", mercosul=True).plate == "ABC1Z54"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Real read of a Mercosul "FJB4E12" photo on a blue car: joining lines
+        # and keeping "BRASIL" produced the false plate "ASI1B72".
+        "MERCOSUL B RASIL\nB 7 2\n4\n\nBRASIL\n\nMERCOSUL\n\nHO\n\nFJB4E2\n\nBR\n\nS",
+        # Real reads of separate Tesseract modes: gluing them gave "EFB4E12".
+        "FRE\nFRE\nFB4E12",
+    ],
+)
+def test_never_glues_lines_or_header_words_into_a_plate(raw):
+    assert normalize(raw).plate is None
+
+
+def test_has_exact_plate():
+    assert has_exact_plate("FE\nFJB4E12")
+    assert not has_exact_plate("FTRS1O5\nBRASIL")
 
 
 def test_exact_match_beats_correction():

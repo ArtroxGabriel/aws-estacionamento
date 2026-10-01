@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ocr import processor
 from ocr.clean import normalize
+from ocr.locate import PlateLine
 
 
 def png_bytes() -> bytes:
@@ -42,6 +43,24 @@ def test_timeout_returns_promptly(monkeypatch):
 
     assert result.error == "timeout"
     assert elapsed < 1.5
+
+
+def test_exact_read_of_a_located_plate_skips_the_whole_photo(monkeypatch):
+    line = PlateLine(Image.new("RGB", (700, 180), "white"), mercosul=False)
+    monkeypatch.setattr(processor, "find_mercosul_plates", lambda image: [])
+    monkeypatch.setattr(processor, "find_plate_lines", lambda image: [line])
+    sizes = []
+
+    def fake(image, *args, **kwargs):
+        sizes.append(image.size)
+        return "ABC1234"
+
+    monkeypatch.setattr(processor.pytesseract, "image_to_string", fake)
+
+    result = processor.extract_text(png_bytes())
+
+    assert (result.raw_text, result.mercosul) == ("ABC1234\nABC1234", False)
+    assert len(sizes) == len(processor._LINE_CONFIGS)  # never the whole photo
 
 
 def test_located_plate_is_read_first_and_flags_mercosul(monkeypatch):
@@ -155,3 +174,23 @@ def test_undecodable_bytes_skip_tesseract(monkeypatch):
     monkeypatch.setattr(processor.pytesseract, "image_to_string", must_not_run)
 
     assert processor.extract_text(b"not an image").error == "decode"
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="tesseract binary not installed")
+@pytest.mark.parametrize(
+    ("body", "plate_bg", "band", "text", "expected"),
+    [
+        ((120, 20, 25), (205, 205, 200), False, "ABC-1234", "ABC1234"),  # Old_Format
+        ((30, 70, 190), "white", True, "FJB4E12", "FJB4E12"),  # Mercosul on a blue car
+    ],
+)
+def test_real_tesseract_reads_a_plate_in_a_car_photo(body, plate_bg, band, text, expected):
+    from test_locate import plate_photo
+
+    buf = io.BytesIO()
+    plate_photo(body=body, plate_bg=plate_bg, band=band, text=text).save(buf, format="JPEG")
+
+    result = processor.extract_text(buf.getvalue())
+
+    assert result.ok, result.error
+    assert normalize(result.raw_text, mercosul=result.mercosul).plate == expected

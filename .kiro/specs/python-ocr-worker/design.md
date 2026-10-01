@@ -197,7 +197,19 @@ class Outcome(enum.Enum):
 def find_mercosul_plates(image: Image.Image) -> list[Image.Image]:
     """Crops of the character strip below each Mercosul blue band (OpenCV HSV
     mask + shape filters), largest first, at most 3."""
+
+@dataclass(frozen=True)
+class PlateLine:
+    image: Image.Image   # tight crop of the character row
+    mercosul: bool       # the zone right above the characters is band blue
+
+def find_plate_lines(image: Image.Image) -> list[PlateLine]:
+    """Any format: Canny edges -> contours whose min-area rectangle has a plate
+    aspect (2-6) -> keep those holding >= 5 aligned character-like dark blobs
+    (Otsu, connected components) -> crop the row of characters."""
 ```
+
+The band locator misses Old_Format plates (no band) and Mercosul plates on blue cars (the band merges with the body); the shape locator covers both and its character-row crop excludes the city line and the band.
 
 Tesseract cannot read a plate that is a small part of a car photo, and a global threshold rarely separates it from the car body. The Mercosul blue band is found by color; the characters are the strip below it, whose height is a fixed fraction of the band width (plate 400 x 130 mm).
 
@@ -217,10 +229,10 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
     all within one shared timeout budget."""
 ```
 
-- Located strip: trimmed of the "BR"/QR zone, rescaled to 100 px high, white margin, `--psm 8/13/7`.
+- Band strip: trimmed of the "BR"/QR zone, rescaled to 100 px high, white margin, `--psm 8/13/7`. Character row: same without the trim, `--psm 7/6`.
 - Whole photo: longer side rescaled into 1000–2000 px, `--psm 7/6/11`.
 - Every Tesseract call uses a `A-Z0-9` whitelist and the remaining budget as its `timeout` (pytesseract kills the subprocess).
-- Outputs are joined one per line, strips first.
+- Outputs are joined one per line, located plates first; the whole photo is skipped once a located plate yields an exact plate.
 
 ### Plate_Normalizer (`ocr/clean.py`) — pure
 
@@ -241,7 +253,7 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
     (Req 5.1-5.7)."""
 ```
 
-- Exact matches win over corrected ones.
+- Each line is a separate candidate with `BRASIL`/`MERCOSUL` removed; lines are never joined (that glued unrelated text into false plates such as `ASI1B72`). Exact matches win over corrected ones.
 - Corrections: at most 2 swaps, fewest swaps wins; Mercosul only when the text contains `BRASIL`/`MERCOSUL`.
 - `mercosul=True` (plate located by its band): Mercosul only, up to 3 swaps. This is what reads the Mercosul typeface, whose `5`, `I` and slashed `0` Tesseract reads as `S`, `1` and `O`.
 - Known limit: letter/letter confusions (`I` vs `L`) cannot be corrected by position.
