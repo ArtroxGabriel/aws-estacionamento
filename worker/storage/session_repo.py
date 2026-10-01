@@ -130,4 +130,3 @@ class SessionRepository:
                     (session_id,),
                 )
                 return cur.rowcount == 1
-
