@@ -137,9 +137,13 @@ func (f *FakeStorage) Download(ctx context.Context, key string) (io.ReadCloser, 
 // FakePublisher implements repository.EventPublisher
 type FakePublisher struct {
 	published []any
+	shouldErr bool
 }
 
 func (f *FakePublisher) Publish(ctx context.Context, payload any) error {
+	if f.shouldErr {
+		return errors.New("sqs publish error")
+	}
 	f.published = append(f.published, payload)
 	return nil
 }
@@ -324,3 +328,55 @@ func TestPayExit_DatabaseError(t *testing.T) {
 		t.Fatal("expected database error, got nil")
 	}
 }
+
+func TestCreateEntry_PublishFailure(t *testing.T) {
+	svc, _, _, _, pub, _ := setupService(false, false)
+	pub.shouldErr = true
+
+	photoBody := bytes.NewReader([]byte("fake-photo"))
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photoBody, "image/jpeg")
+	if err == nil {
+		t.Fatal("expected error on publish failure, got nil")
+	}
+	if session != nil {
+		t.Fatalf("expected nil session on failure, got %+v", session)
+	}
+}
+
+func TestPayExit_InvalidStatus(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+
+	sessionID := "processing-session"
+	repo.sessions[sessionID] = &model.Session{
+		ID:         sessionID,
+		Status:     "PROCESSING",
+		S3PhotoKey: "photos/processing.jpg",
+		EnteredAt:  time.Now().Add(-1 * time.Hour),
+	}
+
+	_, err := svc.PayExit(context.Background(), sessionID)
+	if err == nil {
+		t.Fatal("expected error when paying session in PROCESSING status, got nil")
+	}
+	if !errors.Is(err, service.ErrInvalidSessionStatus) {
+		t.Fatalf("expected ErrInvalidSessionStatus, got %v", err)
+	}
+
+	// Test with already PAID session
+	paidID := "paid-session"
+	repo.sessions[paidID] = &model.Session{
+		ID:         paidID,
+		Status:     "PAID",
+		S3PhotoKey: "photos/paid.jpg",
+		EnteredAt:  time.Now().Add(-2 * time.Hour),
+	}
+
+	_, err = svc.PayExit(context.Background(), paidID)
+	if err == nil {
+		t.Fatal("expected error when paying session already in PAID status, got nil")
+	}
+	if !errors.Is(err, service.ErrInvalidSessionStatus) {
+		t.Fatalf("expected ErrInvalidSessionStatus, got %v", err)
+	}
+}
+

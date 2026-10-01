@@ -120,3 +120,13 @@ class SessionRepository:
                 )
                 transitioned = cur.rowcount == 1
             yield transitioned
+
+    def mark_failed(self, session_id: str) -> bool:
+        """Mark a session as FAILED if currently PROCESSING (terminal state on DLQ)."""
+        with psycopg.connect(self._database_url, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE sessions SET status = 'FAILED' WHERE id = %s AND status = 'PROCESSING'",
+                    (session_id,),
+                )
+                return cur.rowcount == 1

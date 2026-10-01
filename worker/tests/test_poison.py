@@ -27,7 +27,7 @@ def test_last_delivery_that_fails_records_poison():
     session_id, reason = audit.poison_entries[0]
     assert session_id == SESSION_ID
     assert "unreadable" in reason
-    assert sessions.rows[SESSION_ID].status == "PROCESSING"
+    assert sessions.rows[SESSION_ID].status == "FAILED"
 
 
 def test_last_delivery_that_succeeds_is_not_poison():
