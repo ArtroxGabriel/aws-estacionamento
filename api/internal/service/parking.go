@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrSessionNotFound = errors.New("session not found")
-	ErrInvalidPhoto    = errors.New("photo is required")
+	ErrSessionNotFound      = errors.New("session not found")
+	ErrInvalidPhoto         = errors.New("photo is required")
+	ErrInvalidSessionStatus = errors.New("session is not in PARKED status")
 )
 
 type ParkingService struct {
@@ -92,10 +93,12 @@ func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, 
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	_ = s.publisher.Publish(ctx, map[string]string{
+	if err := s.publisher.Publish(ctx, map[string]string{
 		"session_id": sessionID,
 		"s3_key":     s3Key,
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("failed to publish entry event: %w", err)
+	}
 
 	_ = s.audit.LogEvent(ctx, "ENTRY", sessionID, map[string]any{
 		"s3_photo_key": s3Key,
@@ -112,6 +115,9 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	}
 	if session == nil {
 		return nil, ErrSessionNotFound
+	}
+	if session.Status != "PARKED" {
+		return nil, ErrInvalidSessionStatus
 	}
 
 	paidSession, err := s.sessionRepo.MarkAsPaid(ctx, sessionID, time.Now().UTC(), s.fixedRate)

@@ -154,8 +154,11 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 
 	repo := repository.NewRedisSpotsRepo(rdb)
 
-	t.Run("GetAvailable_InitializesWithDefault", func(t *testing.T) {
-		spots, err := repo.GetAvailable(ctx, 50)
+	t.Run("GetAvailable_ReturnsCount", func(t *testing.T) {
+		if err := repo.SetAvailable(ctx, 50); err != nil {
+			t.Fatalf("failed to set available spots: %v", err)
+		}
+		spots, err := repo.GetAvailable(ctx)
 		if err != nil {
 			t.Fatalf("failed to get available spots: %v", err)
 		}
