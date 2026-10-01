@@ -71,10 +71,10 @@ VISIBILITY_TIMEOUT_SECONDS = 300
 class _Interrupted(BaseException):
     """Raised by the stop signal handler to cut a blocking wait short.
 
-    Only raised while the loop sits in an interruptible wait (SQS long poll or
-    receive back-off), never while a message is being processed. It derives
-    from BaseException so botocore's retry handlers, which catch Exception,
-    cannot swallow it.
+    Only raised while the loop sleeps in the receive back-off, where no request
+    is in flight. Never during an SQS long poll (an abandoned poll can still
+    take a message on the server side) nor while a message is processed. It
+    derives from BaseException so no ``except Exception`` can swallow it.
     """
 
 
@@ -548,13 +548,14 @@ class Poller:
         :meth:`_receive` (Req 1.5), so this loop never terminates on transient
         failure — only on a stop signal.
 
-        On stop (Req 16.1-16.4): a long poll or back-off in progress is cut short
-        at once; a message being processed runs to completion (every step has
-        its own timeout, and its RDS transaction makes an external kill safe);
-        messages of the batch not yet started are released back to the queue
-        with visibility 0 so another instance picks them up immediately instead
-        of after the 300 s visibility timeout. Then connections are closed and
-        the exit code is ``0``.
+        On stop (Req 16.1-16.4): a receive back-off is cut short at once; a long
+        poll in progress runs to its end (at most 20 s) and everything it
+        returns is released; a message being processed runs to completion
+        (every step has its own timeout, and its RDS transaction makes an
+        external kill safe); messages of the batch not yet started are released
+        back to the queue with visibility 0 so another instance picks them up
+        immediately instead of after the 300 s visibility timeout. Then
+        connections are closed and the exit code is ``0``.
         """
 
         try:
@@ -613,8 +614,12 @@ class Poller:
 
         try:
             try:
-                response = self._interruptibly(
-                    self._sqs.receive_message,
+                # Never cut short: a long poll abandoned client-side stays open
+                # on the SQS side and can still take a message, which then
+                # stays invisible for the whole visibility timeout (300 s).
+                # A stop during the poll is handled by the loop releasing
+                # whatever the poll returns.
+                response = self._sqs.receive_message(
                     QueueUrl=self._cfg.sqs_queue_url,
                     WaitTimeSeconds=RECEIVE_WAIT_SECONDS,
                     MaxNumberOfMessages=MAX_MESSAGES,
@@ -632,9 +637,7 @@ class Poller:
                 self._interruptibly(self._sleep, backoff)
                 return []
         except _Interrupted:
-            # Messages a cut-short receive may have taken become visible again
-            # after the visibility timeout (at-least-once delivery).
-            return []
+            return []  # back-off cut short by a stop signal
 
         # Successful receive: reset the back-off window.
         self._receive_backoff = 1.0
@@ -705,10 +708,10 @@ class Poller:
         """Signal handler for SIGTERM/SIGINT that requests a graceful stop.
 
         Sets the stop flag, which the loop checks before every receive and
-        every message (Req 16.1). If the loop is blocked in an interruptible
-        wait (SQS long poll or receive back-off), raises :class:`_Interrupted`
-        so the wait ends now instead of after up to 20-30 s. A message being
-        processed is never interrupted (Req 16.2). Safe to call more than once.
+        every message (Req 16.1). If the loop is sleeping in the receive
+        back-off, raises :class:`_Interrupted` so it ends now instead of after
+        up to 30 s. Neither the SQS long poll nor a message being processed is
+        interrupted (Req 16.2). Safe to call more than once.
         """
 
         if not self._stop:

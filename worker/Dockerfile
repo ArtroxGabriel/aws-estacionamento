@@ -43,8 +43,9 @@ ENV PATH="/opt/venv/bin:${PATH}" \
 
 USER 10001:10001
 
-# O Poller trata SIGTERM/SIGINT (Req 16): interrompe o long poll na hora,
-# termina a mensagem em processamento e devolve o resto do lote à fila.
+# O Poller trata SIGTERM/SIGINT (Req 16): espera o long poll do SQS terminar
+# (até 20 s), termina a mensagem em processamento e devolve o resto à fila.
+# Pare com um timeout maior que isso: `docker stop -t 30`.
 STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["tini", "--", "python", "worker.py"]

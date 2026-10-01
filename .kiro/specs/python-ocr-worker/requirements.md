@@ -229,7 +229,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Poller SHALL stop requesting new messages and SHALL end an SQS long poll or receive back-off in progress within 1 second.
+1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Poller SHALL stop requesting new messages, SHALL end a receive back-off in progress within 1 second, and SHALL let an SQS long poll in progress run to its end (at most 20 seconds) and release every message it returns with a visibility timeout of 0, because a long poll abandoned client-side can still take a message on the SQS side and hide it for the whole visibility timeout.
 2. WHILE a message is being processed at the time a termination signal is received, THE Poller SHALL complete or fail that message before the process exits, without interrupting it.
 3. WHEN a termination signal is received while a batch still has messages not yet started, THE Poller SHALL release those messages back to the SQS_Queue with a visibility timeout of 0 so another consumer receives them immediately.
 4. WHEN the Worker exits, THE Worker SHALL close its RDS, Redis, and AWS client connections and SHALL exit with a success status code (0). A process killed externally mid-message leaves the RDS transaction uncommitted and the message for redelivery.

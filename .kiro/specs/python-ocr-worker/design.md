@@ -480,7 +480,7 @@ Errors are modeled as explicit typed results/exceptions at the connector boundar
 ### Loop resilience and shutdown
 
 - Any per-message exception is caught by the loop, logged with the failed step and dependency, and the loop continues to the next message within 1 s (Req 12.4, 13.4).
-- On `SIGTERM`/`SIGINT` the handler sets a stop flag and, only while the loop is in an interruptible wait (SQS long poll or receive back-off), raises `_Interrupted` (a `BaseException`, so botocore's retry handlers cannot swallow it) to end the wait at once (Req 16.1). A message being processed is never interrupted (Req 16.2); the batch's remaining messages are released with `ChangeMessageVisibilityBatch(VisibilityTimeout=0)` (Req 16.3); connections are closed, continuing past individual close failures, and the exit code is 0 (Req 16.4, 16.5). The container runs `tini` as PID 1 so an early SIGTERM is not dropped.
+- On `SIGTERM`/`SIGINT` the handler sets a stop flag. A receive back-off in progress is cut short by raising `_Interrupted` (a `BaseException`). An SQS long poll is never cut short: abandoning it client-side leaves the request open on the SQS side, where it can still take a message that then stays invisible for 300 s (observed on Floci); the loop lets it finish (at most 20 s) and releases what it returns. A message being processed is never interrupted (Req 16.2); the batch's remaining messages are released with `ChangeMessageVisibilityBatch(VisibilityTimeout=0)` (Req 16.1, 16.3); connections are closed, continuing past individual close failures, and the exit code is 0 (Req 16.4, 16.5). The container runs `tini` as PID 1 so an early SIGTERM is not dropped; stop it with `docker stop -t 30`.
 
 ## Testing Strategy
 

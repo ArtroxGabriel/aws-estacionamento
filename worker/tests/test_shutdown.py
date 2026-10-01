@@ -9,23 +9,22 @@ import time
 from fakes import SESSION_ID, make_message, make_poller
 
 
-def test_stop_during_long_poll_ends_the_wait_at_once():
-    """Regression: the loop kept waiting for the in-flight long poll (up to
-    20 s), so `docker stop` with its default 10 s timeout killed the worker."""
-    poller, _, _, _, sqs = make_poller()
+def test_stop_during_long_poll_lets_it_finish_and_releases_what_it_got():
+    """Regression: cutting the long poll short client-side left the request
+    open on the SQS side; a message that arrived next was handed to that dead
+    request and stayed invisible for the 300 s visibility timeout (observed on
+    Floci). The poll must run to its end and its messages be released."""
+    poller, sessions, spots, _, sqs = make_poller()
+    sqs.batches = [[make_message(handle="rh-1"), make_message(handle="rh-2")]]
+    sqs.on_receive = lambda: poller.request_stop(15, None)  # signal mid-poll
 
-    def blocked_long_poll():
-        poller.request_stop(15, None)
-        time.sleep(5)  # never reached: the handler cuts the wait short
+    assert poller.run() == 0
 
-    sqs.on_receive = blocked_long_poll
-
-    started = time.monotonic()
-    exit_code = poller.run()
-
-    assert exit_code == 0
-    assert time.monotonic() - started < 1
     assert sqs.receives == 1
+    assert sqs.released == ["rh-1", "rh-2"]
+    assert sqs.deleted == []
+    assert sessions.rows[SESSION_ID].status == "PROCESSING"
+    assert spots.decrements == 0
 
 
 def test_stop_during_receive_backoff_ends_the_wait_at_once():
