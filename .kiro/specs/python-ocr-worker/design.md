@@ -205,11 +205,12 @@ class PlateLine:
 
 def find_plate_lines(image: Image.Image) -> list[PlateLine]:
     """Any format: Canny edges -> contours whose min-area rectangle has a plate
-    aspect (2-6) -> keep those holding >= 5 aligned character-like dark blobs
-    (Otsu, connected components) -> crop the row of characters."""
+    aspect (2-6) -> straighten by the rectangle angle when tilted >= 5 degrees
+    -> keep those holding >= 5 aligned character-like dark blobs (Otsu,
+    connected components) -> crop the row of characters."""
 ```
 
-The band locator misses Old_Format plates (no band) and Mercosul plates on blue cars (the band merges with the body); the shape locator covers both and its character-row crop excludes the city line and the band.
+Band pixels must be saturated and bright (HSV S >= 120, V >= 90) and a band at least 10% of the photo wide: a dark bluish bumper shadow otherwise passed as a band and forced the Mercosul format on an Old_Format plate. Level plates are not rotated, because resampling blurred the Mercosul typeface into worse reads. The band locator misses Old_Format plates (no band) and Mercosul plates on blue cars (the band merges with the body); the shape locator covers both and its character-row crop excludes the city line and the band.
 
 Tesseract cannot read a plate that is a small part of a car photo, and a global threshold rarely separates it from the car body. The Mercosul blue band is found by color; the characters are the strip below it, whose height is a fixed fraction of the band width (plate 400 x 130 mm).
 
@@ -253,7 +254,7 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
     (Req 5.1-5.7)."""
 ```
 
-- Each line is a separate candidate with `BRASIL`/`MERCOSUL` removed; lines are never joined (that glued unrelated text into false plates such as `ASI1B72`). Exact matches win over corrected ones.
+- Each line is a separate candidate with `BRASIL`/`MERCOSUL` removed; lines are never joined (that glued unrelated text into false plates such as `ASI1B72`). Exact matches win over corrected ones; among exact reads the most frequent wins (several crops and Tesseract modes read the same plate, so one misread such as `FIB4E12` cannot beat repeated `FJB4E12`).
 - Corrections: at most 2 swaps, fewest swaps wins; Mercosul only when the text contains `BRASIL`/`MERCOSUL`.
 - `mercosul=True` (plate located by its band): Mercosul only, up to 3 swaps. This is what reads the Mercosul typeface, whose `5`, `I` and slashed `0` Tesseract reads as `S`, `1` and `O`.
 - Known limit: letter/letter confusions (`I` vs `L`) cannot be corrected by position.

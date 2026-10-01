@@ -27,14 +27,18 @@ from PIL import Image
 
 __all__ = ["PlateLine", "find_mercosul_plates", "find_plate_lines"]
 
-# OpenCV HSV range (H in 0-180) of the Mercosul band blue.
-_BLUE_LOW = (95, 80, 60)
+# OpenCV HSV range (H in 0-180) of the Mercosul band blue. Real bands measure
+# S ~190-240 and V ~160; the floor rejects bluish shadows (S ~95, V ~65) that
+# otherwise passed as a band and flagged an Old_Format plate as Mercosul.
+_BLUE_LOW = (95, 120, 90)
 _BLUE_HIGH = (130, 255, 255)
 
 # Shape filters for the band's bounding box: a wide, thin stripe that is not
 # negligible in the frame (rejects blue badges, sky patches, stickers).
 _MIN_ASPECT, _MAX_ASPECT = 4.0, 16.0
 _MIN_BAND_WIDTH_PX = 60
+# A band narrower than this share of the photo is a badge or a shadow.
+_MIN_BAND_WIDTH_FRACTION = 0.1
 _MIN_AREA_FRACTION = 0.001
 
 # Character strip relative to the band: it starts slightly above the band's
@@ -57,6 +61,9 @@ _PLATE_AREA_FRACTION = (0.003, 0.5)
 _CHAR_HEIGHT = (0.3, 0.9)
 _CHAR_WIDTH = (0.02, 0.25)
 _MIN_CHARS = 5
+
+# Plates tilted less than this are cropped as they are, not rotated upright.
+_MIN_TILT_DEGREES = 5.0
 
 # Margin around the character row, as a fraction of the character height.
 _LINE_MARGIN = 0.15
@@ -95,7 +102,7 @@ def find_mercosul_plates(image: Image.Image) -> list[Image.Image]:
     bands = []
     for contour in contours:
         x, y, band_w, band_h = cv2.boundingRect(contour)
-        if band_w < _MIN_BAND_WIDTH_PX or band_h == 0:
+        if band_w < max(_MIN_BAND_WIDTH_PX, _MIN_BAND_WIDTH_FRACTION * width) or band_h == 0:
             continue
         if not _MIN_ASPECT <= band_w / band_h <= _MAX_ASPECT:
             continue
@@ -116,6 +123,8 @@ def find_mercosul_plates(image: Image.Image) -> list[Image.Image]:
 def find_plate_lines(image: Image.Image) -> list[PlateLine]:
     """Return the character row of each plate-shaped region, any format.
 
+    Each candidate is straightened by the angle of its minimum-area rectangle
+    before its characters are looked for, so tilted plates are read too.
     Ordered by number of characters found, then plate area (largest first),
     duplicates removed, capped at ``_MAX_PLATES``.
     """
@@ -130,44 +139,67 @@ def find_plate_lines(image: Image.Image) -> list[PlateLine]:
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     frame_area = small.shape[0] * small.shape[1]
-    found: dict[tuple[int, ...], tuple[int, int, bool, tuple[int, int, int, int]]] = {}
+    found: dict[tuple[int, int], tuple[int, float, bool, np.ndarray]] = {}
     for contour in contours:
-        _, (rect_w, rect_h), _ = cv2.minAreaRect(contour)
-        if min(rect_w, rect_h) == 0:
+        (cx, cy), (rect_w, rect_h), angle = cv2.minAreaRect(contour)
+        # Bring the angle into [-45, 45] so the long side is the width.
+        while angle > 45:
+            angle, rect_w, rect_h = angle - 90, rect_h, rect_w
+        while angle < -45:
+            angle, rect_w, rect_h = angle + 90, rect_h, rect_w
+        if rect_h == 0 or rect_w <= rect_h:
             continue
-        aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
-        area = rect_w * rect_h / frame_area
-        if not (_PLATE_ASPECT[0] <= aspect <= _PLATE_ASPECT[1]):
+        if not (_PLATE_ASPECT[0] <= rect_w / rect_h <= _PLATE_ASPECT[1]):
             continue
-        if not (_PLATE_AREA_FRACTION[0] <= area <= _PLATE_AREA_FRACTION[1]):
+        if not (_PLATE_AREA_FRACTION[0] <= rect_w * rect_h / frame_area <= _PLATE_AREA_FRACTION[1]):
             continue
 
-        x, y, w, h = (round(v / scale) for v in cv2.boundingRect(contour))
-        row = _character_row(gray[y : y + h, x : x + w])
+        center = (cx / scale, cy / scale)
+        plate_w, plate_h = rect_w / scale, rect_h / scale
+        # Rotating resamples the pixels and blurs the plate typeface, which
+        # made a level Mercosul plate read worse; only tilted plates pay that.
+        if abs(angle) < _MIN_TILT_DEGREES:
+            upright = rgb
+        else:
+            upright = cv2.warpAffine(
+                rgb,
+                cv2.getRotationMatrix2D(center, angle, 1.0),
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+        left = max(0, round(center[0] - plate_w / 2))
+        top = max(0, round(center[1] - plate_h / 2))
+        plate = upright[top : top + round(plate_h), left : left + round(plate_w)]
+        row = _character_row(cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)) if plate.size else None
         if row is None:
             continue
         x0, y0, x1, y1, count = row
+        x0, y0, x1, y1 = left + x0, top + y0, left + x1, top + y1
         margin = round(_LINE_MARGIN * (y1 - y0))
-        box = (
-            max(0, x + x0 - margin),
-            max(0, y + y0 - margin),
-            min(width, x + x1 + margin),
-            min(height, y + y1 + margin),
-        )
-        # Measured from the character row, not the contour: the contour found
-        # may be the white area below the band rather than the whole plate.
-        top = y + y0
-        zone_top = max(0, round(top - _BAND_ZONE * (y1 - y0)))
-        mercosul = _is_blue(rgb[zone_top:top, x + x0 : x + x1])
-        # The same plate is usually found by several nested contours.
-        key = tuple(round(v / 20) for v in box)
-        if key not in found or w * h > found[key][1]:
-            found[key] = (count, w * h, mercosul, box)
+        line = upright[
+            max(0, y0 - margin) : min(height, y1 + margin),
+            max(0, x0 - margin) : min(width, x1 + margin),
+        ]
+        # Measured above the character row, not inside the contour: the
+        # contour found may be the white area below the band, not the plate.
+        zone_top = max(0, round(y0 - _BAND_ZONE * (y1 - y0)))
+        mercosul = _is_blue(upright[zone_top:y0, x0:x1])
+        # The same plate is usually found by several nested contours whose
+        # centers differ; their character rows coincide, so key on the row's
+        # center in units of half a character height.
+        unit = max(1, (y1 - y0) / 2)
+        key = (round((x0 + x1) / 2 / unit), round((y0 + y1) / 2 / unit))
+        area = plate_w * plate_h
+        if key not in found or (count, area) > found[key][:2]:
+            found[key] = (count, area, mercosul, line)
 
     ranked = sorted(found.values(), key=lambda item: (item[0], item[1]), reverse=True)
-    return [PlateLine(image.crop(box), mercosul) for _, _, mercosul, box in ranked[:_MAX_PLATES]]
+    return [
+        PlateLine(Image.fromarray(np.ascontiguousarray(line)), mercosul)
+        for _, _, mercosul, line in ranked[:_MAX_PLATES]
+    ]
 
 
 def _character_row(gray: np.ndarray) -> tuple[int, int, int, int, int] | None:

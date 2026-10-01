@@ -12,6 +12,7 @@ Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 # Length of a plate in both formats once the Old_Format hyphen is stripped.
@@ -92,11 +93,15 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
         return PlateResult(ok=False, plate=None, reason="empty")
 
     candidates = _candidates(raw)
-    for cleaned in candidates:
-        plate = _find_plate(cleaned)
-        if plate is not None:
-            # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is.
-            return PlateResult(ok=True, plate=plate, reason=None)
+    exact = [plate for plate in map(_find_plate, candidates) if plate is not None]
+    if exact:
+        # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is. Several crops
+        # and Tesseract modes read the same plate, so the most frequent exact
+        # read wins (earliest on a tie): a single misread such as "FIB4E12"
+        # must not beat six "FJB4E12".
+        counts = Counter(exact)
+        plate = max(exact, key=lambda p: (counts[p], -exact.index(p)))
+        return PlateResult(ok=True, plate=plate, reason=None)
 
     mercosul_header = any(marker in _clean(raw) for marker in _MERCOSUL_MARKERS)
     templates = (_TEMPLATES[0],) if mercosul or mercosul_header else _TEMPLATES

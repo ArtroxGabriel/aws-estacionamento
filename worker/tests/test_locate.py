@@ -100,3 +100,27 @@ def test_plate_shaped_regions_without_characters_are_ignored():
     draw.rectangle([400, 300, 1200, 560], fill=(205, 205, 200), outline=(20, 20, 20), width=10)
 
     assert find_plate_lines(img) == []
+
+
+def test_finds_a_tilted_old_format_plate():
+    """Regression: a real "HIG-1972" photo tilted ~19 degrees was not found,
+    because its characters are not on a horizontal row until straightened."""
+    photo = plate_photo(body=(60, 60, 65), plate_bg=(205, 205, 200), band=False, text="ABC-1234")
+    tilted = photo.rotate(15, resample=Image.Resampling.BICUBIC, fillcolor=(60, 60, 65))
+
+    lines = find_plate_lines(tilted)
+
+    assert len(lines) == 1 and lines[0].mercosul is False
+    width, height = lines[0].image.size
+    assert width / height > 3  # an upright row, not a tilted bounding box
+
+
+def test_bluish_shadow_or_narrow_badge_is_not_a_band():
+    """Regression: a dark bluish shadow on the bumper of an Old_Format photo
+    (S ~95, V ~65) passed as a Mercosul band and forced the Mercosul format."""
+    img = Image.new("RGB", (740, 420), (90, 90, 95))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([70, 394, 142, 410], fill=(40, 50, 75))  # shadow, aspect 4.5
+    draw.rectangle([400, 100, 460, 112], fill=BAND_BLUE)  # bright but 8% wide
+
+    assert find_mercosul_plates(img) == []

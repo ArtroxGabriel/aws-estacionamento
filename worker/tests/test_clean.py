@@ -89,6 +89,18 @@ def test_never_glues_lines_or_header_words_into_a_plate(raw):
     assert normalize(raw).plate is None
 
 
+def test_most_frequent_exact_read_wins():
+    """Real reads of a Mercosul "FJB4E12" photo: one crop misread J as I."""
+    assert normalize("DB\nDB\nFIB4E12\nFJB4E12\nFJB4E12", mercosul=True).plate == "FJB4E12"
+    assert normalize("ABC1234\nABC1D23").plate == "ABC1234"  # tie -> earliest
+
+
+def test_real_read_of_a_tilted_old_format_plate():
+    """Real read of an "HIG-1972" photo tilted ~19 degrees (I read as 1)."""
+    raw = "H1G1972\nH1G1972\nVSS\nWG\nFEE\n\nE\n\n3\n\n0\n\n12\n\nH\n\nOY"
+    assert normalize(raw).plate == "HIG1972"
+
+
 def test_has_exact_plate():
     assert has_exact_plate("FE\nFJB4E12")
     assert not has_exact_plate("FTRS1O5\nBRASIL")
