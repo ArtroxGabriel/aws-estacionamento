@@ -17,7 +17,7 @@
 infra/
 ├── docker-compose.yaml     # Floci (4566, proxy RDS 5432-5440, proxy ElastiCache 6379-6399)
 ├── provider.tf             # Provider AWS com chaveamento para Floci (S3, SQS, DynamoDB, RDS, ElastiCache)
-├── main.tf                 # Buckets S3, Fila SQS, DynamoDB, RDS PostgreSQL e ElastiCache Redis
+├── main.tf                 # Buckets S3, Fila SQS + DLQ, DynamoDB, RDS PostgreSQL e ElastiCache Redis
 ├── outputs.tf              # ARNs e URLs dos recursos provisionados
 └── autoscaling.tf          # (Parte 2) Launch Template, ASG, ALB e CloudWatch Alarms
 ```
@@ -35,11 +35,13 @@ infra/
 ## Architecture Conventions
 
 - A variável `use_localstack` (default `true`) controla se os endpoints apontam para `http://localhost:4566` ou para os serviços gerenciados da AWS.
+- Fila `ocr-processamento-fila`: `visibility_timeout_seconds = 300` e `redrive_policy` para `ocr-processamento-fila-dlq` com `maxReceiveCount = 3`. O `maxReceiveCount` deve ser igual a `MAX_RECEIVE_COUNT` em `worker/worker.py` (o worker audita a mensagem como `POISON_MESSAGE` na última entrega).
 - Configurações da Parte 2 (Auto Scaling):
   - CPU > 70% por > 1 min: dispara scale-out (+1 instância, máx 3).
   - CPU < 25% por > 1 min: dispara scale-in (-1 instância, mín 1).
 
 ## Changelog
 
+- 2026-09-29: DLQ `ocr-processamento-fila-dlq` + redrive policy (`maxReceiveCount = 3`) e visibility timeout de 300 s na fila de OCR.
 - 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md de Infraestrutura com parâmetros de elasticidade.
