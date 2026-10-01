@@ -306,6 +306,8 @@ class Poller:
                 reason,
             )
             self._log_poison_best_effort(session_id, reason or "processing failed")
+            if parsed.message is not None:
+                self._mark_session_failed_best_effort(session_id)
             return Outcome.POISON
 
         return outcome
@@ -526,6 +528,20 @@ class Poller:
         except Exception as exc:  # noqa: BLE001 - poison audit is best-effort
             logger.error(
                 "failed to record poison reason for %s: %s",
+                session_id,
+                exc,
+            )
+
+    def _mark_session_failed_best_effort(self, session_id: str) -> None:
+        """Mark a session as FAILED in RDS when discarded to DLQ (best-effort)."""
+        mark_failed = getattr(self._sessions, "mark_failed", None)
+        if not callable(mark_failed):
+            return
+        try:
+            mark_failed(session_id)
+        except Exception as exc:  # noqa: BLE001 - best-effort status update
+            logger.error(
+                "failed to mark session %s as FAILED in RDS: %s",
                 session_id,
                 exc,
             )

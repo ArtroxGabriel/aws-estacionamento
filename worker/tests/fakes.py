@@ -59,6 +59,13 @@ class FakeSessionRepository:
             self.rows[session_id] = snapshot
             raise CommitError("COMMIT failed")
 
+    def mark_failed(self, session_id: str) -> bool:
+        row = self.rows.get(session_id)
+        if row is not None and row.status == "PROCESSING":
+            self.rows[session_id] = replace(row, status="FAILED")
+            return True
+        return False
+
 
 class FakeSpotsCounter:
     """``value=None`` models the ``spots:available`` key being absent."""
