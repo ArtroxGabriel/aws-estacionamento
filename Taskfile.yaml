@@ -138,11 +138,29 @@ tasks:
     cmds:
       - uv run python worker.py
 
+  install:web:
+    desc: Instala as dependências do frontend a partir do package-lock.json
+    dir: "{{.WEB_DIR}}"
+    cmds:
+      - npm ci
+
   dev:web:
     desc: Inicia o servidor de desenvolvimento do React/Vite
     dir: "{{.WEB_DIR}}"
     cmds:
       - npm run dev
+
+  test:web:
+    desc: Executa os testes do frontend (Vitest)
+    dir: "{{.WEB_DIR}}"
+    cmds:
+      - npm run test -- --run
+
+  lint:web:
+    desc: Executa o linter do frontend
+    dir: "{{.WEB_DIR}}"
+    cmds:
+      - npm run lint
 
   build:web:
     desc: Gera o bundle estático do frontend
