@@ -82,8 +82,10 @@
   - `task dev:api`: Executa a API Go
   - `task dev:worker`: Executa o Worker Python
   - `docker build -t estacionamento-worker ./worker` + `docker run --network container:floci_aws --env-file worker/floci.env estacionamento-worker`: Worker em container com Tesseract (ver `worker/README.md`)
-  - `task dev:web`: Inicia servidor local Vite
+  - `task dev:web`: Inicia servidor local Vite (proxy `/api` → `localhost:8080`)
+  - `task install:web` / `task test:web` / `task lint:web`: Dependências, testes (Vitest) e lint do frontend
   - `task build:web`: Gera bundle estático do frontend
+  - `docker build -t estacionamento-web ./web`: Frontend em nginx com proxy `/api/` → `API_UPSTREAM` (ver `web/AGENTS.md`)
 
 ## Environment / Setup
 
@@ -111,6 +113,7 @@ Configurar variáveis locais no `.env`:
 
 ## Changelog
 
+- 2026-10-03: Frontend web (painel, totem de entrada, caixa/saída e auditoria) consumindo a API existente.
 - 2026-09-30: Worker com Dockerfile (Tesseract + OpenCV), localização da placa Mercosul, DLQ na fila de OCR e efeitos colaterais transacionais.
 - 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md raiz com pipeline detalhado dos 6 serviços AWS.
