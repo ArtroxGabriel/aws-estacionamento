@@ -96,6 +96,12 @@ export async function listAuditEvents(): Promise<AuditEvent[]> {
   return data ?? [];
 }
 
+// Falhas que tendem a se resolver sozinhas (rede, troca de instância no ALB, sobrecarga):
+// vale tentar de novo. Demais 4xx são definitivos.
+export function isTransientError(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 0 || err.status === 429 || err.status >= 500);
+}
+
 // Converte um erro em mensagem para a interface (seção 3.3 de docs/frontend.md).
 export function errorMessage(err: unknown, context: "session" | "resource" = "resource"): string {
   if (!(err instanceof ApiError)) return "Erro inesperado. Tente novamente.";

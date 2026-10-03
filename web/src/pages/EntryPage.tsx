@@ -3,12 +3,28 @@ import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
 import TicketCard from "../components/TicketCard";
 import { usePolling } from "../hooks/usePolling";
-import { createEntry, errorMessage, getSession } from "../services/api";
+import { createEntry, errorMessage, getSession, isTransientError } from "../services/api";
 import type { Session } from "../types/api";
 
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
-const OCR_POLL_INTERVAL_MS = 2000;
-const OCR_POLL_TIMEOUT_MS = 60_000;
+// Acompanhamento do OCR em duas fases: rápida enquanto o carro está na cancela e lenta
+// até o prazo em que o worker desiste de uma placa ilegível. O worker só marca FAILED na
+// 3ª entrega da mensagem no SQS (visibility timeout de 300 s), ~10 min após a entrada.
+const OCR_FAST_INTERVAL_MS = 2000;
+const OCR_FAST_PHASE_MS = 60_000;
+const OCR_SLOW_INTERVAL_MS = 15_000;
+const OCR_TRACKING_LIMIT_MS = 12 * 60_000;
+
+// fast/slow: consultando · expired: prazo esgotado · stopped: erro definitivo na consulta
+type TrackingPhase = "fast" | "slow" | "expired" | "stopped";
+
+interface Tracking {
+  id: string; // ticket acompanhado: respostas atrasadas de outro ticket são ignoradas
+  round: number; // incrementa a cada "Tentar novamente" para reiniciar os prazos
+  phase: TrackingPhase;
+  offline: boolean; // última consulta falhou com erro transitório
+  error?: string; // mensagem do erro definitivo (phase = "stopped")
+}
 
 function validatePhoto(file: File | undefined): string | undefined {
   if (!file) return "Selecione a foto do veículo.";
@@ -24,10 +40,7 @@ export default function EntryPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   const [ticket, setTicket] = useState<Session>();
-  // IDs do ticket cujo acompanhamento terminou; respostas atrasadas de um ticket antigo
-  // não afetam o ticket atual.
-  const [expiredId, setExpiredId] = useState<string>();
-  const [pollFailedId, setPollFailedId] = useState<string>();
+  const [tracking, setTracking] = useState<Tracking>();
 
   // Revoga a URL da pré-visualização ao trocar a imagem ou desmontar.
   useEffect(() => {
@@ -35,28 +48,76 @@ export default function EntryPage() {
     return () => URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
 
-  // Acompanhamento do OCR: consulta a sessão enquanto estiver PROCESSING, por no máximo 60 s.
-  // Em erro na consulta apenas encerra o acompanhamento: o ticket já é válido.
+  // Atualiza o acompanhamento só se ainda for do mesmo ticket e da mesma rodada.
+  const updateTracking = useCallback(
+    (id: string, round: number | undefined, change: Partial<Tracking>) =>
+      setTracking((current) =>
+        current?.id === id && (round === undefined || current.round === round)
+          ? { ...current, ...change }
+          : current,
+      ),
+    [],
+  );
+
+  // Erros transitórios (rede, 5xx, 429) mantêm a consulta e só exibem um aviso; erro
+  // definitivo encerra o acompanhamento com mensagem. O ticket já é válido em ambos.
   const ticketId = ticket?.id;
   const fetchTicket = useCallback(async () => {
+    const id = ticketId ?? "";
     try {
-      const session = await getSession(ticketId ?? "");
+      const session = await getSession(id);
       setTicket((current) => (current?.id === session.id ? session : current));
+      updateTracking(id, undefined, { offline: false });
       return session;
     } catch (err) {
-      setPollFailedId(ticketId);
+      updateTracking(
+        id,
+        undefined,
+        isTransientError(err)
+          ? { offline: true }
+          : { phase: "stopped", offline: false, error: errorMessage(err, "session") },
+      );
       throw err;
     }
-  }, [ticketId]);
-  const enabled =
-    ticket?.status === "PROCESSING" && expiredId !== ticketId && pollFailedId !== ticketId;
-  usePolling(fetchTicket, OCR_POLL_INTERVAL_MS, { enabled });
+  }, [ticketId, updateTracking]);
 
+  const polling =
+    ticket?.status === "PROCESSING" &&
+    tracking !== undefined &&
+    tracking.id === ticketId &&
+    (tracking.phase === "fast" || tracking.phase === "slow");
+  const interval = tracking?.phase === "slow" ? OCR_SLOW_INTERVAL_MS : OCR_FAST_INTERVAL_MS;
+  usePolling(fetchTicket, interval, { enabled: polling });
+
+  const trackingId = tracking?.id;
+  const trackingRound = tracking?.round;
   useEffect(() => {
-    if (!ticketId) return;
-    const timer = setTimeout(() => setExpiredId(ticketId), OCR_POLL_TIMEOUT_MS);
-    return () => clearTimeout(timer);
-  }, [ticketId]);
+    if (trackingId === undefined) return;
+    const slow = setTimeout(
+      () => updateTracking(trackingId, trackingRound, { phase: "slow" }),
+      OCR_FAST_PHASE_MS,
+    );
+    const expire = setTimeout(
+      () => updateTracking(trackingId, trackingRound, { phase: "expired" }),
+      OCR_TRACKING_LIMIT_MS,
+    );
+    return () => {
+      clearTimeout(slow);
+      clearTimeout(expire);
+    };
+  }, [trackingId, trackingRound, updateTracking]);
+
+  function restartTracking() {
+    setTracking((current) =>
+      current && {
+        ...current,
+        round: current.round + 1,
+        phase: "fast",
+        offline: false,
+        error: undefined,
+      },
+    );
+  }
 
   function selectFile(selected: File | undefined) {
     setFile(selected);
@@ -82,7 +143,9 @@ export default function EntryPage() {
     setSubmitting(true);
     setError(undefined);
     try {
-      setTicket(await createEntry(file));
+      const session = await createEntry(file);
+      setTicket(session);
+      setTracking({ id: session.id, round: 0, phase: "fast", offline: false });
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -95,6 +158,7 @@ export default function EntryPage() {
     setFileError(undefined);
     setError(undefined);
     setTicket(undefined);
+    setTracking(undefined);
   }
 
   return (
@@ -112,6 +176,7 @@ export default function EntryPage() {
           {ticket.status === "FAILED" && (
             <Alert variant="warning">Não foi possível ler a placa. Procure o operador.</Alert>
           )}
+          {ticket.status === "PROCESSING" && <TrackingStatus tracking={tracking} onRetry={restartTracking} />}
           <button
             type="button"
             onClick={handleReset}
@@ -176,4 +241,34 @@ export default function EntryPage() {
       )}
     </div>
   );
+}
+
+function TrackingStatus({ tracking, onRetry }: { tracking?: Tracking; onRetry: () => void }) {
+  if (!tracking) return null;
+  if (tracking.phase === "stopped") {
+    return (
+      <Alert variant="error" onRetry={onRetry}>
+        Não foi possível acompanhar a leitura da placa: {tracking.error} O ticket é válido.
+      </Alert>
+    );
+  }
+  if (tracking.phase === "expired") {
+    return (
+      <Alert variant="warning" onRetry={onRetry}>
+        Não foi possível confirmar a leitura da placa. O ticket é válido; procure o operador se
+        precisar.
+      </Alert>
+    );
+  }
+  if (tracking.offline) {
+    return <Alert variant="warning">Não foi possível consultar o servidor. Tentando novamente...</Alert>;
+  }
+  if (tracking.phase === "slow") {
+    return (
+      <Alert variant="info">
+        A leitura da placa está demorando. O ticket é válido e a cancela já foi liberada.
+      </Alert>
+    );
+  }
+  return null;
 }

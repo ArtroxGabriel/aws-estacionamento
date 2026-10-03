@@ -4,6 +4,7 @@ import {
   createEntry,
   errorMessage,
   getAvailableSpots,
+  isTransientError,
   getSession,
   listAuditEvents,
   listSessions,
@@ -130,5 +131,19 @@ describe("errorMessage", () => {
     [new Error("x"), "resource", "Erro inesperado. Tente novamente."],
   ] as const)("mapeia %o (%s)", (err, context, expected) => {
     expect(errorMessage(err, context)).toBe(expected);
+  });
+});
+
+describe("isTransientError", () => {
+  it.each([
+    [new ApiError(0, "rede"), true],
+    [new ApiError(429, "too many"), true],
+    [new ApiError(502, "bad gateway"), true],
+    [new ApiError(503, "unavailable"), true],
+    [new ApiError(400, "bad request"), false],
+    [new ApiError(404, "not found"), false],
+    [new Error("x"), false],
+  ] as const)("%o → %s", (err, expected) => {
+    expect(isTransientError(err)).toBe(expected);
   });
 });

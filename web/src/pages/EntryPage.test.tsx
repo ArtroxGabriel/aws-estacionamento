@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, createEntry, getSession } from "../services/api";
@@ -117,14 +117,16 @@ describe("EntryPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("erro na consulta do OCR mantém o ticket como Processando", async () => {
+  it("erro transitório na consulta mantém o ticket como Processando e avisa", async () => {
     mockedCreateEntry.mockResolvedValue(session);
     mockedGetSession.mockRejectedValue(new ApiError(500, "boom"));
     await submitPhoto();
 
     expect(await screen.findByText("9f2c4e1a")).toBeInTheDocument();
     expect(screen.getByText("Processando")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Não foi possível consultar o servidor. Tentando novamente..."),
+    ).toBeInTheDocument();
   });
 
   it("erro no envio exibe Alert e mantém a foto selecionada", async () => {
@@ -145,5 +147,115 @@ describe("EntryPage", () => {
     expect(screen.getByRole("button", { name: "Emitir ticket" })).toBeDisabled();
     expect(screen.queryByAltText("Pré-visualização da foto selecionada")).not.toBeInTheDocument();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview");
+  });
+});
+
+// Cenários dependentes de tempo: relógio controlado, avançado em passos de 1 s para o
+// React re-renderizar entre os timers (como no navegador).
+describe("EntryPage — acompanhamento do OCR", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function advance(ms: number) {
+    for (let elapsed = 0; elapsed < ms; elapsed += 1000) {
+      await act(() => vi.advanceTimersByTimeAsync(1000));
+    }
+  }
+
+  async function emitTicket() {
+    const user = userEvent.setup({ applyAccept: false, advanceTimers: vi.advanceTimersByTime });
+    render(<EntryPage />);
+    await user.upload(screen.getByLabelText("Foto frontal do veículo"), photo());
+    await user.click(screen.getByRole("button", { name: "Emitir ticket" }));
+    await screen.findByText("9f2c4e1a");
+    return { user };
+  }
+
+  const parked: Session = { ...session, status: "PARKED", license_plate: "ABC1D23" };
+  const offlineText = "Não foi possível consultar o servidor. Tentando novamente...";
+
+  it("continua consultando após erro transitório e exibe a placa", async () => {
+    mockedCreateEntry.mockResolvedValue(session);
+    mockedGetSession
+      .mockRejectedValueOnce(new ApiError(502, "Bad Gateway"))
+      .mockRejectedValueOnce(new ApiError(0, "rede"))
+      .mockResolvedValue(parked);
+    await emitTicket();
+
+    expect(await screen.findByText(offlineText)).toBeInTheDocument();
+    await advance(4000);
+
+    expect(screen.getByText("ABC1D23")).toBeInTheDocument();
+    expect(screen.queryByText(offlineText)).not.toBeInTheDocument();
+    expect(mockedGetSession).toHaveBeenCalledTimes(3);
+  });
+
+  it("após 60 s passa a consultar a cada 15 s e ainda detecta a placa", async () => {
+    mockedCreateEntry.mockResolvedValue(session);
+    mockedGetSession.mockResolvedValue(session);
+    await emitTicket();
+
+    await advance(60_000);
+    const callsAtOneMinute = mockedGetSession.mock.calls.length;
+    expect(callsAtOneMinute).toBeGreaterThanOrEqual(30);
+    expect(screen.getByText(/A leitura da placa está demorando/)).toBeInTheDocument();
+
+    await advance(30_000);
+    // Fase lenta: ~2 consultas em 30 s (a troca de intervalo dispara uma imediata).
+    expect(mockedGetSession.mock.calls.length - callsAtOneMinute).toBeLessThanOrEqual(3);
+
+    mockedGetSession.mockResolvedValue(parked);
+    await advance(15_000);
+    expect(screen.getByText("ABC1D23")).toBeInTheDocument();
+  });
+
+  it("exibe Falha no OCR detectada na fase lenta", async () => {
+    mockedCreateEntry.mockResolvedValue(session);
+    mockedGetSession.mockResolvedValue(session);
+    await emitTicket();
+
+    await advance(9 * 60_000);
+    mockedGetSession.mockResolvedValue({ ...session, status: "FAILED" });
+    await advance(15_000);
+
+    expect(screen.getByText("Não foi possível ler a placa. Procure o operador.")).toBeInTheDocument();
+  });
+
+  it("encerra no prazo com aviso e Tentar novamente retoma a consulta", async () => {
+    mockedCreateEntry.mockResolvedValue(session);
+    mockedGetSession.mockResolvedValue(session);
+    const { user } = await emitTicket();
+
+    await advance(12 * 60_000);
+    expect(screen.getByText(/Não foi possível confirmar a leitura da placa/)).toBeInTheDocument();
+    const calls = mockedGetSession.mock.calls.length;
+    await advance(60_000);
+    expect(mockedGetSession).toHaveBeenCalledTimes(calls);
+
+    mockedGetSession.mockResolvedValue(parked);
+    await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    await advance(1000);
+    expect(screen.getByText("ABC1D23")).toBeInTheDocument();
+  });
+
+  it("erro definitivo encerra com mensagem e permite tentar novamente", async () => {
+    mockedCreateEntry.mockResolvedValue(session);
+    mockedGetSession.mockRejectedValue(new ApiError(404, "session not found"));
+    const { user } = await emitTicket();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sessão não encontrada.");
+    await advance(10_000);
+    expect(mockedGetSession).toHaveBeenCalledTimes(1);
+
+    mockedGetSession.mockResolvedValue(parked);
+    await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
+    await advance(1000);
+    expect(screen.getByText("ABC1D23")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

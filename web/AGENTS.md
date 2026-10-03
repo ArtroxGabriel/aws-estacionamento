@@ -37,9 +37,11 @@ Testes ficam ao lado do arquivo testado (`*.test.ts(x)`).
 | Tela | Endpoint |
 |------|----------|
 | Painel (`/`) | `GET /spots/available` (polling 5 s) |
-| Totem (`/entrada`) | `POST /entries` (multipart `photo`), `GET /sessions?status=ALL` (polling 2 s enquanto `PROCESSING`, máx. 60 s; a sessão é localizada pelo ID na lista) |
+| Totem (`/entrada`) | `POST /entries` (multipart `photo`), `GET /sessions?status=ALL` (enquanto `PROCESSING`: 2 s no primeiro minuto, depois 15 s até 12 min; erros transitórios mantêm a consulta; a sessão é localizada pelo ID na lista) |
 | Saída (`/saida`) | `GET /sessions?status=PARKED` + `GET /sessions?status=FAILED` (polling 15 s), `POST /exits/{id}/pay` |
 | Auditoria (`/auditoria`) | `GET /audit` (50 eventos mais recentes) |
+
+Na Auditoria, a placa e o resultado do OCR vêm da sessão (`GET /sessions?status=ALL`), pois os eventos são imutáveis: `ENTRY` guarda `PROCESSING` e `EXIT_PAYMENT` não traz placa. Falhas (`OCR_FAILED`, `POISON_MESSAGE`, `ENTRY_FAILED`) aparecem destacadas, com o motivo do worker traduzido em `src/utils/audit.ts` e o filtro "Somente falhas".
 
 As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED`/`FAILED` retorna 409.
 
