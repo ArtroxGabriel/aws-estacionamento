@@ -54,23 +54,41 @@ describe("services/api", () => {
     expect(init?.method).toBe("POST");
   });
 
-  it("getSession codifica o ID na URL", async () => {
-    const spy = mockFetch(JSON.stringify({ id: "x", status: "PARKED" }));
-    await getSession("x/y");
-    expect(lastCall(spy).url).toBe("/api/sessions/x%2Fy");
-  });
-
-  it("listSessions usa PARKED por padrão e retorna a lista", async () => {
-    const spy = mockFetch(JSON.stringify({ sessions: [{ id: "1", amount_due: 10 }] }));
+  it("listSessions usa PARKED por padrão e retorna a lista crua", async () => {
+    const spy = mockFetch(JSON.stringify([{ id: "1", status: "PARKED" }]));
     const sessions = await listSessions();
     expect(lastCall(spy).url).toBe("/api/sessions?status=PARKED");
     expect(sessions).toHaveLength(1);
   });
 
-  it("listAuditEvents usa limit 100 por padrão", async () => {
-    const spy = mockFetch(JSON.stringify({ events: [] }));
+  it("listSessions converte null (lista vazia na API) em []", async () => {
+    mockFetch("null\n");
+    await expect(listSessions("FAILED")).resolves.toEqual([]);
+  });
+
+  it("getSession localiza a sessão na listagem com status=ALL", async () => {
+    const spy = mockFetch(
+      JSON.stringify([
+        { id: "a", status: "PAID" },
+        { id: "b", status: "PARKED", license_plate: "ABC1D23" },
+      ]),
+    );
+    await expect(getSession("b")).resolves.toMatchObject({ license_plate: "ABC1D23" });
+    expect(lastCall(spy).url).toBe("/api/sessions?status=ALL");
+  });
+
+  it("getSession lança ApiError 404 quando a sessão não está na lista", async () => {
+    mockFetch(JSON.stringify([{ id: "a", status: "PAID" }]));
+    await expect(getSession("z")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("listAuditEvents retorna a lista crua e converte null em []", async () => {
+    const spy = mockFetch(JSON.stringify([{ id: "1#1", action: "ENTRY" }]));
+    await expect(listAuditEvents()).resolves.toHaveLength(1);
+    expect(lastCall(spy).url).toBe("/api/audit");
+
+    mockFetch("null");
     await expect(listAuditEvents()).resolves.toEqual([]);
-    expect(lastCall(spy).url).toBe("/api/audit?limit=100");
   });
 
   it("erro 404 com corpo JSON lança ApiError com status e mensagem", async () => {
@@ -85,7 +103,7 @@ describe("services/api", () => {
 
   it("erro com corpo não-JSON usa o texto como mensagem", async () => {
     mockFetch("404 page not found\n", { status: 404 });
-    await expect(getSession("x")).rejects.toMatchObject({
+    await expect(payExit("x")).rejects.toMatchObject({
       status: 404,
       message: "404 page not found",
     });
@@ -107,6 +125,7 @@ describe("errorMessage", () => {
     [new ApiError(404, "session not found"), "session", "Sessão não encontrada."],
     [new ApiError(404, "not found"), "resource", "Recurso não encontrado."],
     [new ApiError(409, "conflict"), "session", "A sessão não está pronta para pagamento."],
+    [new ApiError(413, "photo too large"), "resource", "A foto excede o tamanho máximo de 10 MB."],
     [new ApiError(500, "boom"), "resource", "Erro no servidor. Tente novamente. (boom)"],
     [new Error("x"), "resource", "Erro inesperado. Tente novamente."],
   ] as const)("mapeia %o (%s)", (err, context, expected) => {

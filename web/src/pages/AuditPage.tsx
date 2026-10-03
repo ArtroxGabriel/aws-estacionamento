@@ -6,8 +6,6 @@ import type { AuditAction, AuditEvent } from "../types/api";
 import { describeDetails, plateOf, sortByNewest } from "../utils/audit";
 import { actionLabel, formatDateTime, normalizePlate, shortId } from "../utils/format";
 
-const AUDIT_LIMIT = 100;
-
 const actionOptions: AuditAction[] = ["ENTRY", "OCR_PROCESSING", "EXIT_PAYMENT", "POISON_MESSAGE"];
 
 const actionClasses: Record<string, string> = {
@@ -34,7 +32,7 @@ export default function AuditPage() {
   // Só altera o estado na resposta; o carregamento inicial parte de loading = true.
   const load = useCallback(
     () =>
-      listAuditEvents(AUDIT_LIMIT)
+      listAuditEvents()
         .then(
           (result) => {
             setEvents(sortByNewest(result));
@@ -124,7 +122,9 @@ export default function AuditPage() {
         <p className="text-slate-600">Nenhum evento registrado.</p>
       ) : (
         <>
-          <p className="text-sm text-slate-600">Exibindo {filtered.length} eventos</p>
+          <p className="text-sm text-slate-600">
+            Exibindo {filtered.length} eventos (a API retorna os 50 mais recentes)
+          </p>
           <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-100 text-slate-600">

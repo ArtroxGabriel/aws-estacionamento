@@ -63,14 +63,14 @@ function rows() {
 describe("AuditPage", () => {
   it("lista os eventos do mais recente para o mais antigo", async () => {
     await renderPage();
-    expect(mockedListAuditEvents).toHaveBeenCalledWith(100);
+    expect(mockedListAuditEvents).toHaveBeenCalledTimes(1);
     expect(rows().map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
       "Pagamento/Saída",
       "Leitura de placa",
       "Entrada",
       "NEW_ACTION",
     ]);
-    expect(screen.getByText("Exibindo 4 eventos")).toBeInTheDocument();
+    expect(screen.getByText(/^Exibindo 4 eventos/)).toBeInTheDocument();
   });
 
   it("filtra por ação Pagamento/Saída", async () => {

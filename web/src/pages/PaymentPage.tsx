@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
+import StatusBadge from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
 import { errorMessage, listSessions, payExit } from "../services/api";
-import type { ActiveSession, Session } from "../types/api";
+import type { Session } from "../types/api";
 import {
   formatCurrency,
   formatDateTime,
@@ -12,7 +13,14 @@ import {
   shortId,
 } from "../utils/format";
 
-function matches(session: ActiveSession, query: string): boolean {
+// Sessões que podem pagar a saída: PARKED e também FAILED (placa não lida pelo OCR;
+// o totem orienta o motorista a procurar o operador).
+async function listPayableSessions(): Promise<Session[]> {
+  const [parked, failed] = await Promise.all([listSessions("PARKED"), listSessions("FAILED")]);
+  return [...parked, ...failed];
+}
+
+function matches(session: Session, query: string): boolean {
   const plateQuery = normalizePlate(query);
   if (plateQuery && normalizePlate(session.license_plate ?? "").includes(plateQuery)) return true;
   return session.id.startsWith(query.toLowerCase());
@@ -22,7 +30,7 @@ const buttonBase = "rounded-md px-3 py-1.5 text-sm font-medium disabled:cursor-n
 
 export default function PaymentPage() {
   // "Tempo estacionado" é recalculado a cada atualização da lista (lastUpdated).
-  const { data, error, loading, lastUpdated, refresh } = usePolling(listSessions, 15_000);
+  const { data, error, loading, lastUpdated, refresh } = usePolling(listPayableSessions, 15_000);
   const [query, setQuery] = useState("");
   const [confirmingId, setConfirmingId] = useState<string>();
   const [payingId, setPayingId] = useState<string>();
@@ -132,7 +140,6 @@ export default function PaymentPage() {
                     <th scope="col" className="px-3 py-2">Ticket</th>
                     <th scope="col" className="px-3 py-2">Entrada</th>
                     <th scope="col" className="px-3 py-2">Tempo estacionado</th>
-                    <th scope="col" className="px-3 py-2">Valor</th>
                     <th scope="col" className="px-3 py-2">Ação</th>
                   </tr>
                 </thead>
@@ -141,11 +148,12 @@ export default function PaymentPage() {
                     const paying = payingId === s.id;
                     return (
                       <tr key={s.id} className="border-t border-slate-200">
-                        <td className="px-3 py-2 font-mono font-semibold">{s.license_plate ?? "—"}</td>
+                        <td className="px-3 py-2 font-mono font-semibold">
+                          {s.license_plate ?? (s.status === "FAILED" ? <StatusBadge status="FAILED" /> : "—")}
+                        </td>
                         <td className="px-3 py-2 font-mono" title={s.id}>{shortId(s.id)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(s.entered_at)}</td>
                         <td className="px-3 py-2">{formatDuration(s.entered_at, lastUpdated)}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{formatCurrency(s.amount_due)}</td>
                         <td className="px-3 py-2">
                           {confirmingId === s.id ? (
                             <div className="flex flex-wrap gap-2">
@@ -156,7 +164,7 @@ export default function PaymentPage() {
                                 className={`${buttonBase} inline-flex items-center gap-2 bg-green-600 text-white hover:bg-green-700 disabled:bg-green-400`}
                               >
                                 {paying && <Spinner label="Processando pagamento" className="size-4" />}
-                                Confirmar {formatCurrency(s.amount_due)}
+                                Confirmar pagamento
                               </button>
                               <button
                                 type="button"

@@ -1,11 +1,8 @@
 import type {
-  ActiveSession,
   AuditEvent,
-  AuditListResponse,
   AvailableSpotsResponse,
   Session,
-  SessionListResponse,
-  SessionStatus,
+  SessionStatusFilter,
 } from "../types/api";
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
@@ -76,22 +73,27 @@ export function createEntry(photo: File): Promise<Session> {
   return request<Session>("/entries", { method: "POST", body: form });
 }
 
-export function getSession(id: string): Promise<Session> {
-  return request<Session>(`/sessions/${encodeURIComponent(id)}`);
+// A API responde a lista crua, e `null` quando não há sessões.
+export async function listSessions(status: SessionStatusFilter = "PARKED"): Promise<Session[]> {
+  const data = await request<Session[] | null>(`/sessions?status=${encodeURIComponent(status)}`);
+  return data ?? [];
 }
 
-export async function listSessions(status: SessionStatus = "PARKED"): Promise<ActiveSession[]> {
-  const data = await request<SessionListResponse>(`/sessions?status=${encodeURIComponent(status)}`);
-  return data.sessions;
+// A API não expõe GET /sessions/{id}: a sessão é localizada na listagem completa.
+export async function getSession(id: string): Promise<Session> {
+  const session = (await listSessions("ALL")).find((s) => s.id === id);
+  if (!session) throw new ApiError(404, "session not found");
+  return session;
 }
 
 export function payExit(id: string): Promise<Session> {
   return request<Session>(`/exits/${encodeURIComponent(id)}/pay`, { method: "POST" });
 }
 
-export async function listAuditEvents(limit = 100): Promise<AuditEvent[]> {
-  const data = await request<AuditListResponse>(`/audit?limit=${limit}`);
-  return data.events;
+// A API devolve os 50 eventos mais recentes (lista crua, ou `null` se vazia).
+export async function listAuditEvents(): Promise<AuditEvent[]> {
+  const data = await request<AuditEvent[] | null>("/audit");
+  return data ?? [];
 }
 
 // Converte um erro em mensagem para a interface (seção 3.3 de docs/frontend.md).
@@ -102,6 +104,7 @@ export function errorMessage(err: unknown, context: "session" | "resource" = "re
     return context === "session" ? "Sessão não encontrada." : "Recurso não encontrado.";
   }
   if (err.status === 409) return "A sessão não está pronta para pagamento.";
+  if (err.status === 413) return "A foto excede o tamanho máximo de 10 MB.";
   if (err.status >= 500) {
     const base = "Erro no servidor. Tente novamente.";
     return err.message ? `${base} (${err.message})` : base;

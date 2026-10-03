@@ -113,7 +113,7 @@ Configurar variáveis locais no `.env`:
 
 ## Changelog
 
-- 2026-10-03: Frontend web (painel, totem de entrada, caixa/saída e auditoria) e endpoints `GET /sessions`, `GET /sessions/{id}` e `GET /audit` na API.
+- 2026-10-03: Frontend web (painel, totem de entrada, caixa/saída e auditoria) consumindo a API existente.
 - 2026-09-30: Worker com Dockerfile (Tesseract + OpenCV), localização da placa Mercosul, DLQ na fila de OCR e efeitos colaterais transacionais.
 - 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).
 - 2026-09-20: Criação do AGENTS.md raiz com pipeline detalhado dos 6 serviços AWS.

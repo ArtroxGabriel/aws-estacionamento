@@ -37,9 +37,11 @@ Testes ficam ao lado do arquivo testado (`*.test.ts(x)`).
 | Tela | Endpoint |
 |------|----------|
 | Painel (`/`) | `GET /spots/available` (polling 5 s) |
-| Totem (`/entrada`) | `POST /entries` (multipart `photo`), `GET /sessions/{id}` (polling 2 s enquanto `PROCESSING`, máx. 60 s) |
-| Saída (`/saida`) | `GET /sessions?status=PARKED` (polling 15 s), `POST /exits/{id}/pay` |
-| Auditoria (`/auditoria`) | `GET /audit?limit=100` |
+| Totem (`/entrada`) | `POST /entries` (multipart `photo`), `GET /sessions?status=ALL` (polling 2 s enquanto `PROCESSING`, máx. 60 s; a sessão é localizada pelo ID na lista) |
+| Saída (`/saida`) | `GET /sessions?status=PARKED` + `GET /sessions?status=FAILED` (polling 15 s), `POST /exits/{id}/pay` |
+| Auditoria (`/auditoria`) | `GET /audit` (50 eventos mais recentes) |
+
+As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED`/`FAILED` retorna 409.
 
 Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produção o nginx do container faz o mesmo para `API_UPSTREAM` (padrão `http://api:8080`). Mesma origem, sem CORS.
 
@@ -52,10 +54,10 @@ Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produçã
 - `docker build -t estacionamento-web ./web` + `docker run -p 80:80 -e API_UPSTREAM=http://<api>:8080 estacionamento-web`
 
 ## Architecture Conventions
-- Páginas não chamam `fetch`; tudo passa por `src/services/api.ts`. Erros da API chegam como `{"error":"..."}` com `Content-Type: text/plain`, por isso o corpo é lido como texto e o JSON é tentado.
+- Páginas não chamam `fetch`; tudo passa por `src/services/api.ts`. Erros da API chegam como `{"error":"..."}`; o corpo é lido como texto e o JSON é tentado sem depender do `Content-Type` (respostas fora da API, como o 404 padrão do Go ou do nginx, são texto puro).
 - Identificadores em inglês, textos da interface em pt-BR; campos JSON em `snake_case` sem camada de mapeamento.
 - Estado local (`useState`), sem estado global. Toda requisição exibe carregando, erro e sucesso; botões de ação ficam `disabled` durante a requisição (evita pagamento duplo).
-- O frontend nunca calcula tarifa: o valor vem de `amount_due`/`amount_paid`.
+- O frontend nunca calcula tarifa: o valor exibido é o `amount_paid` devolvido pela API.
 - Sem animações além do `animate-spin` do `Spinner`.
 - DoD: `npm run lint`, `npm run test -- --run` e `npm run build` sem erros nem warnings.
 
