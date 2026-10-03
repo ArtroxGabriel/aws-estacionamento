@@ -79,6 +79,44 @@ func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedA
 	return &s, nil
 }
 
+func (r *PostgresSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error) {
+	query := `
+		UPDATE sessions
+		SET license_plate = $2, status = 'PARKED'
+		WHERE id = $1 AND status IN ('PARKED', 'FAILED')
+		RETURNING id, license_plate, status, s3_photo_key, entered_at, exited_at, amount_paid
+	`
+	var s model.Session
+	err := r.db.QueryRowContext(ctx, query, id, plate).Scan(
+		&s.ID,
+		&s.LicensePlate,
+		&s.Status,
+		&s.S3PhotoKey,
+		&s.EnteredAt,
+		&s.ExitedAt,
+		&s.AmountPaid,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *PostgresSessionRepo) Delete(ctx context.Context, id string) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (r *PostgresSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
 	query := `
 		UPDATE sessions

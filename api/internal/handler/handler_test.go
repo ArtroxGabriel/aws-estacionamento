@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,24 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	s.ExitedAt = &exitedAt
 	s.AmountPaid = &amount
 	return s, nil
+}
+
+func (f *FakeSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error) {
+	s, ok := f.sessions[id]
+	if !ok || (s.Status != "PARKED" && s.Status != "FAILED") {
+		return nil, nil
+	}
+	s.LicensePlate = &plate
+	s.Status = "PARKED"
+	return s, nil
+}
+
+func (f *FakeSessionRepo) Delete(ctx context.Context, id string) (bool, error) {
+	if _, ok := f.sessions[id]; !ok {
+		return false, nil
+	}
+	delete(f.sessions, id)
+	return true, nil
 }
 
 func (f *FakeSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
@@ -127,6 +146,11 @@ func (f *FakeStorage) Download(ctx context.Context, key string) (io.ReadCloser, 
 		return nil, "", io.EOF
 	}
 	return io.NopCloser(bytes.NewReader(data)), "image/jpeg", nil
+}
+
+func (f *FakeStorage) Delete(ctx context.Context, key string) error {
+	delete(f.uploaded, key)
+	return nil
 }
 
 // FakePublisher implements EventPublisher for testing
@@ -361,5 +385,99 @@ func TestPayExit_InvalidStatus(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status 409 Conflict, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func newPlateTestMux(status string) (*http.ServeMux, *FakeSessionRepo, *FakeSpotsRepo) {
+	sessionRepo := NewFakeSessionRepo()
+	spotsRepo := &FakeSpotsRepo{spots: 10}
+	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
+	_ = sessionRepo.Create(context.Background(), &model.Session{
+		ID: "s1", Status: status, S3PhotoKey: "photos/s1.jpg", EnteredAt: time.Now(),
+	})
+	svc := service.NewParkingService(sessionRepo, spotsRepo, &FakeStorage{}, nil, &FakeAuditLogger{}, cfg)
+	return setupTestMux(svc), sessionRepo, spotsRepo
+}
+
+func TestUpdatePlate_Success(t *testing.T) {
+	mux, _, spots := newPlateTestMux("FAILED")
+
+	req := httptest.NewRequest("PATCH", "/sessions/s1", strings.NewReader(`{"license_plate":"abc-1d23"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&res)
+	if res["license_plate"] != "ABC1D23" || res["status"] != "PARKED" {
+		t.Fatalf("unexpected body: %v", res)
+	}
+	if spots.spots != 9 {
+		t.Fatalf("expected spots 9, got %d", spots.spots)
+	}
+}
+
+func TestUpdatePlate_Errors(t *testing.T) {
+	cases := []struct {
+		name, status, path, body string
+		want                     int
+	}{
+		{"invalid plate", "FAILED", "/sessions/s1", `{"license_plate":"12"}`, http.StatusBadRequest},
+		{"invalid json", "FAILED", "/sessions/s1", `{`, http.StatusBadRequest},
+		{"not editable", "PAID", "/sessions/s1", `{"license_plate":"ABC1D23"}`, http.StatusConflict},
+		{"not found", "FAILED", "/sessions/missing", `{"license_plate":"ABC1D23"}`, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		mux, _, _ := newPlateTestMux(tc.status)
+		req := httptest.NewRequest("PATCH", tc.path, strings.NewReader(tc.body))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s: expected %d, got %d: %s", tc.name, tc.want, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestDeleteSession_Success(t *testing.T) {
+	mux, repo, spots := newPlateTestMux("PARKED")
+
+	req := httptest.NewRequest("DELETE", "/sessions/s1", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := repo.sessions["s1"]; ok {
+		t.Fatal("expected session deleted")
+	}
+	if spots.spots != 11 {
+		t.Fatalf("expected spots 11, got %d", spots.spots)
+	}
+}
+
+func TestDeleteSession_NotFound(t *testing.T) {
+	mux, _, _ := newPlateTestMux("PARKED")
+
+	req := httptest.NewRequest("DELETE", "/sessions/missing", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestCORS_AllowsPatchAndDelete(t *testing.T) {
+	h := handler.WithCORS(http.NewServeMux())
+	req := httptest.NewRequest("OPTIONS", "/sessions/s1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	allowed := rec.Header().Get("Access-Control-Allow-Methods")
+	if !strings.Contains(allowed, "PATCH") || !strings.Contains(allowed, "DELETE") {
+		t.Fatalf("expected PATCH and DELETE in %q", allowed)
 	}
 }
