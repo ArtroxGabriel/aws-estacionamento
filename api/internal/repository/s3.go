@@ -23,15 +23,20 @@ func NewS3BlobStorage(client *s3.Client, cfg config.Config) *S3BlobStorage {
 }
 
 func (s *S3BlobStorage) Upload(ctx context.Context, key string, body io.Reader, contentType string) error {
-	buf := new(bytes.Buffer)
-	if _, err := io.Copy(buf, body); err != nil {
-		return err
+	// PutObject needs a seekable body; multipart files already are.
+	rs, ok := body.(io.ReadSeeker)
+	if !ok {
+		buf := new(bytes.Buffer)
+		if _, err := io.Copy(buf, body); err != nil {
+			return err
+		}
+		rs = bytes.NewReader(buf.Bytes())
 	}
 
 	input := &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
-		Body:        bytes.NewReader(buf.Bytes()),
+		Body:        rs,
 		ContentType: aws.String(contentType),
 	}
 	_, err := s.client.PutObject(ctx, input)

@@ -89,8 +89,11 @@ func (r *PostgresSessionRepo) MarkAsFailed(ctx context.Context, id string) error
 	return err
 }
 
+// CountActive counts the sessions that occupy a spot in the Redis counter.
+// Only PARKED: the worker decrements spots:available on PROCESSING -> PARKED,
+// so counting PROCESSING here too would subtract those sessions twice.
 func (r *PostgresSessionRepo) CountActive(ctx context.Context) (int64, error) {
-	query := `SELECT COUNT(*) FROM sessions WHERE status IN ('PROCESSING', 'PARKED')`
+	query := `SELECT COUNT(*) FROM sessions WHERE status = 'PARKED'`
 	var count int64
 	err := r.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
