@@ -79,6 +79,7 @@
   - `task tf:apply:aws`: Provisiona recursos na AWS Academy
   - `task tf:destroy:aws`: Destrói recursos na AWS Academy
   - `task deploy:aws`: Deploy completo na AWS (ECR, imagens, infra, URL do ALB). Ver `docs/DEPLOY-AWS.md`
+  - GitHub Actions → *Deploy AWS* (apply/plan/destroy via OIDC). Pré-requisito: `task aws:bootstrap` + environment `aws` com `AWS_ROLE_ARN`
 - **Execução dos Serviços**:
   - `task dev:api`: Executa a API Go
   - `task dev:worker`: Executa o Worker Python
@@ -106,7 +107,7 @@ Configurar variáveis locais no `.env`:
 
 ## Known Gotchas
 
-- **Local x AWS no OpenTofu**: Floci usa o workspace `default` e a AWS o workspace `aws`; use sempre as tasks `tf:*:local`/`tf:*:aws`.
+- **Local x AWS no OpenTofu**: o Floci usa o state local em `infra/`; a AWS usa `infra/aws`, com state remoto no S3 compartilhado com o GitHub Actions. Use sempre as tasks `tf:*:local` / `tf:*:aws`.
 - **Créditos AWS Academy**: Sempre executar `task tf:destroy:aws` ao encerrar os testes em nuvem.
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
 - **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
@@ -114,6 +115,8 @@ Configurar variáveis locais no `.env`:
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
+
+- 2026-10-03: Deploy na AWS pelo GitHub Actions com OIDC e state remoto no S3.
 
 - 2026-10-03: Deploy na AWS: Parte 2 (ALB + ASG + alarmes) no OpenTofu, imagens no ECR e API sem defaults do Floci (instance profile, RDS com SSL).
 

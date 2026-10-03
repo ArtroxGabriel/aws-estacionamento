@@ -2,6 +2,51 @@
 
 Sobe os 6 serviços na AWS real com ALB + Auto Scaling (Parte 2) usando OpenTofu.
 
+Há dois caminhos, que usam o mesmo state remoto no S3:
+
+- **GitHub Actions**, recomendado: workflow *Deploy AWS*, autenticado via OIDC, sem chaves AWS no GitHub.
+- **Máquina local**: `task deploy:aws`.
+
+## Bootstrap (uma vez por conta)
+
+Uma pessoa com acesso de admin na conta roda:
+
+```bash
+task aws:bootstrap
+```
+
+Isso cria, em `infra/bootstrap`:
+- o bucket `estacionamento-tofu-state-<account_id>`, com versionamento, criptografia, sem acesso público e só TLS;
+- o provider OIDC do GitHub;
+- a role `estacionamento-github-deploy`.
+
+O state do bootstrap fica local (`infra/bootstrap/terraform.tfstate`, fora do git), então guarde esse arquivo.
+
+> Na **AWS Academy** não dá para criar IAM. Lá, use só o caminho local, com `TF_VAR_instance_profile_name=LabInstanceProfile` e um bucket de state criado manualmente com o mesmo nome.
+
+## Deploy pelo GitHub Actions
+
+### Configuração (uma vez, por quem administra o repositório)
+
+1. Em *Settings → Environments*, crie o environment `aws`.
+   - Opcional: em *Required reviewers*, exija aprovação antes de cada deploy.
+2. No environment `aws`, crie a variável `AWS_ROLE_ARN` com o output `deploy_role_arn` do bootstrap. É uma *variable*, não um *secret*: o ARN não é sensível.
+
+### Uso
+
+Vá em *Actions → Deploy AWS → Run workflow* e escolha a ação:
+
+- `apply`: faz o build das imagens no runner, com tags `<sha do commit>` e `latest`. Depois roda `tofu apply` com a tag nova, espera o instance refresh do ASG terminar e faz o health check pelo ALB. A URL aparece no resumo do run.
+- `plan`: mostra o que mudaria, sem aplicar.
+- `destroy`: apaga a infraestrutura e mantém o bootstrap.
+
+**Segurança da role de deploy:**
+- Só a assumem jobs deste repositório que rodam no environment `aws`, porque a condição `sub` do token OIDC exige isso.
+- Ela tem `PowerUserAccess` mais um IAM mínimo: só a role e o instance profile `estacionamento-app`, `PassRole` só para EC2 e apenas as duas políticas gerenciadas que a aplicação usa.
+- Ela não consegue alterar as próprias permissões.
+
+## Deploy pela máquina local
+
 ## Pré-requisitos
 
 - `tofu`, `task`, `aws` (CLI v2), Docker com `buildx` e, para o vídeo, `hey`.
@@ -13,15 +58,13 @@ Sobe os 6 serviços na AWS real com ALB + Auto Scaling (Parte 2) usando OpenTofu
   ```
   Em conta própria, não defina essa variável: o OpenTofu cria a role IAM `estacionamento-app`.
 
-## Deploy
-
 ```bash
 task deploy:aws
 ```
 
 O comando faz, em ordem:
 
-1. `tofu init` e seleciona o workspace `aws` (o estado local do Floci fica no `default`).
+1. `tofu init` em `infra/aws`, com o state remoto. O state local do Floci continua em `infra/`.
 2. Cria os repositórios ECR.
 3. Faz build das imagens `api`, `worker` e `web` para `linux/amd64` e o push delas.
 4. Roda o `tofu apply` completo, que **pede confirmação**. Leva de 10 a 15 min, principalmente por causa do RDS e do ElastiCache.
@@ -32,7 +75,7 @@ O comando faz, em ordem:
 Depois do apply, a instância ainda leva ~2–3 min para instalar o Docker, baixar as imagens e passar no health check. Teste:
 
 ```bash
-curl "$(cd infra && tofu output -raw alb_url)/api/health"   # {"status":"UP"}
+curl "$(cd infra/aws && tofu output -raw alb_url)/api/health"   # {"status":"UP"}
 ```
 
 Abra o `alb_url` no navegador para usar o painel, o totem de entrada, o caixa e a auditoria.

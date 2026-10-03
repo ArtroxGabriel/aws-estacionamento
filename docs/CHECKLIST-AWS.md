@@ -26,7 +26,8 @@
 - [x] **Subnets** filtradas pelas AZs que oferecem o tipo de instância (a us-east-1e não tem `t3.micro`).
 - [x] **Imagens no ECR**: `task aws:images` faz o build e o push, e o `user_data` faz o pull com retry.
 - [x] **IAM**: em conta própria cria a role `estacionamento-app` (S3/SQS/DynamoDB + ECR + SSM). Na Academy, usar `TF_VAR_instance_profile_name=LabInstanceProfile`.
-- [x] **Estados separados**: Floci no workspace `default`, AWS no workspace `aws`. Uma precondition bloqueia a mistura.
+- [x] **Estados separados**: Floci com state local em `infra/`; AWS em `infra/aws`, com state remoto no S3 (bootstrap) compartilhado com o GitHub Actions.
+- [x] **Deploy pelo GitHub Actions com OIDC** (workflow *Deploy AWS*). Falta o dono do repositório criar o environment `aws` com a variável `AWS_ROLE_ARN`.
 - [x] **Bucket S3** com sufixo do account id, e `force_destroy` na AWS.
 - [x] **Senha do RDS** gerada (`random_password`), RDS sem acesso público.
 - [x] **Tasks da AWS** descartam o `AWS_ENDPOINT_URL` e as chaves `mock_key` que vêm do `.env`.
