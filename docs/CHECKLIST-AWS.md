@@ -48,12 +48,31 @@
   - O `stress:aws` foi validado via SSM.
 - [x] O instance refresh troca as instâncias sem downtime (sobe a nova antes de tirar a antiga).
 
-## Falta fazer (depende de pessoas)
-- [ ] **Gravar o vídeo** (3–5 min, público). Roteiro em [DEPLOY-AWS.md](DEPLOY-AWS.md#vídeo-da-elasticidade) e no `docs/GOAL.md` §5.
-- [ ] **`task tf:destroy:aws`** ao terminar.
+## Leitura de placas com imagens reais (2026-10-03)
+
+- [x] Pasta `examples/` com fotos reais, vídeo real, gabarito e créditos de licença.
+- [x] `task ocr:local` (OCR local em fotos e vídeos) e `task eval:aws` (fotos enviadas ao sistema no ar).
+- [x] Corrigidos no worker: `I`→`1` em placa Mercosul e ruído de JPEG. Fotos reais: **1/5 → 5/5** localmente; na AWS, as 3 placas brasileiras foram lidas certo.
+- [x] Vídeo real (640×480, câmera de mão): nenhuma placa confirmada, porque as placas ficam pequenas demais. O sistema é pensado para foto de câmera de cancela.
+
+## Falta fazer
+
+### Entrega (obrigatório, prazo 10/10 23h59)
+- [ ] **Gravar o vídeo da Parte 2** (3–5 min, link público). Roteiro: [DEPLOY-AWS.md](DEPLOY-AWS.md#vídeo-da-elasticidade). Mostrar também o fluxo com `examples/fotos/placa-real-mercosul-lsn4i49.jpg`.
 - [ ] Preencher as matrículas no `README.md` (`Item2.2`, `Item2.3`, `Item2.4`).
-- [ ] Fazer push da `main` (merge do frontend) e da `feat/aws-deploy`, e abrir o PR.
-- [ ] **Opcional:** não existe *delete* de sessão (o CRUD está sem o D). Avaliar `DELETE /sessions/{id}` com auditoria.
+- [ ] Abrir o PR de `feat/aws-deploy` e fazer o merge na `main`.
+- [ ] Enviar o link do repositório e o link do vídeo.
+- [ ] `task tf:destroy:aws` depois de gravar.
+
+### Deploy pelo GitHub Actions
+- [ ] O dono do repositório cria o environment `aws` com a variável `AWS_ROLE_ARN`.
+- [ ] Rodar *Actions → Deploy AWS → apply* uma vez para validar o workflow de verdade.
+
+### Melhorias recomendadas (opcionais, por prioridade)
+- [ ] **Placa ilegível sem novas tentativas:** hoje o worker re-tenta 3× (~15 min) antes de registrar a falha, e o OCR dá sempre o mesmo resultado. Registrar `OCR_FAILED` na hora e deixar o operador digitar a placa no caixa.
+- [ ] **Saída de carro sem placa lida:** permitir pagar uma sessão `PROCESSING` informando a placa manualmente.
+- [ ] **CRUD completo:** `DELETE /sessions/{id}` com auditoria (a especificação fala em CRUD).
+- [ ] **Futuro, só citar no vídeo/README:** Rekognition (DetectText) chamado por uma Lambda que consome a fila, no lugar do Tesseract.
 
 ## Riscos conhecidos e aceitos
 
