@@ -79,7 +79,7 @@ resource "aws_iam_role_policy" "app" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject"]
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
         Resource = "${aws_s3_bucket.fotos.arn}/*"
       },
       {

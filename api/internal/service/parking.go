@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"regexp"
 	"strings"
@@ -237,7 +238,9 @@ func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*
 	// Best effort: an orphan photo costs cents, a failed delete must not
 	// resurrect the session.
 	if session.S3PhotoKey != "" {
-		_ = s.storage.Delete(ctx, session.S3PhotoKey)
+		if err := s.storage.Delete(ctx, session.S3PhotoKey); err != nil {
+			log.Printf("[WARN] session %s deleted but photo %s was not: %v", sessionID, session.S3PhotoKey, err)
+		}
 	}
 
 	var plate any
