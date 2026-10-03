@@ -40,6 +40,11 @@ export function normalizePlate(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+// Mercosul (ABC1D23) ou formato antigo (ABC1234), mesma regra da API.
+export function isValidPlate(value: string): boolean {
+  return /^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(normalizePlate(value));
+}
+
 const statusLabels: Record<SessionStatus, string> = {
   PROCESSING: "Processando",
   PARKED: "Estacionado",
@@ -58,6 +63,8 @@ const actionLabels: Record<string, string> = {
   POISON_MESSAGE: "Falha no processamento",
   OCR_FAILED: "Falha no OCR",
   ENTRY_FAILED: "Falha na entrada",
+  PLATE_CORRECTION: "Placa informada",
+  SESSION_DELETE: "Exclusão",
 };
 
 export function actionLabel(action: string): string {

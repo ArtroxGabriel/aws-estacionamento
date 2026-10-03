@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, listSessions, payExit } from "../services/api";
+import { ApiError, deleteSession, listSessions, payExit, updatePlate } from "../services/api";
 import type { Session, SessionStatusFilter } from "../types/api";
 import PaymentPage from "./PaymentPage";
 
@@ -9,10 +9,14 @@ vi.mock("../services/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/api")>()),
   listSessions: vi.fn(),
   payExit: vi.fn(),
+  updatePlate: vi.fn(),
+  deleteSession: vi.fn(),
 }));
 
 const mockedListSessions = vi.mocked(listSessions);
 const mockedPayExit = vi.mocked(payExit);
+const mockedUpdatePlate = vi.mocked(updatePlate);
+const mockedDeleteSession = vi.mocked(deleteSession);
 
 const minutesAgo = (min: number) => new Date(Date.now() - min * 60_000 - 30_000).toISOString();
 
@@ -182,5 +186,52 @@ describe("PaymentPage", () => {
     mockSessions([older]);
     await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
     expect(await screen.findByText("ABC1D23")).toBeInTheDocument();
+  });
+});
+
+describe("PaymentPage — placa manual e exclusão", () => {
+  it("Informar placa numa sessão FAILED envia a placa normalizada", async () => {
+    const { user } = await renderWith([failed]);
+    mockedUpdatePlate.mockResolvedValue({ ...failed, status: "PARKED", license_plate: "LSN4I49" });
+
+    await user.click(screen.getByRole("button", { name: "Informar placa" }));
+    await user.type(screen.getByLabelText("Placa do veículo"), "lsn-4i49");
+    await user.click(screen.getByRole("button", { name: "Salvar placa" }));
+
+    expect(mockedUpdatePlate).toHaveBeenCalledWith(failed.id, "LSN4I49");
+    expect(await screen.findByText(/Placa LSN4I49 registrada/)).toBeInTheDocument();
+  });
+
+  it("placa inválida mostra o formato esperado sem chamar a API", async () => {
+    const { user } = await renderWith([failed]);
+
+    await user.click(screen.getByRole("button", { name: "Informar placa" }));
+    await user.type(screen.getByLabelText("Placa do veículo"), "12AB");
+    await user.click(screen.getByRole("button", { name: "Salvar placa" }));
+
+    expect(await screen.findByText(/Placa inválida/)).toBeInTheDocument();
+    expect(mockedUpdatePlate).not.toHaveBeenCalled();
+  });
+
+  it("sessão com placa oferece Corrigir placa já preenchido", async () => {
+    const { user } = await renderWith([older]);
+
+    await user.click(screen.getByRole("button", { name: "Corrigir placa" }));
+
+    expect(screen.getByLabelText("Placa do veículo")).toHaveValue("ABC1D23");
+  });
+
+  it("Excluir pede confirmação, chama deleteSession e remove a linha", async () => {
+    const { user } = await renderWith([older, newer]);
+    mockedDeleteSession.mockResolvedValue(older);
+
+    const [firstRow] = rows();
+    await user.click(within(firstRow).getByRole("button", { name: "Excluir" }));
+    expect(mockedDeleteSession).not.toHaveBeenCalled();
+    await user.click(within(firstRow).getByRole("button", { name: "Confirmar exclusão" }));
+
+    expect(mockedDeleteSession).toHaveBeenCalledWith(older.id);
+    expect(await screen.findByText(/excluído/)).toBeInTheDocument();
+    expect(screen.queryByText("ABC1D23")).not.toBeInTheDocument();
   });
 });

@@ -9,6 +9,8 @@ import {
   listAuditEvents,
   listSessions,
   payExit,
+  updatePlate,
+  deleteSession,
 } from "./api";
 
 function mockFetch(body: string, init?: ResponseInit) {
@@ -145,5 +147,31 @@ describe("isTransientError", () => {
     [new Error("x"), false],
   ] as const)("%o → %s", (err, expected) => {
     expect(isTransientError(err)).toBe(expected);
+  });
+});
+
+describe("services/api — placa e exclusão", () => {
+  it("updatePlate usa PATCH /sessions/<id> com JSON", async () => {
+    const spy = mockFetch(JSON.stringify({ id: "s1", status: "PARKED", license_plate: "ABC1D23" }));
+    const session = await updatePlate("s1", "ABC1D23");
+    const { url, init } = lastCall(spy);
+    expect(session.license_plate).toBe("ABC1D23");
+    expect(url).toBe("/api/sessions/s1");
+    expect(init?.method).toBe("PATCH");
+    expect(new Headers(init?.headers).get("Content-Type")).toBe("application/json");
+    expect(init?.body).toBe(JSON.stringify({ license_plate: "ABC1D23" }));
+  });
+
+  it("deleteSession usa DELETE /sessions/<id> com o ID codificado", async () => {
+    const spy = mockFetch(JSON.stringify({ id: "a b", status: "PARKED" }));
+    await deleteSession("a b");
+    const { url, init } = lastCall(spy);
+    expect(url).toBe("/api/sessions/a%20b");
+    expect(init?.method).toBe("DELETE");
+  });
+
+  it("errorMessage no contexto plate traduz 400 e 409", () => {
+    expect(errorMessage(new ApiError(400, "invalid license plate"), "plate")).toMatch(/Placa inválida/);
+    expect(errorMessage(new ApiError(409, "x"), "plate")).toMatch(/Só é possível alterar a placa/);
   });
 });

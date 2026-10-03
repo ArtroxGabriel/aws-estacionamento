@@ -3,12 +3,20 @@ import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
 import StatusBadge from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
-import { errorMessage, listSessions, payExit } from "../services/api";
+import {
+  deleteSession,
+  errorMessage,
+  INVALID_PLATE_MESSAGE,
+  listSessions,
+  payExit,
+  updatePlate,
+} from "../services/api";
 import type { Session } from "../types/api";
 import {
   formatCurrency,
   formatDateTime,
   formatDuration,
+  isValidPlate,
   normalizePlate,
   shortId,
 } from "../utils/format";
@@ -37,6 +45,13 @@ export default function PaymentPage() {
   const [paidIds, setPaidIds] = useState<ReadonlySet<string>>(new Set());
   const [receipt, setReceipt] = useState<Session>();
   const [payError, setPayError] = useState<string>();
+  // Placa digitada pelo operador (OCR não leu ou leu errado) e exclusão de registro.
+  const [editingId, setEditingId] = useState<string>();
+  const [plateInput, setPlateInput] = useState("");
+  const [savingPlate, setSavingPlate] = useState(false);
+  const [deletingConfirmId, setDeletingConfirmId] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState<string>();
   // Bloqueia cliques repetidos antes do re-render desabilitar os botões (evita pagamento duplo).
   const payingRef = useRef(false);
 
@@ -54,12 +69,57 @@ export default function PaymentPage() {
     [sessions, trimmedQuery],
   );
 
+  function startEditing(session: Session) {
+    setEditingId(session.id);
+    setPlateInput(session.license_plate ?? "");
+    setConfirmingId(undefined);
+    setDeletingConfirmId(undefined);
+    setPayError(undefined);
+  }
+
+  async function handleSavePlate(id: string) {
+    if (!isValidPlate(plateInput)) {
+      setPayError(INVALID_PLATE_MESSAGE);
+      return;
+    }
+    setSavingPlate(true);
+    setPayError(undefined);
+    try {
+      const updated = await updatePlate(id, normalizePlate(plateInput));
+      setNotice(`Placa ${updated.license_plate ?? ""} registrada para o ticket ${shortId(id)}.`);
+      setEditingId(undefined);
+      refresh();
+    } catch (err) {
+      setPayError(errorMessage(err, "plate"));
+    } finally {
+      setSavingPlate(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    setDeleting(true);
+    setPayError(undefined);
+    try {
+      await deleteSession(id);
+      setNotice(`Registro do ticket ${shortId(id)} excluído.`);
+      // Some da lista na hora, sem esperar o próximo polling.
+      setPaidIds((prev) => new Set(prev).add(id));
+      refresh();
+    } catch (err) {
+      setPayError(errorMessage(err, "session"));
+    } finally {
+      setDeleting(false);
+      setDeletingConfirmId(undefined);
+    }
+  }
+
   async function handleConfirm(id: string) {
     if (payingRef.current) return;
     payingRef.current = true;
     setPayingId(id);
     setPayError(undefined);
     setReceipt(undefined);
+    setNotice(undefined);
     try {
       const paid = await payExit(id);
       setReceipt(paid);
@@ -98,6 +158,7 @@ export default function PaymentPage() {
           </p>
         </Alert>
       )}
+      {notice && <Alert variant="success">{notice}</Alert>}
       {payError && <Alert variant="error">{payError}</Alert>}
 
       <div className="space-y-1">
@@ -155,7 +216,64 @@ export default function PaymentPage() {
                         <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(s.entered_at)}</td>
                         <td className="px-3 py-2">{formatDuration(s.entered_at, lastUpdated)}</td>
                         <td className="px-3 py-2">
-                          {confirmingId === s.id ? (
+                          {editingId === s.id ? (
+                            <form
+                              className="flex flex-wrap items-center gap-2"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                void handleSavePlate(s.id);
+                              }}
+                            >
+                              <label htmlFor={`plate-${s.id}`} className="sr-only">
+                                Placa do veículo
+                              </label>
+                              <input
+                                id={`plate-${s.id}`}
+                                value={plateInput}
+                                onChange={(e) => setPlateInput(e.target.value)}
+                                placeholder="ABC1D23"
+                                maxLength={8}
+                                autoFocus
+                                className="w-28 rounded-md border border-slate-300 px-2 py-1 font-mono uppercase"
+                              />
+                              <button
+                                type="submit"
+                                disabled={savingPlate}
+                                className={`${buttonBase} inline-flex items-center gap-2 bg-purple-600 text-white hover:bg-purple-700 disabled:bg-purple-400`}
+                              >
+                                {savingPlate && <Spinner label="Salvando placa" className="size-4" />}
+                                Salvar placa
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingId(undefined)}
+                                disabled={savingPlate}
+                                className={`${buttonBase} border border-slate-300 hover:bg-slate-100 disabled:opacity-60`}
+                              >
+                                Cancelar
+                              </button>
+                            </form>
+                          ) : deletingConfirmId === s.id ? (
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(s.id)}
+                                disabled={deleting}
+                                className={`${buttonBase} inline-flex items-center gap-2 bg-red-600 text-white hover:bg-red-700 disabled:bg-red-400`}
+                              >
+                                {deleting && <Spinner label="Excluindo" className="size-4" />}
+                                Confirmar exclusão
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeletingConfirmId(undefined)}
+                                disabled={deleting}
+                                className={`${buttonBase} border border-slate-300 hover:bg-slate-100 disabled:opacity-60`}
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          ) : confirmingId === s.id ? (
                             <div className="flex flex-wrap gap-2">
                               <button
                                 type="button"
@@ -176,14 +294,36 @@ export default function PaymentPage() {
                               </button>
                             </div>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => setConfirmingId(s.id)}
-                              disabled={payingId !== undefined}
-                              className={`${buttonBase} bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300`}
-                            >
-                              Pagar e liberar
-                            </button>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setConfirmingId(s.id)}
+                                disabled={payingId !== undefined}
+                                className={`${buttonBase} bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300`}
+                              >
+                                Pagar e liberar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => startEditing(s)}
+                                disabled={payingId !== undefined}
+                                className={`${buttonBase} border border-purple-300 text-purple-700 hover:bg-purple-50 disabled:opacity-60`}
+                              >
+                                {s.license_plate ? "Corrigir placa" : "Informar placa"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDeletingConfirmId(s.id);
+                                  setConfirmingId(undefined);
+                                  setEditingId(undefined);
+                                }}
+                                disabled={payingId !== undefined}
+                                className={`${buttonBase} border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60`}
+                              >
+                                Excluir
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>

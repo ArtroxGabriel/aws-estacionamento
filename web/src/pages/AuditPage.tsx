@@ -21,6 +21,8 @@ const actionOptions: AuditAction[] = [
   "OCR_FAILED",
   "POISON_MESSAGE",
   "ENTRY_FAILED",
+  "PLATE_CORRECTION",
+  "SESSION_DELETE",
 ];
 
 const actionClasses: Record<string, string> = {
@@ -30,6 +32,8 @@ const actionClasses: Record<string, string> = {
   OCR_FAILED: "bg-red-100 text-red-800",
   POISON_MESSAGE: "bg-red-100 text-red-800",
   ENTRY_FAILED: "bg-red-100 text-red-800",
+  PLATE_CORRECTION: "bg-purple-100 text-purple-800",
+  SESSION_DELETE: "bg-slate-200 text-slate-800",
 };
 
 // Os eventos não trazem a situação atual da sessão (placa no pagamento, resultado do OCR
