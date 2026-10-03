@@ -97,6 +97,12 @@ func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, 
 		"session_id": sessionID,
 		"s3_key":     s3Key,
 	}); err != nil {
+		_ = s.sessionRepo.MarkAsFailed(ctx, sessionID)
+		_ = s.audit.LogEvent(ctx, "ENTRY_FAILED", sessionID, map[string]any{
+			"s3_photo_key": s3Key,
+			"status":       "FAILED",
+			"error":        err.Error(),
+		})
 		return nil, fmt.Errorf("failed to publish entry event: %w", err)
 	}
 
@@ -116,16 +122,22 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	if session == nil {
 		return nil, ErrSessionNotFound
 	}
-	if session.Status != "PARKED" {
+	if session.Status != "PARKED" && session.Status != "FAILED" {
 		return nil, ErrInvalidSessionStatus
 	}
 
+	previousStatus := session.Status
 	paidSession, err := s.sessionRepo.MarkAsPaid(ctx, sessionID, time.Now().UTC(), s.fixedRate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update session: %w", err)
 	}
+	if paidSession == nil {
+		return nil, ErrInvalidSessionStatus
+	}
 
-	_, _ = s.spotsRepo.Increment(ctx)
+	if previousStatus == "PARKED" {
+		_, _ = s.spotsRepo.Increment(ctx)
+	}
 
 	_ = s.audit.LogEvent(ctx, "EXIT_PAYMENT", sessionID, map[string]any{
 		"amount_paid": s.fixedRate,
@@ -139,4 +151,15 @@ func generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func (s *ParkingService) FindSessions(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
+	return s.sessionRepo.FindAll(ctx, status, plate)
+}
+
+func (s *ParkingService) GetAuditLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.audit.GetRecentLogs(ctx, limit)
 }

@@ -28,6 +28,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /spots/available", h.HandleGetAvailableSpots)
 	mux.HandleFunc("POST /entries", h.HandleCreateEntry)
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
+	mux.HandleFunc("GET /sessions", h.HandleGetSessions)
+	mux.HandleFunc("GET /audit", h.HandleGetAuditLogs)
 }
 
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -84,10 +86,51 @@ func (h *Handler) HandlePayExit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
 			return
 		}
+		if errors.Is(err, service.ErrInvalidSessionStatus) {
+			http.Error(w, `{"error":"session is not in a payable status"}`, http.StatusConflict)
+			return
+		}
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(paidSession)
+}
+
+func (h *Handler) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
+	plate := r.URL.Query().Get("plate")
+	var platePtr *string
+	if plate != "" {
+		platePtr = &plate
+	}
+
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "PARKED" // Default to parked
+	}
+	var statusPtr *string
+	if status != "ALL" {
+		statusPtr = &status
+	}
+
+	sessions, err := h.svc.FindSessions(r.Context(), statusPtr, platePtr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sessions)
+}
+
+func (h *Handler) HandleGetAuditLogs(w http.ResponseWriter, r *http.Request) {
+	logs, err := h.svc.GetAuditLogs(r.Context(), 50)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(logs)
 }
