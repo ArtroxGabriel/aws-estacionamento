@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -91,6 +92,22 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		}
 		if fetched.ID != session.ID || fetched.Status != "PROCESSING" || *fetched.LicensePlate != plate {
 			t.Fatalf("mismatched session data: %+v", fetched)
+		}
+	})
+
+	t.Run("CountActive_IgnoresProcessing", func(t *testing.T) {
+		count, err := repo.CountActive(ctx)
+		if err != nil {
+			t.Fatalf("CountActive failed: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("expected PROCESSING session not to be counted, got %d", count)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE sessions SET status = 'PARKED' WHERE id = 'test-pg-session-1'`); err != nil {
+			t.Fatalf("failed to park session: %v", err)
+		}
+		if count, _ = repo.CountActive(ctx); count != 1 {
+			t.Fatalf("expected 1 PARKED session, got %d", count)
 		}
 	})
 
@@ -184,6 +201,18 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 		}
 		if spots != 50 {
 			t.Fatalf("expected 50 spots after decrement, got %d", spots)
+		}
+	})
+
+	t.Run("Increment_MissingKeyIsNotCreated", func(t *testing.T) {
+		if err := rdb.Del(ctx, "spots:available").Err(); err != nil {
+			t.Fatalf("failed to delete key: %v", err)
+		}
+		if _, err := repo.Increment(ctx); !errors.Is(err, redis.Nil) {
+			t.Fatalf("expected redis.Nil, got %v", err)
+		}
+		if n, _ := rdb.Exists(ctx, "spots:available").Result(); n != 0 {
+			t.Fatalf("expected key to stay absent, got exists=%d", n)
 		}
 	})
 }
