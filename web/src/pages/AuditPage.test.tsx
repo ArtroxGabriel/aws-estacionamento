@@ -108,6 +108,19 @@ describe("AuditPage", () => {
     expect(within(entry).getAllByRole("cell")[2]).toHaveAttribute("title", sessionId);
   });
 
+  it("entrada exibe o resultado do OCR da sessão em Detalhes", async () => {
+    await renderPage();
+    const entry = rows()[2];
+    expect(within(entry).getAllByRole("cell")[4]).toHaveTextContent("Processado");
+  });
+
+  it("entrada ainda sem leitura de placa exibe Processando", async () => {
+    await renderPage([events[0]], [
+      { id: sessionId, status: "PROCESSING", s3_photo_key: "x", entered_at: "" },
+    ]);
+    expect(within(rows()[0]).getAllByRole("cell")[4]).toHaveTextContent("Processando");
+  });
+
   it("usa a placa das sessões quando o evento de OCR não está na lista", async () => {
     const payment = events[1];
     await renderPage(

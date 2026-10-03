@@ -13,21 +13,46 @@ export function plateOf(details: Record<string, unknown>): string | undefined {
   return typeof plate === "string" && plate !== "" ? plate : undefined;
 }
 
-// Placa de cada sessão (entity_id → placa). Só o OCR_PROCESSING grava a placa no evento;
-// as sessões do RDS cobrem eventos cujo OCR ficou fora da janela carregada.
-export function sessionPlates(
+export interface SessionInfo {
+  plate?: string;
+  status?: SessionStatus; // status atual no RDS, quando conhecido
+}
+
+// Situação atual de cada sessão (entity_id → placa/status). Os eventos são imutáveis:
+// ENTRY guarda o status do momento da entrada e EXIT_PAYMENT não traz a placa. As sessões
+// do RDS dão o estado atual; os eventos de OCR/falha cobrem o que não estiver nelas.
+export function sessionInfo(
   events: readonly AuditEvent[],
   sessions: readonly Session[],
-): Map<string, string> {
-  const plates = new Map<string, string>();
+): Map<string, SessionInfo> {
+  const info = new Map<string, SessionInfo>();
   for (const s of sessions) {
-    if (s.license_plate) plates.set(s.id, s.license_plate);
+    info.set(s.id, { plate: s.license_plate || undefined, status: s.status });
   }
   for (const e of events) {
+    const current = info.get(e.entity_id) ?? {};
     const plate = plateOf(e.details);
-    if (plate) plates.set(e.entity_id, plate);
+    if (plate) current.plate ??= plate;
+    if (e.action === "POISON_MESSAGE") current.status ??= "FAILED";
+    info.set(e.entity_id, current);
   }
-  return plates;
+  return info;
+}
+
+// Resultado do OCR da sessão, exibido no evento de entrada em vez do status gravado
+// naquele momento (sempre "Processando").
+function entryOutcome(info: SessionInfo | undefined): string | undefined {
+  if (info?.plate) return "Processado";
+  if (info?.status === undefined || info.status === "PROCESSING") return undefined;
+  return statusLabel("FAILED"); // concluiu sem placa: falha no OCR (mesmo que já pago)
+}
+
+export function describeEvent(event: AuditEvent, info: SessionInfo | undefined): string {
+  if (event.action === "ENTRY") {
+    const outcome = entryOutcome(info);
+    if (outcome) return outcome;
+  }
+  return describeDetails(event.details);
 }
 
 export function describeDetails(details: Record<string, unknown>): string {
