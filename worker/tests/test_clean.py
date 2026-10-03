@@ -149,3 +149,18 @@ def test_valid_plates_are_idempotent(plate):
 def test_letters_only_never_match(raw):
     result = normalize(raw)
     assert (result.ok, result.plate) == (False, None)
+
+
+def test_located_mercosul_plate_is_not_read_as_an_old_format_plate():
+    # Real photo (examples/fotos/placa-real-mercosul-lsn4i49.jpg): Tesseract
+    # reads the I as 1, and "LSN4149" is a valid Old_Format plate. A plate
+    # located by its Mercosul band can only be Mercosul.
+    assert normalize("SITUS\nSITUS\nLSN41495", mercosul=True).plate == "LSN4I49"
+
+
+def test_mercosul_header_rules_out_an_exact_old_format_read():
+    assert normalize("BRASIL\nLSN4149").plate == "LSN4I49"
+
+
+def test_exact_old_format_plate_without_mercosul_evidence_is_kept():
+    assert normalize("LSN4149").plate == "LSN4149"

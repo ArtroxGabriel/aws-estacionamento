@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 from PIL.Image import UnidentifiedImageError
 
 from ocr.clean import has_exact_plate
@@ -86,7 +86,10 @@ def _decode(image_bytes: bytes) -> Image.Image:
 def _binarize(image: Image.Image) -> Image.Image:
     """Grayscale then binary threshold, with Otsu's per-image cut-off."""
 
-    gray = ImageOps.grayscale(image)
+    # A 5x5 median removes JPEG/sensor noise that otherwise survives the
+    # threshold as specks and breaks characters (real photo KLV-8465 in
+    # examples/fotos was unreadable without it).
+    gray = ImageOps.grayscale(image).filter(ImageFilter.MedianFilter(5))
     threshold = otsu_threshold(gray.histogram())
     return gray.point(lambda px: 255 if px > threshold else 0, mode="1")
 

@@ -183,11 +183,27 @@ tasks:
   smoke:aws:
     desc: "Testa o fluxo completo pela URL HTTPS (ex.: task smoke:aws PHOTO=carro.jpg)"
     vars:
-      PHOTO: '{{.PHOTO | default "docs/demo/placa-mercosul.jpg"}}'
+      PHOTO: '{{.PHOTO | default "examples/fotos/sintetica-bra2e19.jpg"}}'
     cmds:
       - |
         URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
         bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
+
+  eval:aws:
+    desc: Envia as fotos de examples/fotos ao sistema na AWS e compara com o gabarito
+    cmds:
+      - |
+        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
+        bash scripts/eval-ocr.sh "$URL" examples/fotos
+
+  ocr:local:
+    desc: "Roda o OCR do worker localmente em fotos/vídeos (ex.: task ocr:local -- examples/videos)"
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        docker run --rm --entrypoint python \
+          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
+          estacionamento-worker:local ocr_local.py {{.CLI_ARGS | default "examples/fotos examples/videos"}}
 
   load:aws:
     desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"

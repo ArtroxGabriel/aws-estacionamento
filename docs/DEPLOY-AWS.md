@@ -87,7 +87,7 @@ O `alb_url` só responde em `http://`. Navegadores que forçam HTTPS dão timeou
 Para testar o fluxo inteiro pela linha de comando (entrada com foto → OCR → `PARKED` → pagamento → auditoria):
 
 ```bash
-task smoke:aws                      # usa docs/demo/placa-mercosul.jpg
+task smoke:aws                      # usa examples/fotos/sintetica-bra2e19.jpg
 task smoke:aws PHOTO=outra-foto.jpg
 ```
 

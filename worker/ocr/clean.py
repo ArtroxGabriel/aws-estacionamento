@@ -93,7 +93,13 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
         return PlateResult(ok=False, plate=None, reason="empty")
 
     candidates = _candidates(raw)
-    exact = [plate for plate in map(_find_plate, candidates) if plate is not None]
+    # With Mercosul evidence (band located or header read) only the Mercosul
+    # format is possible: an exact Old_Format read such as "LSN4149" is the
+    # Mercosul "LSN4I49" with the I read as 1, so it must not win here.
+    mercosul_header = any(marker in _clean(raw) for marker in _MERCOSUL_MARKERS)
+    only_mercosul = mercosul or mercosul_header
+    patterns = (MERCOSUL,) if only_mercosul else (MERCOSUL, OLD)
+    exact = [plate for c in candidates if (plate := _find_plate(c, patterns)) is not None]
     if exact:
         # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is. Several crops
         # and Tesseract modes read the same plate, so the most frequent exact
@@ -103,8 +109,7 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
         plate = max(exact, key=lambda p: (counts[p], -exact.index(p)))
         return PlateResult(ok=True, plate=plate, reason=None)
 
-    mercosul_header = any(marker in _clean(raw) for marker in _MERCOSUL_MARKERS)
-    templates = (_TEMPLATES[0],) if mercosul or mercosul_header else _TEMPLATES
+    templates = (_TEMPLATES[0],) if only_mercosul else _TEMPLATES
     max_swaps = _MAX_CORRECTIONS_LOCATED if mercosul else _MAX_CORRECTIONS
     for cleaned in candidates:
         plate = _find_corrected_plate(cleaned, templates, max_swaps)
@@ -140,12 +145,14 @@ def _clean(text: str) -> str:
     return _NON_ALNUM.sub("", text).upper()
 
 
-def _find_plate(cleaned: str) -> str | None:
-    """Return the first 7-character window matching a plate format, if any."""
+def _find_plate(
+    cleaned: str, patterns: tuple[re.Pattern[str], ...] = (MERCOSUL, OLD)
+) -> str | None:
+    """Return the first 7-character window matching one of ``patterns``, if any."""
 
     for start in range(len(cleaned) - _MAX_LEN + 1):
         window = cleaned[start : start + _MAX_LEN]
-        if MERCOSUL.match(window) or OLD.match(window):
+        if any(pattern.match(window) for pattern in patterns):
             return window
     return None
 
