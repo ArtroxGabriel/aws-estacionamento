@@ -341,19 +341,24 @@ class Poller:
             )
             return Outcome.RETAIN, f"OCR failed: {ocr_result.error}"
 
-        # 6. Normalize the raw text into a canonical plate (Req 5.x). An
-        # unreadable plate leaves the session in PROCESSING and does NOT delete
-        # the message (Req 10.1, 10.2, 10.3).
+        # 6. Normalize the raw text into a canonical plate (Req 5.x). OCR is
+        # deterministic, so an unreadable plate would fail again on every
+        # redelivery: the session becomes FAILED at once (the cashier types the
+        # plate) and the message is deleted. Only a failed RDS update retains.
         plate_result: PlateResult = self._normalizer(
             ocr_result.raw_text, mercosul=ocr_result.mercosul
         )
         if not plate_result.ok or plate_result.plate is None:
-            logger.warning(
-                "unreadable plate for %s: reason=%s; leaving status PROCESSING",
-                session_id,
-                plate_result.reason,
-            )
-            return Outcome.RETAIN, f"unreadable plate: {plate_result.reason}"
+            reason = f"unreadable plate: {plate_result.reason}"
+            logger.warning("%s for %s; marking session FAILED", reason, session_id)
+            try:
+                failed = self._sessions.mark_failed(session_id)
+            except Exception as exc:  # noqa: BLE001 - keep the message for a retry
+                logger.error("failed to mark %s as FAILED: dependency=RDS: %s", session_id, exc)
+                return Outcome.RETAIN, "session update failed (RDS)"
+            if failed:
+                self._log_failed_best_effort(session_id, reason)
+            return Outcome.DELETE, None
 
         # 7. Ordered side effects. The plate is readable and the session is
         # PROCESSING, so apply the durable transition and its follow-on effects.

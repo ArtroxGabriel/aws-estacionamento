@@ -190,6 +190,7 @@ def make_poller(
     audit: FakeAuditLogger | None = None,
     plate: str | None = "ABC1D23",
     s3: Any = None,
+    ocr: Any = None,
 ) -> tuple[Poller, FakeSessionRepository, FakeSpotsCounter, FakeAuditLogger, FakeSQS]:
     sessions = sessions or FakeSessionRepository({SESSION_ID: processing_row()})
     spots = spots or FakeSpotsCounter()
@@ -212,7 +213,7 @@ def make_poller(
         sessions=sessions,
         spots=spots,
         audit=audit,
-        ocr=fake_ocr,
+        ocr=ocr or fake_ocr,
         normalizer=fake_normalizer,
     )
     return poller, sessions, spots, audit, sqs
