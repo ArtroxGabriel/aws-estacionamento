@@ -1,8 +1,16 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "./App";
+
+// As páginas buscam dados ao montar; aqui só interessa a navegação.
+vi.mock("./services/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./services/api")>()),
+  getAvailableSpots: vi.fn().mockResolvedValue(10),
+  listSessions: vi.fn().mockResolvedValue([]),
+  listAuditEvents: vi.fn().mockResolvedValue([]),
+}));
 
 function renderAt(path: string) {
   return render(
