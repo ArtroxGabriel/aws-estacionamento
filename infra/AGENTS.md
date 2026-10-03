@@ -44,6 +44,8 @@ infra/
 - Recursos exclusivos da AWS (rede, ECR, IAM, EC2/ALB/ASG, senha do RDS) usam `count = local.aws_count` e não existem no Floci.
 - **IAM**: `instance_profile_name` vazio cria a role `estacionamento-app` (conta própria). Na AWS Academy, onde não se cria IAM, use `TF_VAR_instance_profile_name=LabInstanceProfile`.
 - **Segredos**: senha do RDS gerada por `random_password` na AWS (fica no state local e no user data do launch template); RDS sem acesso público e portas 5432/6379 abertas só para o SG das instâncias.
+- **Conntrack na t3.micro**: o `user_data` sobe `nf_conntrack_max` (de 7680 para 131072) e encurta o TIME_WAIT para 30 s. Sem isso, a ~150 req/s a tabela enche, o kernel descarta SYNs e o ALB derruba a instância (testado em 2026-10-03). O nginx também usa keepalive com a API.
+- **Conta AWS nova**: o primeiro ASG da conta pode falhar porque a role `AWSServiceRoleForAutoScaling` ainda não propagou. Basta rodar o apply de novo.
 - **Containers e IMDS**: launch template com IMDSv2 e hop limit 2, senão os containers não obtêm as credenciais do instance profile.
 - **Tasks da AWS e o `.env`**: as tasks AWS descartam `AWS_ENDPOINT_URL` do Floci e as chaves `mock_key` herdadas do `.env` antes de chamar `tofu`/`aws`.
 - Fila `ocr-processamento-fila`: `visibility_timeout_seconds = 300` e `redrive_policy` para `ocr-processamento-fila-dlq` com `maxReceiveCount = 3`. O `maxReceiveCount` deve ser igual a `MAX_RECEIVE_COUNT` em `worker/worker.py` (o worker audita a mensagem como `POISON_MESSAGE` na última entrega).

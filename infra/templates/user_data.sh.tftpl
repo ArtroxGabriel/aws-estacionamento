@@ -7,6 +7,17 @@ set -euxo pipefail
 dnf install -y docker
 systemctl enable --now docker
 
+# A t3.micro vem com nf_conntrack_max = 7680: sob carga os TIME_WAIT das
+# conexões NAT do Docker lotam a tabela, o kernel descarta SYNs e o ALB marca
+# a instância como unhealthy. Aumenta a tabela e encurta o TIME_WAIT.
+cat > /etc/sysctl.d/90-estacionamento.conf <<'EOF'
+net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.core.somaxconn = 4096
+EOF
+modprobe nf_conntrack
+sysctl --system
+
 REGISTRY="${registry}"
 API_IMAGE="${api_image}"
 WORKER_IMAGE="${worker_image}"

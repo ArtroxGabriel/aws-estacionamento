@@ -32,10 +32,22 @@
 - [x] **Tasks da AWS** descartam o `AWS_ENDPOINT_URL` e as chaves `mock_key` que vêm do `.env`.
 - [x] `tofu validate` ok. Plan local: 6 recursos, como antes. Plan AWS: 28 recursos.
 
-## Falta fazer (depende de pessoas ou da conta)
+## Validado na AWS (2026-10-03)
 
-- [ ] **Rodar `task deploy:aws`** e validar `/api/health` e o fluxo completo pelo ALB: entrada com foto → OCR → placa no painel → pagamento → auditoria.
-- [ ] **Testar a carga**: `task load:aws` (plano B: `task stress:aws`). Confirmar 1 → 2 → 3 → 1.
+- [x] `task deploy:aws`: 28 recursos criados. A instância fica saudável no Target Group em ~2 min.
+- [x] Fluxo completo pelo ALB (`task smoke:aws`):
+  - entrada com foto → S3 + RDS + SQS + DynamoDB;
+  - o worker lê a placa `BRA2E19` em ~1 s → `PARKED` + vaga descontada no Redis;
+  - pagamento → `PAID`, R$ 10;
+  - auditoria `ENTRY` / `OCR_PROCESSING` / `EXIT_PAYMENT`.
+- [x] **Bug achado e corrigido sob carga.** A tabela conntrack da `t3.micro` (7680 entradas) lotava, o ALB perdia a conexão e o ASG trocava a instância (75 % de respostas 502/503 a 150 req/s). Correção: sysctl no `user_data` + keepalive nginx→API. Depois disso: **100 % de 200 OK a 4.200 req/s**.
+- [x] **Elasticidade:**
+  - 600 conexões → CPU 84 % → alarme de alta em `ALARM` → **1 → 2 instâncias**;
+  - fim da carga → alarme de baixa → **2 → 1**.
+  - O `stress:aws` foi validado via SSM.
+- [x] O instance refresh troca as instâncias sem downtime (sobe a nova antes de tirar a antiga).
+
+## Falta fazer (depende de pessoas)
 - [ ] **Gravar o vídeo** (3–5 min, público). Roteiro em [DEPLOY-AWS.md](DEPLOY-AWS.md#vídeo-da-elasticidade) e no `docs/GOAL.md` §5.
 - [ ] **`task tf:destroy:aws`** ao terminar.
 - [ ] Preencher as matrículas no `README.md` (`Item2.2`, `Item2.3`, `Item2.4`).

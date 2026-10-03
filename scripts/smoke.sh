@@ -26,7 +26,7 @@ echo "4. Esperando o OCR (até ${OCR_TIMEOUT}s)"
 SESSION=""
 for _ in $(seq 1 $((OCR_TIMEOUT / 3))); do
   SESSION=$(curl -fsS "$API/sessions?status=PARKED" \
-    | json "next((s for s in d if s['id']=='$ID'), '')")
+    | json "next((s for s in (d or []) if s['id']=='$ID'), '')")
   [ -n "$SESSION" ] && break
   sleep 3
 done
@@ -41,6 +41,6 @@ echo "5. Pagamento"
 curl -fsS -X POST "$API/exits/$ID/pay"; echo
 
 echo "6. Auditoria da sessão"
-curl -fsS "$API/audit" | json "[(e['action'], e['timestamp']) for e in d if e.get('entity_id')=='$ID']"
+curl -fsS "$API/audit" | json "[(e['action'], e['timestamp']) for e in (d or []) if e.get('entity_id')=='$ID']"
 
 echo "OK: fluxo completo funcionando em $BASE"

@@ -126,8 +126,12 @@ func RegisterLifecycle(
 	cfg config.Config,
 ) {
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%s", cfg.Port),
-		Handler: handler.WithCORS(mux),
+		Addr:              fmt.Sprintf(":%s", cfg.Port),
+		Handler:           handler.WithCORS(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		// Longer than nginx's upstream keepalive_timeout (60 s) so nginx, not
+		// the API, closes idle pooled connections (avoids reset races).
+		IdleTimeout: 120 * time.Second,
 	}
 
 	migrateCtx, stopMigrations := context.WithCancel(context.Background())

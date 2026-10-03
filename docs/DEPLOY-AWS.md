@@ -27,6 +27,8 @@ O comando faz, em ordem:
 4. Roda o `tofu apply` completo, que **pede confirmação**. Leva de 10 a 15 min, principalmente por causa do RDS e do ElastiCache.
 5. Mostra os outputs, incluindo `alb_url`.
 
+> **Conta AWS nova:** se for a primeira vez que a conta usa Auto Scaling, o apply pode falhar com `Access denied when attempting to assume role ... AWSServiceRoleForAutoScaling`. Essa role é criada automaticamente, mas leva alguns segundos para propagar. Rode `task tf:apply:aws` de novo: o ASG marcado como *tainted* é recriado.
+
 Depois do apply, a instância ainda leva ~2–3 min para instalar o Docker, baixar as imagens e passar no health check. Teste:
 
 ```bash
@@ -53,13 +55,14 @@ task aws:rollout   # recria as instâncias do ASG, 50% por vez
 1. No console, mostre o ALB, o ASG com 1 instância e o Target Group `healthy`.
 2. Gere carga pelo ALB:
    ```bash
-   task load:aws DURATION=8m CONCURRENCY=300
+   task load:aws MINUTES=8 CONCURRENCY=600
    ```
-   - Se a CPU não passar de 70 %, use o plano B, que ocupa 100 % da CPU das instâncias atuais via SSM:
+   - Valor testado: 600 conexões levam 1 instância a ~84 % de CPU. O alarme de alta dispara e o ASG sobe para 2 instâncias.
+   - Com 2 instâncias a carga se divide (~64 % em cada) e o grupo não chega a 3. Para mostrar 3 instâncias, rode também, em outro terminal:
      ```bash
      task stress:aws DURATION=300
      ```
-   - Depois que uma instância nova entrar, rode o `stress:aws` de novo para levar o grupo a 3 instâncias.
+     Ele ocupa 100 % da CPU das instâncias que já existem, via SSM.
 3. Mostre o alarme `estacionamento-cpu-alta` em `ALARM` e o ASG subindo para 2 e depois 3 instâncias, todas `healthy` no Target Group.
 4. Pare a carga. Mostre o alarme `estacionamento-cpu-baixa` em `ALARM` e o ASG voltando para 1 instância. O cooldown é de 60 s entre cada passo.
 

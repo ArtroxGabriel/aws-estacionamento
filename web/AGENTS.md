@@ -45,7 +45,7 @@ Na Auditoria, a placa e o resultado do OCR vêm da sessão (`GET /sessions?statu
 
 As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED`/`FAILED` retorna 409.
 
-Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produção o nginx do container faz o mesmo para `API_UPSTREAM` (padrão `http://api:8080`). Mesma origem, sem CORS.
+Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produção o nginx do container faz o mesmo para `API_UPSTREAM` (padrão `http://api:8080`). Mesma origem, sem CORS. O `nginx-api-upstream.envsh` extrai `host:porta` de `API_UPSTREAM` para um bloco `upstream` com keepalive. Sem keepalive, cada request abre um TCP novo, e sob carga isso lota a tabela conntrack do Docker.
 
 ## Common Commands
 - `task install:web` (`npm ci`): instala as dependências
@@ -64,5 +64,6 @@ Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produçã
 - DoD: `npm run lint`, `npm run test -- --run` e `npm run build` sem erros nem warnings.
 
 ## Changelog
+- 2026-10-03: nginx com `upstream` + keepalive para a API (estabilidade sob carga no ALB); build no `$BUILDPLATFORM`.
 - 2026-10-03: Implementação do frontend (painel, totem, saída, auditoria), cliente HTTP tipado, `usePolling`, testes com Vitest e container nginx.
 - 2026-09-15: Criação do AGENTS.md do Frontend Web.

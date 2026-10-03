@@ -170,15 +170,20 @@ tasks:
         bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
 
   load:aws:
-    desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws DURATION=8m CONCURRENCY=300)"
+    desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"
     vars:
-      DURATION: '{{.DURATION | default "5m"}}'
-      CONCURRENCY: '{{.CONCURRENCY | default "200"}}'
+      MINUTES: '{{.MINUTES | default "6"}}'
+      CONCURRENCY: '{{.CONCURRENCY | default "600"}}'
     cmds:
       - |
         URL=$(cd {{.TERRAFORM_DIR}} && tofu workspace select aws >/dev/null && tofu output -raw alb_url)
-        echo "Carga em $URL/api/spots/available por {{.DURATION}} com {{.CONCURRENCY}} conexões"
-        hey -z {{.DURATION}} -c {{.CONCURRENCY}} "$URL/api/spots/available"
+        echo "Carga em $URL/api/spots/available por {{.MINUTES}} min com {{.CONCURRENCY}} conexões"
+        # O hey para sozinho em 1 milhão de respostas (~4 min a 4 mil req/s):
+        # roda em rodadas de 2 min até completar o tempo pedido.
+        END=$(( $(date +%s) + {{.MINUTES}} * 60 ))
+        while [ "$(date +%s)" -lt "$END" ]; do
+          hey -z 2m -c {{.CONCURRENCY}} "$URL/api/spots/available" | grep -E "Requests/sec|^ +\[[0-9]{3}\]"
+        done
 
   stress:aws:
     desc: "Plano B do vídeo: ocupa 100% da CPU das instâncias atuais via SSM (ex.: task stress:aws DURATION=300)"
