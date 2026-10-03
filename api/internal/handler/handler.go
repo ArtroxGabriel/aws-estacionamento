@@ -3,11 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"api/internal/service"
 )
+
+// maxUploadBytes caps the whole POST /entries request body.
+const maxUploadBytes = 10 << 20
 
 type Handler struct {
 	svc *service.ParkingService
@@ -23,6 +25,21 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	return mux
 }
 
+// WithCORS allows any origin. The API is deliberately open (no auth, see
+// docs/GOAL.md), so this lets the Vite dev server call it from another origin.
+func WithCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", h.HandleHealth)
 	mux.HandleFunc("GET /spots/available", h.HandleGetAvailableSpots)
@@ -32,70 +49,80 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /audit", h.HandleGetAuditLogs)
 }
 
-func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "UP"})
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError always emits valid JSON, whatever characters the message holds.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "UP"})
 }
 
 func (h *Handler) HandleGetAvailableSpots(w http.ResponseWriter, r *http.Request) {
 	spots, err := h.svc.GetAvailableSpots(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"available_spots": spots})
+	writeJSON(w, http.StatusOK, map[string]any{"available_spots": spots})
 }
 
 func (h *Handler) HandleCreateEntry(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		http.Error(w, `{"error":"invalid multipart form"}`, http.StatusBadRequest)
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "photo too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
 
 	file, header, err := r.FormFile("photo")
 	if err != nil {
-		http.Error(w, `{"error":"photo is required"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "photo is required")
 		return
 	}
 	defer file.Close()
 
 	session, err := h.svc.CreateEntry(r.Context(), header.Filename, file, header.Header.Get("Content-Type"))
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(session)
+	writeJSON(w, http.StatusCreated, session)
 }
 
 func (h *Handler) HandlePayExit(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, `{"error":"missing session id"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing session id")
 		return
 	}
 
 	paidSession, err := h.svc.PayExit(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, service.ErrSessionNotFound) {
-			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
 		if errors.Is(err, service.ErrInvalidSessionStatus) {
-			http.Error(w, `{"error":"session is not in a payable status"}`, http.StatusConflict)
+			writeError(w, http.StatusConflict, "session is not in a payable status")
 			return
 		}
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(paidSession)
+	writeJSON(w, http.StatusOK, paidSession)
 }
 
 func (h *Handler) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
@@ -116,21 +143,19 @@ func (h *Handler) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 
 	sessions, err := h.svc.FindSessions(r.Context(), statusPtr, platePtr)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(sessions)
+	writeJSON(w, http.StatusOK, sessions)
 }
 
 func (h *Handler) HandleGetAuditLogs(w http.ResponseWriter, r *http.Request) {
 	logs, err := h.svc.GetAuditLogs(r.Context(), 50)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(logs)
+	writeJSON(w, http.StatusOK, logs)
 }

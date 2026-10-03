@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -76,7 +79,7 @@ func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, 
 	}
 
 	sessionID := generateID()
-	s3Key := fmt.Sprintf("photos/%s_%s", sessionID, photoFileName)
+	s3Key := fmt.Sprintf("photos/%s_%s", sessionID, safeFileName(photoFileName))
 
 	if err := s.storage.Upload(ctx, s3Key, photoBody, contentType); err != nil {
 		return nil, fmt.Errorf("failed to upload photo: %w", err)
@@ -145,6 +148,18 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	})
 
 	return paidSession, nil
+}
+
+var unsafeNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// safeFileName drops any directory part and replaces characters outside
+// [A-Za-z0-9._-], so a client filename cannot shape the S3 key.
+func safeFileName(name string) string {
+	name = unsafeNameChars.ReplaceAllString(path.Base(strings.ReplaceAll(name, `\`, "/")), "_")
+	if name == "" || name == "." || name == ".." {
+		return "photo"
+	}
+	return name
 }
 
 func generateID() string {

@@ -126,7 +126,7 @@ func RegisterLifecycle(
 ) {
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.Port),
-		Handler: mux,
+		Handler: handler.WithCORS(mux),
 	}
 
 	lc.Append(fx.Hook{
