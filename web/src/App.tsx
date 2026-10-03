@@ -1,3 +1,3 @@
 export default function App() {
-  return <h1>Estacionamento</h1>;
+  return <h1 className="text-3xl font-bold text-red-600">Estacionamento</h1>;
 }
