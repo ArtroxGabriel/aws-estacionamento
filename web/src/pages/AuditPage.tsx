@@ -3,16 +3,33 @@ import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
 import { errorMessage, listAuditEvents, listSessions } from "../services/api";
 import type { AuditAction, AuditEvent, Session } from "../types/api";
-import { describeEvent, sessionInfo, sortByNewest, type SessionInfo } from "../utils/audit";
+import {
+  describeEvent,
+  isFailureAction,
+  sessionInfo,
+  sortByNewest,
+  type SessionInfo,
+} from "../utils/audit";
 import { actionLabel, formatDateTime, normalizePlate, shortId } from "../utils/format";
 
-const actionOptions: AuditAction[] = ["ENTRY", "OCR_PROCESSING", "EXIT_PAYMENT", "POISON_MESSAGE"];
+const FAILURES_FILTER = "__failures__";
+
+const actionOptions: AuditAction[] = [
+  "ENTRY",
+  "OCR_PROCESSING",
+  "EXIT_PAYMENT",
+  "OCR_FAILED",
+  "POISON_MESSAGE",
+  "ENTRY_FAILED",
+];
 
 const actionClasses: Record<string, string> = {
   ENTRY: "bg-blue-100 text-blue-800",
   OCR_PROCESSING: "bg-amber-100 text-amber-800",
   EXIT_PAYMENT: "bg-green-100 text-green-800",
+  OCR_FAILED: "bg-red-100 text-red-800",
   POISON_MESSAGE: "bg-red-100 text-red-800",
+  ENTRY_FAILED: "bg-red-100 text-red-800",
 };
 
 // Os eventos não trazem a situação atual da sessão (placa no pagamento, resultado do OCR
@@ -22,7 +39,8 @@ async function loadAudit(): Promise<{ events: AuditEvent[]; sessions: Map<string
     listAuditEvents(),
     listSessions("ALL").catch((): Session[] => []),
   ]);
-  return { events: sortByNewest(events), sessions: sessionInfo(events, sessions) };
+  const sorted = sortByNewest(events);
+  return { events: sorted, sessions: sessionInfo(sorted, sessions) };
 }
 
 function matchesText(event: AuditEvent, plate: string | undefined, text: string): boolean {
@@ -69,7 +87,10 @@ export default function AuditPage() {
   const filtered = useMemo(
     () =>
       (events ?? []).filter(
-        (e) => (action === "" || e.action === action) && (trimmedText === "" || matchesText(e, sessions.get(e.entity_id)?.plate, trimmedText)),
+        (e) =>
+          (action === "" ||
+            e.action === action ||
+            (action === FAILURES_FILTER && isFailureAction(e.action))) && (trimmedText === "" || matchesText(e, sessions.get(e.entity_id)?.plate, trimmedText)),
       ),
     [events, sessions, action, trimmedText],
   );
@@ -100,6 +121,7 @@ export default function AuditPage() {
             className="rounded-md border border-slate-300 bg-white px-3 py-2"
           >
             <option value="">Todas</option>
+            <option value={FAILURES_FILTER}>Somente falhas</option>
             {actionOptions.map((a) => (
               <option key={a} value={a}>
                 {actionLabel(a)}
@@ -149,7 +171,10 @@ export default function AuditPage() {
               </thead>
               <tbody>
                 {filtered.map((e) => (
-                  <tr key={e.id} className="border-t border-slate-200">
+                  <tr
+                    key={e.id}
+                    className={`border-t border-slate-200 ${isFailureAction(e.action) ? "bg-red-50" : ""}`}
+                  >
                     <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(e.timestamp)}</td>
                     <td className="px-3 py-2">
                       <span

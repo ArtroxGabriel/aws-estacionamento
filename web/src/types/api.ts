@@ -17,7 +17,13 @@ export interface AvailableSpotsResponse {
   available_spots: number;
 }
 
-export type AuditAction = "ENTRY" | "OCR_PROCESSING" | "EXIT_PAYMENT" | "POISON_MESSAGE";
+export type AuditAction =
+  | "ENTRY"
+  | "OCR_PROCESSING"
+  | "EXIT_PAYMENT"
+  | "OCR_FAILED" // worker: placa não identificada, sessão marcada FAILED
+  | "POISON_MESSAGE" // worker: mensagem falhou na última entrega do SQS
+  | "ENTRY_FAILED"; // API: falha ao publicar a entrada no SQS
 
 export interface AuditEvent {
   id: string; // "<session_id>#<timestamp_nano>"
@@ -25,5 +31,6 @@ export interface AuditEvent {
   entity_id: string; // session_id
   timestamp: string; // RFC3339Nano
   details: Record<string, unknown>; // ENTRY: status, s3_photo_key | OCR_PROCESSING: license_plate
-  // EXIT_PAYMENT: status, amount_paid | POISON_MESSAGE: reason
+  // EXIT_PAYMENT: status, amount_paid | OCR_FAILED: status, reason
+  // POISON_MESSAGE: reason | ENTRY_FAILED: status, error
 }

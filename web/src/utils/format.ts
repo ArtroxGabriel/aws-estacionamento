@@ -56,6 +56,8 @@ const actionLabels: Record<string, string> = {
   OCR_PROCESSING: "Leitura de placa",
   EXIT_PAYMENT: "Pagamento/Saída",
   POISON_MESSAGE: "Falha no processamento",
+  OCR_FAILED: "Falha no OCR",
+  ENTRY_FAILED: "Falha na entrada",
 };
 
 export function actionLabel(action: string): string {
