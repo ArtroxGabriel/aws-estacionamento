@@ -6,9 +6,6 @@
   - `POST /entries`: Recebe foto, salva no S3, cria sessão no RDS com status `PROCESSING`, grava auditoria no DynamoDB e publica na fila SQS.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
   - `POST /exits/{id}/pay`: Registra saída com tarifa fixa, atualiza status para `PAID` no RDS, incrementa vagas no Redis e grava auditoria no DynamoDB.
-  - `GET /sessions?status=PARKED`: Lista sessões por status (`PROCESSING`, `PARKED` padrão, `PAID`, `FAILED`), ordenadas por `entered_at ASC`, limite 200, com `amount_due` calculado no service (`{"sessions":[...]}`; status inválido → 400).
-  - `GET /sessions/{id}`: Retorna a sessão (404 `{"error":"session not found"}` se não existir).
-  - `GET /audit?limit=100`: Últimos eventos de auditoria do DynamoDB (scan paginado, ordenado por `timestamp` desc e cortado em `limit`, 1–500, padrão 100; inválido → 400). Resposta `{"events":[...]}`.
   - `GET /health`: Healthcheck simples da aplicação (`{"status":"UP"}`).
 
 ## Tech Stack
@@ -33,16 +30,15 @@ api/
 │   ├── handler/                        # Handlers HTTP REST e rotas
 │   │   ├── handler.go
 │   │   └── handler_test.go             # Testes unitários do transport HTTP
-│   ├── model/                          # Entidades de domínio
-│   │   ├── session.go                  # Session e ActiveSession (+ amount_due)
-│   │   └── audit.go                    # AuditEvent (DynamoDB)
+│   ├── model/                          # Entidades de domínio (Session)
+│   │   └── session.go
 │   ├── repository/                     # Adaptadores de banco e serviços AWS por tipo
 │   │   ├── interfaces.go               # Contratos das portas de persistência
 │   │   ├── postgres.go                 # PostgresSessionRepo (RDS)
 │   │   ├── redis.go                    # RedisSpotsRepo (ElastiCache)
 │   │   ├── s3.go                       # S3BlobStorage (S3)
 │   │   ├── sqs.go                      # SQSEventPublisher (SQS)
-│   │   ├── dynamodb.go                 # DynamoDBAuditLogger (DynamoDB): AuditLogger + AuditReader
+│   │   ├── dynamodb.go                 # DynamoDBAuditLogger (DynamoDB)
 │   │   ├── migrate.go                  # Migrações via embed.FS (golang-migrate)
 │   │   ├── migrations/                 # Scripts SQL de migração
 │   │   │   ├── 000001_create_sessions_table.up.sql
@@ -50,9 +46,7 @@ api/
 │   │   └── repository_test.go          # Testes de integração (Testcontainers Postgres & Redis)
 │   └── service/                        # Regras de negócio e orquestração
 │       ├── parking.go
-│       ├── parking_test.go             # Testes unitários de regras de negócio
-│       ├── audit.go                    # AuditService (listagem/ordenação da auditoria)
-│       └── audit_test.go
+│       └── parking_test.go             # Testes unitários de regras de negócio
 ├── go.mod
 └── go.sum
 ```
@@ -70,6 +64,5 @@ api/
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
-- 2026-10-03: Endpoints de leitura para o frontend: `GET /sessions`, `GET /sessions/{id}` e `GET /audit`.
 - 2026-09-21: Reestruturação da API no padrão Go (`cmd/` e `internal/`), migrações via `golang-migrate`, TDD com 100% dos testes passando e endpoints padronizados em inglês.
 - 2026-09-15: Criação inicial do AGENTS.md da API.

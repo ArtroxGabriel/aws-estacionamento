@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"sort"
 	"testing"
 	"time"
 
@@ -16,10 +15,8 @@ import (
 
 // FakeSessionRepo implements repository.SessionRepository for testing
 type FakeSessionRepo struct {
-	sessions   map[string]*model.Session
-	shouldErr  bool
-	lastStatus string
-	lastLimit  int
+	sessions  map[string]*model.Session
+	shouldErr bool
 }
 
 func (f *FakeSessionRepo) Create(ctx context.Context, s *model.Session) error {
@@ -49,10 +46,42 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	if !ok {
 		return nil, nil
 	}
+	if s.Status != "PARKED" && s.Status != "FAILED" {
+		return nil, nil
+	}
 	s.Status = "PAID"
 	s.ExitedAt = &exitedAt
 	s.AmountPaid = &amount
 	return s, nil
+}
+
+func (f *FakeSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
+	if f.shouldErr {
+		return errors.New("db error")
+	}
+	s, ok := f.sessions[id]
+	if !ok {
+		return nil
+	}
+	s.Status = "FAILED"
+	return nil
+}
+
+func (f *FakeSessionRepo) FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	var res []*model.Session
+	for _, s := range f.sessions {
+		if status != nil && *status != "" && s.Status != *status {
+			continue
+		}
+		if plate != nil && *plate != "" && (s.LicensePlate == nil || *s.LicensePlate != *plate) {
+			continue
+		}
+		res = append(res, s)
+	}
+	return res, nil
 }
 
 func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
@@ -66,25 +95,6 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 		}
 	}
 	return count, nil
-}
-
-func (f *FakeSessionRepo) ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error) {
-	f.lastStatus = status
-	f.lastLimit = limit
-	if f.shouldErr {
-		return nil, errors.New("db error")
-	}
-	result := make([]model.Session, 0)
-	for _, s := range f.sessions {
-		if s.Status == status {
-			result = append(result, *s)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].EnteredAt.Before(result[j].EnteredAt) })
-	if len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
 }
 
 // FakeSpotsRepo implements repository.SpotsRepository
@@ -178,6 +188,16 @@ type FakeAuditLogger struct {
 func (f *FakeAuditLogger) LogEvent(ctx context.Context, action, entityID string, details map[string]any) error {
 	f.events = append(f.events, action)
 	return nil
+}
+
+func (f *FakeAuditLogger) GetRecentLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {
+	var logs []*model.AuditLog
+	for _, a := range f.events {
+		logs = append(logs, &model.AuditLog{
+			Action: a,
+		})
+	}
+	return logs, nil
 }
 
 func setupService(shouldErrDB, shouldErrStorage bool) (*service.ParkingService, *FakeSessionRepo, *FakeSpotsRepo, *FakeStorage, *FakePublisher, *FakeAuditLogger) {
@@ -352,7 +372,7 @@ func TestPayExit_DatabaseError(t *testing.T) {
 }
 
 func TestCreateEntry_PublishFailure(t *testing.T) {
-	svc, _, _, _, pub, _ := setupService(false, false)
+	svc, repo, _, _, pub, audit := setupService(false, false)
 	pub.shouldErr = true
 
 	photoBody := bytes.NewReader([]byte("fake-photo"))
@@ -362,6 +382,100 @@ func TestCreateEntry_PublishFailure(t *testing.T) {
 	}
 	if session != nil {
 		t.Fatalf("expected nil session on failure, got %+v", session)
+	}
+
+	if len(repo.sessions) != 1 {
+		t.Fatalf("expected 1 session in repo, got %d", len(repo.sessions))
+	}
+	for _, s := range repo.sessions {
+		if s.Status != "FAILED" {
+			t.Fatalf("expected session status to be FAILED, got %s", s.Status)
+		}
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "ENTRY_FAILED" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected ENTRY_FAILED audit event")
+	}
+}
+
+func TestPayExit_FailedStatus_Success(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+
+	sessionID := "failed-ocr-session"
+	repo.sessions[sessionID] = &model.Session{
+		ID:         sessionID,
+		Status:     "FAILED",
+		S3PhotoKey: "photos/blurry.jpg",
+		EnteredAt:  time.Now().Add(-1 * time.Hour),
+	}
+
+	initialSpots := spots.spots
+	paid, err := svc.PayExit(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("expected success paying FAILED session, got %v", err)
+	}
+	if paid.Status != "PAID" {
+		t.Fatalf("expected status PAID, got %s", paid.Status)
+	}
+	// For FAILED sessions, spots counter must NOT increment because it was never decremented
+	if spots.spots != initialSpots {
+		t.Fatalf("expected spots counter unchanged (%d), got %d", initialSpots, spots.spots)
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "EXIT_PAYMENT" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected EXIT_PAYMENT audit event")
+	}
+}
+
+func TestPayExit_ParkedStatus_Success(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+
+	sessionID := "parked-session"
+	plate := "ABC1D23"
+	repo.sessions[sessionID] = &model.Session{
+		ID:           sessionID,
+		LicensePlate: &plate,
+		Status:       "PARKED",
+		S3PhotoKey:   "photos/valid.jpg",
+		EnteredAt:    time.Now().Add(-1 * time.Hour),
+	}
+
+	initialSpots := spots.spots
+	paid, err := svc.PayExit(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("expected success paying PARKED session, got %v", err)
+	}
+	if paid.Status != "PAID" {
+		t.Fatalf("expected status PAID, got %s", paid.Status)
+	}
+	// For PARKED sessions, spots counter must increment
+	if spots.spots != initialSpots+1 {
+		t.Fatalf("expected spots counter incremented to %d, got %d", initialSpots+1, spots.spots)
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "EXIT_PAYMENT" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected EXIT_PAYMENT audit event")
 	}
 }
 
@@ -402,99 +516,3 @@ func TestPayExit_InvalidStatus(t *testing.T) {
 	}
 }
 
-func TestListSessions_DefaultsToParkedWithAmountDue(t *testing.T) {
-	svc, repo, _, _, _, _ := setupService(false, false)
-	now := time.Now()
-	repo.sessions["b"] = &model.Session{ID: "b", Status: "PARKED", EnteredAt: now}
-	repo.sessions["a"] = &model.Session{ID: "a", Status: "PARKED", EnteredAt: now.Add(-time.Hour)}
-	repo.sessions["p"] = &model.Session{ID: "p", Status: "PROCESSING", EnteredAt: now}
-
-	sessions, err := svc.ListSessions(context.Background(), "")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if repo.lastStatus != "PARKED" {
-		t.Fatalf("expected default status PARKED, got %q", repo.lastStatus)
-	}
-	if repo.lastLimit != 200 {
-		t.Fatalf("expected limit 200, got %d", repo.lastLimit)
-	}
-	if len(sessions) != 2 || sessions[0].ID != "a" || sessions[1].ID != "b" {
-		t.Fatalf("expected sessions [a b], got %+v", sessions)
-	}
-	for _, s := range sessions {
-		if s.AmountDue != 15.0 {
-			t.Fatalf("expected amount_due 15.0, got %v", s.AmountDue)
-		}
-	}
-}
-
-func TestListSessions_AcceptsValidStatuses(t *testing.T) {
-	for _, status := range []string{"PROCESSING", "PARKED", "PAID", "FAILED"} {
-		svc, repo, _, _, _, _ := setupService(false, false)
-		sessions, err := svc.ListSessions(context.Background(), status)
-		if err != nil {
-			t.Fatalf("status %s: expected no error, got %v", status, err)
-		}
-		if repo.lastStatus != status {
-			t.Fatalf("status %s: repository received %q", status, repo.lastStatus)
-		}
-		if sessions == nil {
-			t.Fatalf("status %s: expected non-nil empty slice", status)
-		}
-	}
-}
-
-func TestListSessions_InvalidStatus(t *testing.T) {
-	svc, repo, _, _, _, _ := setupService(false, false)
-
-	for _, status := range []string{"BOGUS", "parked", "EXITED"} {
-		_, err := svc.ListSessions(context.Background(), status)
-		if !errors.Is(err, service.ErrInvalidStatusFilter) {
-			t.Fatalf("status %q: expected ErrInvalidStatusFilter, got %v", status, err)
-		}
-	}
-	if repo.lastStatus != "" {
-		t.Fatalf("expected repository not to be called, got status %q", repo.lastStatus)
-	}
-}
-
-func TestListSessions_DatabaseError(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(true, false)
-
-	_, err := svc.ListSessions(context.Background(), "PARKED")
-	if err == nil || errors.Is(err, service.ErrInvalidStatusFilter) {
-		t.Fatalf("expected database error, got %v", err)
-	}
-}
-
-func TestGetSession_Success(t *testing.T) {
-	svc, repo, _, _, _, _ := setupService(false, false)
-	repo.sessions["abc"] = &model.Session{ID: "abc", Status: "PARKED"}
-
-	session, err := svc.GetSession(context.Background(), "abc")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if session.ID != "abc" {
-		t.Fatalf("expected session abc, got %+v", session)
-	}
-}
-
-func TestGetSession_NotFound(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(false, false)
-
-	_, err := svc.GetSession(context.Background(), "missing")
-	if !errors.Is(err, service.ErrSessionNotFound) {
-		t.Fatalf("expected ErrSessionNotFound, got %v", err)
-	}
-}
-
-func TestGetSession_DatabaseError(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(true, false)
-
-	_, err := svc.GetSession(context.Background(), "any")
-	if err == nil || errors.Is(err, service.ErrSessionNotFound) {
-		t.Fatalf("expected database error, got %v", err)
-	}
-}

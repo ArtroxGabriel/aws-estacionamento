@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from typing import Any
 
 from config import Config, load_config
 from ocr.clean import PlateResult
@@ -102,6 +103,7 @@ class FakeAuditLogger:
     def __init__(self) -> None:
         self.ocr_entries: list[tuple[str, str]] = []
         self.poison_entries: list[tuple[str, str]] = []
+        self.failed_entries: list[tuple[str, str]] = []
         self.fail_ocr = 0
 
     def log_ocr(self, session_id: str, plate: str) -> None:
@@ -112,6 +114,9 @@ class FakeAuditLogger:
 
     def log_poison(self, session_id: str, reason: str) -> None:
         self.poison_entries.append((session_id, reason))
+
+    def log_failed(self, session_id: str, reason: str) -> None:
+        self.failed_entries.append((session_id, reason))
 
 
 class FakeS3:
@@ -184,11 +189,13 @@ def make_poller(
     spots: FakeSpotsCounter | None = None,
     audit: FakeAuditLogger | None = None,
     plate: str | None = "ABC1D23",
+    s3: Any = None,
 ) -> tuple[Poller, FakeSessionRepository, FakeSpotsCounter, FakeAuditLogger, FakeSQS]:
     sessions = sessions or FakeSessionRepository({SESSION_ID: processing_row()})
     spots = spots or FakeSpotsCounter()
     audit = audit or FakeAuditLogger()
     sqs = FakeSQS()
+    s3 = s3 or FakeS3()
 
     def fake_ocr(_image: bytes) -> OcrResult:
         return OcrResult(ok=True, raw_text=plate or "???", error=None)
@@ -201,7 +208,7 @@ def make_poller(
     poller = Poller(
         cfg=make_config(),
         sqs=sqs,
-        s3=FakeS3(),
+        s3=s3,
         sessions=sessions,
         spots=spots,
         audit=audit,

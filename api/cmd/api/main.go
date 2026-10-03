@@ -46,15 +46,10 @@ func main() {
 			fx.Annotate(repository.NewRedisSpotsRepo, fx.As(new(repository.SpotsRepository))),
 			fx.Annotate(repository.NewS3BlobStorage, fx.As(new(repository.BlobStorage))),
 			fx.Annotate(repository.NewSQSEventPublisher, fx.As(new(repository.EventPublisher))),
-			fx.Annotate(
-				repository.NewDynamoDBAuditLogger,
-				fx.As(new(repository.AuditLogger)),
-				fx.As(new(repository.AuditReader)),
-			),
+			fx.Annotate(repository.NewDynamoDBAuditLogger, fx.As(new(repository.AuditLogger))),
 
-			// 5. Services (defined in internal/service)
+			// 5. Service (defined in internal/service)
 			service.NewParkingService,
-			service.NewAuditService,
 
 			// 6. Transport / HTTP Handler (defined in internal/handler)
 			handler.NewHandler,
@@ -131,7 +126,7 @@ func RegisterLifecycle(
 ) {
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.Port),
-		Handler: mux,
+		Handler: handler.WithCORS(mux),
 	}
 
 	lc.Append(fx.Hook{

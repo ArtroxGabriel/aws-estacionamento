@@ -33,7 +33,7 @@ RUN apt-get update && \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY config.py worker.py ./
+COPY config.py parser.py worker.py ./
 COPY ocr ./ocr
 COPY storage ./storage
 

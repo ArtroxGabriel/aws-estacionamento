@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"api/internal/model"
@@ -56,7 +57,7 @@ func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedA
 	query := `
 		UPDATE sessions
 		SET status = 'PAID', exited_at = $2, amount_paid = $3
-		WHERE id = $1
+		WHERE id = $1 AND status IN ('PARKED', 'FAILED')
 		RETURNING id, license_plate, status, s3_photo_key, entered_at, exited_at, amount_paid
 	`
 	var s model.Session
@@ -78,30 +79,59 @@ func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedA
 	return &s, nil
 }
 
+func (r *PostgresSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
+	query := `
+		UPDATE sessions
+		SET status = 'FAILED'
+		WHERE id = $1 AND status = 'PROCESSING'
+	`
+	_, err := r.db.ExecContext(ctx, query, id)
+	return err
+}
+
+// CountActive counts the sessions that occupy a spot in the Redis counter.
+// Only PARKED: the worker decrements spots:available on PROCESSING -> PARKED,
+// so counting PROCESSING here too would subtract those sessions twice.
 func (r *PostgresSessionRepo) CountActive(ctx context.Context) (int64, error) {
-	query := `SELECT COUNT(*) FROM sessions WHERE status IN ('PROCESSING', 'PARKED')`
+	query := `SELECT COUNT(*) FROM sessions WHERE status = 'PARKED'`
 	var count int64
 	err := r.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
 }
 
-func (r *PostgresSessionRepo) ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error) {
+func (r *PostgresSessionRepo) FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
 	query := `
 		SELECT id, license_plate, status, s3_photo_key, entered_at, exited_at, amount_paid
-		FROM sessions WHERE status = $1
-		ORDER BY entered_at ASC
-		LIMIT $2
+		FROM sessions
+		WHERE 1=1
 	`
-	rows, err := r.db.QueryContext(ctx, query, status, limit)
+	var args []any
+	argID := 1
+
+	if status != nil && *status != "" {
+		query += ` AND status = $` + fmt.Sprintf("%d", argID)
+		args = append(args, *status)
+		argID++
+	}
+
+	if plate != nil && *plate != "" {
+		query += ` AND license_plate = $` + fmt.Sprintf("%d", argID)
+		args = append(args, *plate)
+		argID++
+	}
+
+	query += ` ORDER BY entered_at DESC`
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	sessions := make([]model.Session, 0)
+	var sessions []*model.Session
 	for rows.Next() {
 		var s model.Session
-		if err := rows.Scan(
+		err := rows.Scan(
 			&s.ID,
 			&s.LicensePlate,
 			&s.Status,
@@ -109,13 +139,11 @@ func (r *PostgresSessionRepo) ListByStatus(ctx context.Context, status string, l
 			&s.EnteredAt,
 			&s.ExitedAt,
 			&s.AmountPaid,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
 		}
-		sessions = append(sessions, s)
+		sessions = append(sessions, &s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return sessions, nil
+	return sessions, rows.Err()
 }

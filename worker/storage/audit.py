@@ -37,6 +37,7 @@ __all__ = [
     "AuditError",
     "AuditWriteError",
     "ACTION_OCR_PROCESSING",
+    "ACTION_OCR_FAILED",
     "ACTION_POISON_MESSAGE",
     "MAX_RETRIES",
 ]
@@ -45,6 +46,7 @@ __all__ = [
 # the action the worker records on a successful PROCESSING -> PARKED transition
 # (Req 8.1). ``POISON_MESSAGE`` labels a poison classification record (Req 12.1).
 ACTION_OCR_PROCESSING = "OCR_PROCESSING"
+ACTION_OCR_FAILED = "OCR_FAILED"
 ACTION_POISON_MESSAGE = "POISON_MESSAGE"
 
 # Retry each PutItem up to three attempts on a transient failure (Req 8.5).
@@ -146,6 +148,27 @@ class AuditLogger:
             ACTION_POISON_MESSAGE,
             {
                 "session_id": {"S": session_id},
+                "reason": {"S": reason},
+            },
+        )
+
+    def log_failed(self, session_id: str, reason: str) -> None:
+        """Record a session failure Audit_Entry (Req 8).
+
+        Writes an item labelled ``OCR_FAILED`` carrying the failing
+        ``session_id``, ``status='FAILED'``, and ``reason`` in ``details``, using
+        the same idempotent, retried write path as :meth:`log_ocr`.
+
+        Raises:
+            AuditWriteError: the write failed after all retries (Req 8.5).
+        """
+
+        self._put(
+            session_id,
+            ACTION_OCR_FAILED,
+            {
+                "session_id": {"S": session_id},
+                "status": {"S": "FAILED"},
                 "reason": {"S": reason},
             },
         )
