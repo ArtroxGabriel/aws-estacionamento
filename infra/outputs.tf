@@ -48,3 +48,8 @@ output "ecr_registry" {
   description = "Registry ECR onde as imagens api/worker/web são publicadas"
   value       = local.is_aws ? local.registry : null
 }
+
+output "app_url" {
+  description = "URL HTTPS da aplicação (CloudFront na frente do ALB)"
+  value       = local.is_aws ? "https://${aws_cloudfront_distribution.app[0].domain_name}" : null
+}

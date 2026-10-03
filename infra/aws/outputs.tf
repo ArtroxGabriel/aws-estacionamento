@@ -32,3 +32,8 @@ output "sqs_queue_url" {
   description = "URL da fila SQS de OCR"
   value       = module.app.sqs_queue_url
 }
+
+output "app_url" {
+  description = "URL HTTPS da aplicação (CloudFront na frente do ALB)"
+  value       = module.app.app_url
+}

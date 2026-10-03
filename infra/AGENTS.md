@@ -20,6 +20,7 @@ infra/
 ├── main.tf                 # Buckets S3, Fila SQS + DLQ, DynamoDB, RDS PostgreSQL e ElastiCache Redis
 ├── network.tf              # (AWS) VPC default, subnets nas AZs que oferecem o tipo de instância e security groups
 ├── autoscaling.tf          # (AWS) ECR, IAM, Launch Template, ALB, ASG (1–3) e alarmes de CPU
+├── cdn.tf                  # (AWS) CloudFront sem cache na frente do ALB: HTTPS sem domínio próprio (output app_url)
 ├── templates/user_data.sh.tftpl  # Boot da EC2: Docker + pull do ECR + api/worker/web
 ├── outputs.tf              # ARNs, URLs, URL do ALB, nome do ASG e registry ECR
 ├── aws/                    # Root da AWS: usa infra/ como módulo, com state remoto no S3

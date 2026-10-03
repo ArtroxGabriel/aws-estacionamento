@@ -78,12 +78,17 @@ Depois do apply, a instância ainda leva ~2–3 min para instalar o Docker, baix
 curl "$(cd infra/aws && tofu output -raw alb_url)/api/health"   # {"status":"UP"}
 ```
 
-Abra o `alb_url` no navegador para usar o painel, o totem de entrada, o caixa e a auditoria.
+Abra o **`app_url`** (`https://<id>.cloudfront.net`) no navegador para usar o painel, o totem de entrada, o caixa e a auditoria.
+
+O `alb_url` só responde em `http://`. Navegadores que forçam HTTPS dão timeout nele, então use o `app_url` para acessar.
+- **Por que dois endereços:** o ALB só aceitaria HTTPS com um certificado de um domínio próprio, e `*.elb.amazonaws.com` não pode ter certificado. O CloudFront entrega HTTPS com o certificado da própria AWS e repassa para o ALB, sem cache.
+- O `alb_url` continua servindo para o teste de carga do vídeo, que vai direto ao ALB e não gasta requisições do CloudFront.
 
 Para testar o fluxo inteiro pela linha de comando (entrada com foto → OCR → `PARKED` → pagamento → auditoria):
 
 ```bash
-task smoke:aws PHOTO=caminho/para/foto-do-carro.jpg
+task smoke:aws                      # usa docs/demo/placa-mercosul.jpg
+task smoke:aws PHOTO=outra-foto.jpg
 ```
 
 ## Atualizar o código

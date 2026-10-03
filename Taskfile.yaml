@@ -181,12 +181,12 @@ tasks:
       - task: tf:output:aws
 
   smoke:aws:
-    desc: "Testa o fluxo completo pelo ALB (ex.: task smoke:aws PHOTO=carro.jpg)"
-    requires:
-      vars: [PHOTO]
+    desc: "Testa o fluxo completo pela URL HTTPS (ex.: task smoke:aws PHOTO=carro.jpg)"
+    vars:
+      PHOTO: '{{.PHOTO | default "docs/demo/placa-mercosul.jpg"}}'
     cmds:
       - |
-        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw alb_url)
+        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
         bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
 
   load:aws:
