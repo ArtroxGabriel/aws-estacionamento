@@ -84,3 +84,38 @@ func (r *PostgresSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	err := r.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
 }
+
+func (r *PostgresSessionRepo) ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error) {
+	query := `
+		SELECT id, license_plate, status, s3_photo_key, entered_at, exited_at, amount_paid
+		FROM sessions WHERE status = $1
+		ORDER BY entered_at ASC
+		LIMIT $2
+	`
+	rows, err := r.db.QueryContext(ctx, query, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sessions := make([]model.Session, 0)
+	for rows.Next() {
+		var s model.Session
+		if err := rows.Scan(
+			&s.ID,
+			&s.LicensePlate,
+			&s.Status,
+			&s.S3PhotoKey,
+			&s.EnteredAt,
+			&s.ExitedAt,
+			&s.AmountPaid,
+		); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"api/internal/model"
 	"api/internal/service"
 )
 
@@ -28,6 +29,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /spots/available", h.HandleGetAvailableSpots)
 	mux.HandleFunc("POST /entries", h.HandleCreateEntry)
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
+	mux.HandleFunc("GET /sessions", h.HandleListSessions)
+	mux.HandleFunc("GET /sessions/{id}", h.HandleGetSession)
 }
 
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -90,4 +93,37 @@ func (h *Handler) HandlePayExit(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(paidSession)
+}
+
+func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
+	sessions, err := h.svc.ListSessions(r.Context(), r.URL.Query().Get("status"))
+	if err != nil {
+		if errors.Is(err, service.ErrInvalidStatusFilter) {
+			http.Error(w, `{"error":"invalid status"}`, http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if sessions == nil {
+		sessions = []model.ActiveSession{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
+}
+
+func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request) {
+	session, err := h.svc.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, service.ErrSessionNotFound) {
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(session)
 }

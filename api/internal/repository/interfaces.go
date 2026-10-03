@@ -13,6 +13,7 @@ type SessionRepository interface {
 	GetByID(ctx context.Context, id string) (*model.Session, error)
 	MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error)
 	CountActive(ctx context.Context) (int64, error)
+	ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error)
 }
 
 type SpotsRepository interface {

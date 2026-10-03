@@ -17,7 +17,20 @@ var (
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrInvalidPhoto         = errors.New("photo is required")
 	ErrInvalidSessionStatus = errors.New("session is not in PARKED status")
+	ErrInvalidStatusFilter  = errors.New("invalid status")
 )
+
+const (
+	defaultSessionStatusFilter = "PARKED"
+	sessionListLimit           = 200
+)
+
+var validSessionStatuses = map[string]bool{
+	"PROCESSING": true,
+	"PARKED":     true,
+	"PAID":       true,
+	"FAILED":     true,
+}
 
 type ParkingService struct {
 	sessionRepo repository.SessionRepository
@@ -133,6 +146,43 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	})
 
 	return paidSession, nil
+}
+
+// ListSessions returns up to 200 sessions with the given status (default PARKED),
+// ordered by entry time, each enriched with the amount currently due.
+func (s *ParkingService) ListSessions(ctx context.Context, status string) ([]model.ActiveSession, error) {
+	if status == "" {
+		status = defaultSessionStatusFilter
+	}
+	if !validSessionStatuses[status] {
+		return nil, ErrInvalidStatusFilter
+	}
+
+	sessions, err := s.sessionRepo.ListByStatus(ctx, status, sessionListLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	result := make([]model.ActiveSession, 0, len(sessions))
+	for _, session := range sessions {
+		result = append(result, model.ActiveSession{
+			Session:   session,
+			AmountDue: s.fixedRate,
+		})
+	}
+	return result, nil
+}
+
+// GetSession returns a single session by ID or ErrSessionNotFound.
+func (s *ParkingService) GetSession(ctx context.Context, id string) (*model.Session, error) {
+	session, err := s.sessionRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve session: %w", err)
+	}
+	if session == nil {
+		return nil, ErrSessionNotFound
+	}
+	return session, nil
 }
 
 func generateID() string {

@@ -110,6 +110,54 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("ListByStatus", func(t *testing.T) {
+		base := time.Now().UTC().Truncate(time.Millisecond)
+		fixtures := []model.Session{
+			{ID: "list-parked-2", Status: "PARKED", S3PhotoKey: "photos/2.jpg", EnteredAt: base.Add(-1 * time.Hour)},
+			{ID: "list-parked-1", Status: "PARKED", S3PhotoKey: "photos/1.jpg", EnteredAt: base.Add(-3 * time.Hour)},
+			{ID: "list-parked-3", Status: "PARKED", S3PhotoKey: "photos/3.jpg", EnteredAt: base},
+			{ID: "list-processing", Status: "PROCESSING", S3PhotoKey: "photos/p.jpg", EnteredAt: base.Add(-5 * time.Hour)},
+		}
+		for i := range fixtures {
+			if err := repo.Create(ctx, &fixtures[i]); err != nil {
+				t.Fatalf("failed to create session %s: %v", fixtures[i].ID, err)
+			}
+		}
+
+		parked, err := repo.ListByStatus(ctx, "PARKED", 200)
+		if err != nil {
+			t.Fatalf("failed to list sessions: %v", err)
+		}
+		wantOrder := []string{"list-parked-1", "list-parked-2", "list-parked-3"}
+		if len(parked) != len(wantOrder) {
+			t.Fatalf("expected %d PARKED sessions, got %d: %+v", len(wantOrder), len(parked), parked)
+		}
+		for i, id := range wantOrder {
+			if parked[i].ID != id {
+				t.Fatalf("expected session %d to be %s, got %s", i, id, parked[i].ID)
+			}
+			if parked[i].Status != "PARKED" {
+				t.Fatalf("expected status PARKED, got %s", parked[i].Status)
+			}
+		}
+
+		limited, err := repo.ListByStatus(ctx, "PARKED", 2)
+		if err != nil {
+			t.Fatalf("failed to list sessions with limit: %v", err)
+		}
+		if len(limited) != 2 || limited[0].ID != "list-parked-1" || limited[1].ID != "list-parked-2" {
+			t.Fatalf("expected first 2 PARKED sessions, got %+v", limited)
+		}
+
+		empty, err := repo.ListByStatus(ctx, "FAILED", 200)
+		if err != nil {
+			t.Fatalf("failed to list FAILED sessions: %v", err)
+		}
+		if empty == nil || len(empty) != 0 {
+			t.Fatalf("expected non-nil empty slice, got %#v", empty)
+		}
+	})
+
 	t.Run("GetByID_NotFound", func(t *testing.T) {
 		fetched, err := repo.GetByID(ctx, "non-existent-id")
 		if err != nil {

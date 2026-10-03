@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +60,20 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 		}
 	}
 	return count, nil
+}
+
+func (f *FakeSessionRepo) ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error) {
+	result := make([]model.Session, 0)
+	for _, s := range f.sessions {
+		if s.Status == status {
+			result = append(result, *s)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].EnteredAt.Before(result[j].EnteredAt) })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 // FakeSpotsRepo implements SpotsRepository for testing
@@ -302,5 +318,159 @@ func TestPayExit_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+}
+
+func TestListSessions_Success(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	now := time.Now().UTC()
+	plate := "ABC1D23"
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "newer", LicensePlate: &plate, Status: "PARKED", S3PhotoKey: "photos/newer.jpg", EnteredAt: now})
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "older", Status: "PARKED", S3PhotoKey: "photos/older.jpg", EnteredAt: now.Add(-time.Hour)})
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "processing", Status: "PROCESSING", S3PhotoKey: "photos/p.jpg", EnteredAt: now})
+	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, cfg)
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	var res struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(res.Sessions) != 2 {
+		t.Fatalf("expected 2 PARKED sessions, got %d", len(res.Sessions))
+	}
+	if res.Sessions[0]["id"] != "older" || res.Sessions[1]["id"] != "newer" {
+		t.Fatalf("expected sessions ordered by entered_at asc, got %v", res.Sessions)
+	}
+	if res.Sessions[1]["license_plate"] != plate {
+		t.Fatalf("expected license_plate %s, got %v", plate, res.Sessions[1]["license_plate"])
+	}
+	for _, s := range res.Sessions {
+		if s["status"] != "PARKED" {
+			t.Fatalf("expected status PARKED, got %v", s["status"])
+		}
+		if amount, ok := s["amount_due"].(float64); !ok || amount != 10.0 {
+			t.Fatalf("expected amount_due 10.0, got %v", s["amount_due"])
+		}
+	}
+}
+
+func TestListSessions_StatusFilter(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "p1", Status: "PROCESSING", EnteredAt: time.Now()})
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "k1", Status: "PARKED", EnteredAt: time.Now()})
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions?status=PROCESSING", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(res.Sessions) != 1 || res.Sessions[0]["id"] != "p1" {
+		t.Fatalf("expected only session p1, got %v", res.Sessions)
+	}
+}
+
+func TestListSessions_EmptyListIsArray(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"sessions":[]}` {
+		t.Fatalf("expected empty sessions array, got %s", body)
+	}
+}
+
+func TestListSessions_InvalidStatus(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions?status=BOGUS", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"error":"invalid status"}` {
+		t.Fatalf("unexpected error body: %s", body)
+	}
+}
+
+func TestGetSession_Success(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "abc", Status: "PARKED", S3PhotoKey: "photos/abc.jpg", EnteredAt: time.Now()})
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions/abc", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if res["id"] != "abc" || res["status"] != "PARKED" || res["s3_photo_key"] != "photos/abc.jpg" {
+		t.Fatalf("unexpected session payload: %v", res)
+	}
+}
+
+func TestGetSession_NotFound(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("GET", "/sessions/unknown", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"error":"session not found"}` {
+		t.Fatalf("unexpected error body: %s", body)
 	}
 }

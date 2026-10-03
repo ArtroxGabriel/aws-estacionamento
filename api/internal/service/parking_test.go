@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"testing"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 
 // FakeSessionRepo implements repository.SessionRepository for testing
 type FakeSessionRepo struct {
-	sessions  map[string]*model.Session
-	shouldErr bool
+	sessions   map[string]*model.Session
+	shouldErr  bool
+	lastStatus string
+	lastLimit  int
 }
 
 func (f *FakeSessionRepo) Create(ctx context.Context, s *model.Session) error {
@@ -63,6 +66,25 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 		}
 	}
 	return count, nil
+}
+
+func (f *FakeSessionRepo) ListByStatus(ctx context.Context, status string, limit int) ([]model.Session, error) {
+	f.lastStatus = status
+	f.lastLimit = limit
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	result := make([]model.Session, 0)
+	for _, s := range f.sessions {
+		if s.Status == status {
+			result = append(result, *s)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].EnteredAt.Before(result[j].EnteredAt) })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 // FakeSpotsRepo implements repository.SpotsRepository
@@ -380,3 +402,99 @@ func TestPayExit_InvalidStatus(t *testing.T) {
 	}
 }
 
+func TestListSessions_DefaultsToParkedWithAmountDue(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	now := time.Now()
+	repo.sessions["b"] = &model.Session{ID: "b", Status: "PARKED", EnteredAt: now}
+	repo.sessions["a"] = &model.Session{ID: "a", Status: "PARKED", EnteredAt: now.Add(-time.Hour)}
+	repo.sessions["p"] = &model.Session{ID: "p", Status: "PROCESSING", EnteredAt: now}
+
+	sessions, err := svc.ListSessions(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.lastStatus != "PARKED" {
+		t.Fatalf("expected default status PARKED, got %q", repo.lastStatus)
+	}
+	if repo.lastLimit != 200 {
+		t.Fatalf("expected limit 200, got %d", repo.lastLimit)
+	}
+	if len(sessions) != 2 || sessions[0].ID != "a" || sessions[1].ID != "b" {
+		t.Fatalf("expected sessions [a b], got %+v", sessions)
+	}
+	for _, s := range sessions {
+		if s.AmountDue != 15.0 {
+			t.Fatalf("expected amount_due 15.0, got %v", s.AmountDue)
+		}
+	}
+}
+
+func TestListSessions_AcceptsValidStatuses(t *testing.T) {
+	for _, status := range []string{"PROCESSING", "PARKED", "PAID", "FAILED"} {
+		svc, repo, _, _, _, _ := setupService(false, false)
+		sessions, err := svc.ListSessions(context.Background(), status)
+		if err != nil {
+			t.Fatalf("status %s: expected no error, got %v", status, err)
+		}
+		if repo.lastStatus != status {
+			t.Fatalf("status %s: repository received %q", status, repo.lastStatus)
+		}
+		if sessions == nil {
+			t.Fatalf("status %s: expected non-nil empty slice", status)
+		}
+	}
+}
+
+func TestListSessions_InvalidStatus(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+
+	for _, status := range []string{"BOGUS", "parked", "EXITED"} {
+		_, err := svc.ListSessions(context.Background(), status)
+		if !errors.Is(err, service.ErrInvalidStatusFilter) {
+			t.Fatalf("status %q: expected ErrInvalidStatusFilter, got %v", status, err)
+		}
+	}
+	if repo.lastStatus != "" {
+		t.Fatalf("expected repository not to be called, got status %q", repo.lastStatus)
+	}
+}
+
+func TestListSessions_DatabaseError(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(true, false)
+
+	_, err := svc.ListSessions(context.Background(), "PARKED")
+	if err == nil || errors.Is(err, service.ErrInvalidStatusFilter) {
+		t.Fatalf("expected database error, got %v", err)
+	}
+}
+
+func TestGetSession_Success(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	repo.sessions["abc"] = &model.Session{ID: "abc", Status: "PARKED"}
+
+	session, err := svc.GetSession(context.Background(), "abc")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if session.ID != "abc" {
+		t.Fatalf("expected session abc, got %+v", session)
+	}
+}
+
+func TestGetSession_NotFound(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(false, false)
+
+	_, err := svc.GetSession(context.Background(), "missing")
+	if !errors.Is(err, service.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestGetSession_DatabaseError(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(true, false)
+
+	_, err := svc.GetSession(context.Background(), "any")
+	if err == nil || errors.Is(err, service.ErrSessionNotFound) {
+		t.Fatalf("expected database error, got %v", err)
+	}
+}
