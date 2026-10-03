@@ -21,7 +21,9 @@ infra/
 ├── network.tf              # (AWS) VPC default, subnets nas AZs que oferecem o tipo de instância e security groups
 ├── autoscaling.tf          # (AWS) ECR, IAM, Launch Template, ALB, ASG (1–3) e alarmes de CPU
 ├── templates/user_data.sh.tftpl  # Boot da EC2: Docker + pull do ECR + api/worker/web
-└── outputs.tf              # ARNs, URLs, URL do ALB, nome do ASG e registry ECR
+├── outputs.tf              # ARNs, URLs, URL do ALB, nome do ASG e registry ECR
+├── aws/                    # Root da AWS: usa infra/ como módulo, com state remoto no S3
+└── bootstrap/              # Uma vez por conta: bucket do state, OIDC do GitHub e role de deploy
 ```
 
 ## Common Commands
@@ -32,6 +34,8 @@ infra/
 - `task tf:apply:local`: Provisiona recursos no Floci local via OpenTofu
 - `task tf:apply:aws`: Provisiona recursos na AWS Academy via OpenTofu
 - `task tf:destroy:aws`: Destrói recursos na AWS Academy (preservar créditos)
+- `task aws:bootstrap`: Uma vez por conta (admin): bucket do state remoto, OIDC do GitHub e role de deploy
+- `task tf:init:aws`: Inicializa `infra/aws` com o state remoto (as demais tasks `*:aws` já chamam)
 - `task deploy:aws`: Deploy completo (ECR → build/push das imagens `linux/amd64` → `tofu apply` completo → outputs)
 - `task aws:images` + `task aws:rollout`: Publica imagens novas e recria as instâncias do ASG
 - `task load:aws` / `task stress:aws`: Carga HTTP no ALB (`hey`) / CPU 100% nas instâncias via SSM, para o vídeo
@@ -40,7 +44,8 @@ infra/
 ## Architecture Conventions
 
 - A variável `use_localstack` (default `true`) controla se os endpoints apontam para `http://localhost:4566` ou para os serviços gerenciados da AWS.
-- **Estados separados**: Floci no workspace `default`, AWS no workspace `aws`. Uma precondition no bucket S3 recusa `use_localstack=false` fora do workspace `aws` (e vice-versa). As tasks `tf:*` já selecionam o workspace.
+- **Estados separados por diretório**: `infra/` guarda só o state local do Floci. A AWS é gerenciada por `infra/aws`, que chama `infra/` como módulo, com state remoto em `s3://estacionamento-tofu-state-<account_id>` e lock nativo do S3 (`use_lockfile`). Esse state é compartilhado com o GitHub Actions. Uma precondition recusa `use_localstack=false` fora do `infra/aws` (variável `aws_root`).
+- **Deploy pelo GitHub Actions**: `.github/workflows/deploy-aws.yml` (`workflow_dispatch`: apply/plan/destroy) assume a role `estacionamento-github-deploy` via OIDC; só o environment `aws` do repositório pode assumi-la. As imagens são tagueadas com o SHA do commit (`image_tag`), o que muda o launch template e dispara o instance refresh.
 - Recursos exclusivos da AWS (rede, ECR, IAM, EC2/ALB/ASG, senha do RDS) usam `count = local.aws_count` e não existem no Floci.
 - **IAM**: `instance_profile_name` vazio cria a role `estacionamento-app` (conta própria). Na AWS Academy, onde não se cria IAM, use `TF_VAR_instance_profile_name=LabInstanceProfile`.
 - **Segredos**: senha do RDS gerada por `random_password` na AWS (fica no state local e no user data do launch template); RDS sem acesso público e portas 5432/6379 abertas só para o SG das instâncias.
@@ -56,6 +61,8 @@ infra/
   - Health check do Target Group em `/api/health` (nginx → `GET /health` da API).
 
 ## Changelog
+
+- 2026-10-03: Deploy via GitHub Actions com OIDC (`infra/bootstrap`), state da AWS remoto no S3 em `infra/aws` (substitui o workspace `aws`) e imagens tagueadas por commit.
 
 - 2026-10-03: Parte 2 na AWS (ECR, IAM, SGs, launch template, ALB, ASG 1–3, alarmes de CPU), workspaces separados local/AWS, bucket com sufixo do account id, senha do RDS gerada e RDS privado.
 

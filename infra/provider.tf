@@ -33,6 +33,18 @@ variable "instance_profile_name" {
   description = "Instance profile já existente para as EC2 (\"LabInstanceProfile\" na AWS Academy). Vazio cria uma role IAM própria."
 }
 
+variable "aws_root" {
+  type        = bool
+  default     = false
+  description = "Definido como true só pelo root infra/aws (state remoto no S3). Impede criar recursos da AWS com o state local de infra/."
+}
+
+variable "image_tag" {
+  type        = string
+  default     = "latest"
+  description = "Tag das imagens no ECR usada pelas instâncias. O GitHub Actions passa o SHA do commit, o que gera um instance refresh a cada deploy."
+}
+
 locals {
   is_aws    = !var.use_localstack
   aws_count = local.is_aws ? 1 : 0

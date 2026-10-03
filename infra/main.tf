@@ -16,11 +16,11 @@ resource "aws_s3_bucket" "fotos" {
   force_destroy = local.is_aws
 
   lifecycle {
-    # Local e AWS usam estados separados: Floci no workspace "default" e AWS
-    # no workspace "aws". Misturar os dois apaga/recria recursos do outro.
+    # infra/ guarda só o state local do Floci; a AWS é gerenciada por
+    # infra/aws, com state remoto no S3 compartilhado com o GitHub Actions.
     precondition {
-      condition     = var.use_localstack == (terraform.workspace != "aws")
-      error_message = "Use o workspace \"aws\" com use_localstack=false e qualquer outro com use_localstack=true (veja as tasks tf:*:aws no Taskfile)."
+      condition     = var.use_localstack || var.aws_root
+      error_message = "Para a AWS use o root infra/aws (tasks tf:*:aws ou o workflow Deploy AWS), não infra/ com use_localstack=false."
     }
   }
 }

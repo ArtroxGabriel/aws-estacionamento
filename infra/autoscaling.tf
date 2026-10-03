@@ -17,8 +17,8 @@ resource "aws_ecr_repository" "app" {
   force_delete = true
 }
 
-# Cada push da tag latest deixa a imagem anterior sem tag: apaga para não
-# acumular custo de armazenamento.
+# Cada push da tag latest deixa a imagem anterior sem tag, e cada deploy do
+# GitHub Actions cria uma tag com o SHA: limpa ambos para não acumular custo.
 resource "aws_ecr_lifecycle_policy" "app" {
   for_each   = aws_ecr_repository.app
   repository = each.value.name
@@ -34,6 +34,16 @@ resource "aws_ecr_lifecycle_policy" "app" {
         countNumber = 1
       }
       action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Mantem as 10 imagens mais recentes"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = { type = "expire" }
     }]
   })
 }
@@ -151,9 +161,9 @@ resource "aws_launch_template" "app" {
   user_data = base64encode(templatefile("${path.module}/templates/user_data.sh.tftpl", {
     region       = var.aws_region
     registry     = local.registry
-    api_image    = "${aws_ecr_repository.app["api"].repository_url}:latest"
-    worker_image = "${aws_ecr_repository.app["worker"].repository_url}:latest"
-    web_image    = "${aws_ecr_repository.app["web"].repository_url}:latest"
+    api_image    = "${aws_ecr_repository.app["api"].repository_url}:${var.image_tag}"
+    worker_image = "${aws_ecr_repository.app["worker"].repository_url}:${var.image_tag}"
+    web_image    = "${aws_ecr_repository.app["web"].repository_url}:${var.image_tag}"
     bucket       = aws_s3_bucket.fotos.bucket
     queue_url    = aws_sqs_queue.ocr_queue.id
     table        = aws_dynamodb_table.logs.name
