@@ -35,6 +35,11 @@
 [Consulta de Vagas] ──> GET /spots/available
     └── Responde instantaneamente direto da memória do ElastiCache
 
+[Placa ilegível] ──> Worker marca a sessão "FAILED" na 1ª entrega (auditoria "OCR_FAILED")
+    └── Caixa digita a placa: PATCH /sessions/:id ("FAILED" → "PARKED", DECR da vaga, auditoria "PLATE_CORRECTION")
+
+[Exclusão] ──> DELETE /sessions/:id (remove a sessão e a foto do S3, INCR se estava "PARKED", auditoria "SESSION_DELETE")
+
 [Saída/Pagamento] ──> POST /exits/:id/pay
     ├── Calcula valor com base no tempo de permanência ou tarifa fixa no RDS
     ├── Atualiza registro para "PAID" e libera a vaga no RDS
@@ -115,6 +120,8 @@ Configurar variáveis locais no `.env`:
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
+
+- 2026-10-03: Placa ilegível vira `FAILED` na hora; caixa com placa digitada/corrigida (`PATCH /sessions/{id}`) e exclusão (`DELETE /sessions/{id}`); OCR mais robusto em fotos reais (`examples/`, 5/5); HTTPS via CloudFront; README reescrito.
 
 - 2026-10-03: Deploy na AWS pelo GitHub Actions com OIDC e state remoto no S3.
 

@@ -84,7 +84,13 @@ O `alb_url` só responde em `http://`. Navegadores que forçam HTTPS dão timeou
 - **Por que dois endereços:** o ALB só aceitaria HTTPS com um certificado de um domínio próprio, e `*.elb.amazonaws.com` não pode ter certificado. O CloudFront entrega HTTPS com o certificado da própria AWS e repassa para o ALB, sem cache.
 - O `alb_url` continua servindo para o teste de carga do vídeo, que vai direto ao ALB e não gasta requisições do CloudFront.
 
-Para testar o fluxo inteiro pela linha de comando (entrada com foto → OCR → `PARKED` → pagamento → auditoria):
+Para testar tudo pela linha de comando:
+
+- entrada com foto → OCR → `PARKED` → pagamento → auditoria;
+- foto sem placa legível → `FAILED` na hora → placa digitada no caixa → pagamento;
+- exclusão de sessão (vaga devolvida).
+
+E `task eval:aws` envia as fotos de `examples/fotos` e compara com o gabarito.
 
 ```bash
 task smoke:aws                      # usa examples/fotos/sintetica-bra2e19.jpg
