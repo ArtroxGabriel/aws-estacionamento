@@ -111,7 +111,7 @@ describe("AuditPage", () => {
   it("entrada exibe o resultado do OCR da sessão em Detalhes", async () => {
     await renderPage();
     const entry = rows()[2];
-    expect(within(entry).getAllByRole("cell")[4]).toHaveTextContent("Processado");
+    expect(within(entry).getAllByRole("cell")[4]).toHaveTextContent("Estacionado");
   });
 
   it("entrada ainda sem leitura de placa exibe Processando", async () => {

@@ -39,10 +39,11 @@ export function sessionInfo(
   return info;
 }
 
-// Resultado do OCR da sessão, exibido no evento de entrada em vez do status gravado
-// naquele momento (sempre "Processando").
+// Estado ao qual a entrada levou, exibido no evento de entrada em vez do status gravado
+// naquele momento (sempre "Processando"): PARKED com placa lida ou FAILED sem placa.
+// Não é o status atual: depois do pagamento a entrada continua como "Estacionado".
 function entryOutcome(info: SessionInfo | undefined): string | undefined {
-  if (info?.plate) return "Processado";
+  if (info?.plate) return statusLabel("PARKED");
   if (info?.status === undefined || info.status === "PROCESSING") return undefined;
   return statusLabel("FAILED"); // concluiu sem placa: falha no OCR (mesmo que já pago)
 }

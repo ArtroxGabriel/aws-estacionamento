@@ -83,9 +83,11 @@ describe("describeEvent", () => {
     expect(describeEvent(entry, { status: "PROCESSING" })).toBe("Processando");
   });
 
-  it("entrada exibe Processado quando a placa foi identificada", () => {
-    expect(describeEvent(entry, { plate: "ABC1D23", status: "PARKED" })).toBe("Processado");
-    expect(describeEvent(entry, { plate: "ABC1D23" })).toBe("Processado");
+  it("entrada exibe Estacionado quando a placa foi identificada", () => {
+    expect(describeEvent(entry, { plate: "ABC1D23", status: "PARKED" })).toBe("Estacionado");
+    expect(describeEvent(entry, { plate: "ABC1D23" })).toBe("Estacionado");
+    // Mostra o estado ao qual a entrada levou, não o atual: já pago continua Estacionado.
+    expect(describeEvent(entry, { plate: "ABC1D23", status: "PAID" })).toBe("Estacionado");
   });
 
   it("entrada exibe Falha no OCR quando a sessão terminou sem placa", () => {
