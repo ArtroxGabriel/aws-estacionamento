@@ -23,11 +23,7 @@ from ocr.clean import PlateResult
 from ocr.clean import normalize as normalize_plate
 from ocr.processor import OcrResult, extract_text
 from parser import (
-    MAX_BODY_BYTES,
-    MAX_S3_KEY_LEN,
-    SESSION_ID_RE,
     SessionMessage,
-    ValidationResult,
     parse_session_message,
 )
 from storage.audit import AuditError, AuditLogger
@@ -43,17 +39,14 @@ from storage.spots import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "MAX_BODY_BYTES",
     "MAX_RECEIVE_COUNT",
-    "MAX_S3_KEY_LEN",
     "Outcome",
     "Poller",
-    "SESSION_ID_RE",
+    "STATUS_FAILED",
     "STATUS_PARKED",
     "STATUS_PROCESSING",
     "STATUS_PAID",
     "SessionMessage",
-    "ValidationResult",
     "main",
     "parse_session_message",
 ]
@@ -104,11 +97,12 @@ class _Interrupted(BaseException):
 STATUS_PROCESSING = "PROCESSING"
 STATUS_PARKED = "PARKED"
 STATUS_PAID = "PAID"
+STATUS_FAILED = "FAILED"
 
 # Statuses that make a message terminal/idempotent: the session already
 # advanced past PROCESSING, so no side effects re-run and the message is
 # deleted (Req 11.1, 11.2).
-_TERMINAL_STATUSES = frozenset({STATUS_PARKED, STATUS_PAID})
+_TERMINAL_STATUSES = frozenset({STATUS_PARKED, STATUS_PAID, STATUS_FAILED})
 
 
 class Outcome(enum.Enum):
@@ -128,6 +122,28 @@ class Outcome(enum.Enum):
     DELETE = "delete"
     RETAIN = "retain"
     POISON = "poison"
+
+
+def _is_permanent_failure(reason: str | None) -> bool:
+    """True if reason represents an unrecoverable payload or OCR failure.
+
+    Transient infrastructure failures (S3 download, RDS unreachable, Redis/DynamoDB)
+    must leave the session in PROCESSING so redrive from DLQ can succeed once the
+    dependency recovers.
+    """
+    if not reason:
+        return False
+    if reason.startswith("OCR failed") or reason.startswith("unreadable plate"):
+        return True
+    validation_markers = (
+        "JSON",
+        "invalid message",
+        "missing session_id",
+        "session_id",
+        "missing s3_key",
+        "s3_key",
+    )
+    return any(marker in reason for marker in validation_markers)
 
 
 class Poller:
@@ -234,8 +250,8 @@ class Poller:
                 reason,
             )
             self._log_poison_best_effort(session_id, reason or "processing failed")
-            if parsed.message is not None:
-                self._mark_session_failed_best_effort(session_id)
+            if parsed.message is not None and _is_permanent_failure(reason):
+                self._mark_session_failed_best_effort(session_id, reason or "processing failed")
             return Outcome.POISON
 
         return outcome
@@ -460,16 +476,25 @@ class Poller:
                 exc,
             )
 
-    def _mark_session_failed_best_effort(self, session_id: str) -> None:
-        """Mark a session as FAILED in RDS when discarded to DLQ (best-effort)."""
-        mark_failed = getattr(self._sessions, "mark_failed", None)
-        if not callable(mark_failed):
-            return
+    def _mark_session_failed_best_effort(self, session_id: str, reason: str = "") -> None:
+        """Mark a session as FAILED in RDS and audit the state change (best-effort)."""
         try:
-            mark_failed(session_id)
+            if self._sessions.mark_failed(session_id):
+                self._log_failed_best_effort(session_id, reason)
         except Exception as exc:  # noqa: BLE001 - best-effort status update
             logger.error(
                 "failed to mark session %s as FAILED in RDS: %s",
+                session_id,
+                exc,
+            )
+
+    def _log_failed_best_effort(self, session_id: str, reason: str) -> None:
+        """Record an OCR_FAILED audit entry without blocking."""
+        try:
+            self._audit.log_failed(session_id, reason)
+        except Exception as exc:  # noqa: BLE001 - best-effort audit
+            logger.error(
+                "failed to record failed audit entry for %s: %s",
                 session_id,
                 exc,
             )
