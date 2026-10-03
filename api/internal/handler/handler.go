@@ -5,17 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"api/internal/model"
 	"api/internal/service"
 )
 
+const defaultAuditLimit = 100
+
 type Handler struct {
-	svc *service.ParkingService
+	svc   *service.ParkingService
+	audit *service.AuditService
 }
 
-func NewHandler(svc *service.ParkingService) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *service.ParkingService, audit *service.AuditService) *Handler {
+	return &Handler{svc: svc, audit: audit}
 }
 
 func NewServeMux(h *Handler) *http.ServeMux {
@@ -31,6 +35,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
 	mux.HandleFunc("GET /sessions", h.HandleListSessions)
 	mux.HandleFunc("GET /sessions/{id}", h.HandleGetSession)
+	mux.HandleFunc("GET /audit", h.HandleListAuditEvents)
 }
 
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -126,4 +131,33 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(session)
+}
+
+func (h *Handler) HandleListAuditEvents(w http.ResponseWriter, r *http.Request) {
+	limit := defaultAuditLimit
+	query := r.URL.Query()
+	if query.Has("limit") {
+		parsed, err := strconv.Atoi(query.Get("limit"))
+		if err != nil {
+			http.Error(w, `{"error":"invalid limit"}`, http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	events, err := h.audit.ListEvents(r.Context(), limit)
+	if err != nil {
+		if errors.Is(err, service.ErrInvalidLimit) {
+			http.Error(w, `{"error":"invalid limit"}`, http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if events == nil {
+		events = []model.AuditEvent{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"events": events})
 }

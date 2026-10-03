@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -146,15 +147,24 @@ func (f *FakeAuditLogger) LogEvent(ctx context.Context, action, entityID string,
 	return nil
 }
 
-func setupTestMux(svc *service.ParkingService) *http.ServeMux {
-	h := handler.NewHandler(svc)
+// FakeAuditReader implements AuditReader for testing
+type FakeAuditReader struct {
+	events []model.AuditEvent
+}
+
+func (f *FakeAuditReader) ListEvents(ctx context.Context) ([]model.AuditEvent, error) {
+	return f.events, nil
+}
+
+func setupTestMux(svc *service.ParkingService, audit *service.AuditService) *http.ServeMux {
+	h := handler.NewHandler(svc, audit)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	return mux
 }
 
 func TestHealthCheck(t *testing.T) {
-	mux := setupTestMux(nil)
+	mux := setupTestMux(nil, nil)
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
 
@@ -169,7 +179,7 @@ func TestGetAvailableSpots(t *testing.T) {
 	spotsRepo := &FakeSpotsRepo{spots: 45}
 	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
 	svc := service.NewParkingService(nil, spotsRepo, nil, nil, nil, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/spots/available", nil)
 	rec := httptest.NewRecorder()
@@ -198,7 +208,7 @@ func TestCreateEntry_Success(t *testing.T) {
 	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
 
 	svc := service.NewParkingService(sessionRepo, nil, storage, publisher, audit, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
@@ -249,7 +259,7 @@ func TestCreateEntry_Success(t *testing.T) {
 func TestCreateEntry_MissingPhoto(t *testing.T) {
 	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
 	svc := service.NewParkingService(nil, nil, nil, nil, nil, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("POST", "/entries", nil)
 	rec := httptest.NewRecorder()
@@ -276,7 +286,7 @@ func TestPayExit_Success(t *testing.T) {
 	_ = sessionRepo.Create(context.Background(), session)
 
 	svc := service.NewParkingService(sessionRepo, spotsRepo, nil, nil, audit, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("POST", "/exits/test-session-123/pay", nil)
 	rec := httptest.NewRecorder()
@@ -309,7 +319,7 @@ func TestPayExit_NotFound(t *testing.T) {
 	sessionRepo := NewFakeSessionRepo()
 	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("POST", "/exits/unknown/pay", nil)
 	rec := httptest.NewRecorder()
@@ -330,7 +340,7 @@ func TestListSessions_Success(t *testing.T) {
 	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "processing", Status: "PROCESSING", S3PhotoKey: "photos/p.jpg", EnteredAt: now})
 	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, cfg)
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions", nil)
 	rec := httptest.NewRecorder()
@@ -374,7 +384,7 @@ func TestListSessions_StatusFilter(t *testing.T) {
 	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "p1", Status: "PROCESSING", EnteredAt: time.Now()})
 	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "k1", Status: "PARKED", EnteredAt: time.Now()})
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions?status=PROCESSING", nil)
 	rec := httptest.NewRecorder()
@@ -398,7 +408,7 @@ func TestListSessions_StatusFilter(t *testing.T) {
 func TestListSessions_EmptyListIsArray(t *testing.T) {
 	sessionRepo := NewFakeSessionRepo()
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions", nil)
 	rec := httptest.NewRecorder()
@@ -416,7 +426,7 @@ func TestListSessions_EmptyListIsArray(t *testing.T) {
 func TestListSessions_InvalidStatus(t *testing.T) {
 	sessionRepo := NewFakeSessionRepo()
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions?status=BOGUS", nil)
 	rec := httptest.NewRecorder()
@@ -435,7 +445,7 @@ func TestGetSession_Success(t *testing.T) {
 	sessionRepo := NewFakeSessionRepo()
 	_ = sessionRepo.Create(context.Background(), &model.Session{ID: "abc", Status: "PARKED", S3PhotoKey: "photos/abc.jpg", EnteredAt: time.Now()})
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions/abc", nil)
 	rec := httptest.NewRecorder()
@@ -460,7 +470,7 @@ func TestGetSession_Success(t *testing.T) {
 func TestGetSession_NotFound(t *testing.T) {
 	sessionRepo := NewFakeSessionRepo()
 	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, config.Config{FixedParkingRate: 10.0})
-	mux := setupTestMux(svc)
+	mux := setupTestMux(svc, nil)
 
 	req := httptest.NewRequest("GET", "/sessions/unknown", nil)
 	rec := httptest.NewRecorder()
@@ -472,5 +482,107 @@ func TestGetSession_NotFound(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != `{"error":"session not found"}` {
 		t.Fatalf("unexpected error body: %s", body)
+	}
+}
+
+func TestListAuditEvents_Success(t *testing.T) {
+	reader := &FakeAuditReader{events: []model.AuditEvent{
+		{ID: "s1#1", Action: "ENTRY", EntityID: "s1", Timestamp: "2026-10-03T14:05:09Z", Details: map[string]any{"status": "PROCESSING"}},
+		{ID: "s1#2", Action: "OCR_PROCESSING", EntityID: "s1", Timestamp: "2026-10-03T14:05:12.123456789Z", Details: map[string]any{"license_plate": "ABC1D23"}},
+		{ID: "s1#3", Action: "EXIT_PAYMENT", EntityID: "s1", Timestamp: "2026-10-03T15:00:00Z", Details: map[string]any{"amount_paid": 10.0}},
+	}}
+	mux := setupTestMux(nil, service.NewAuditService(reader))
+
+	req := httptest.NewRequest("GET", "/audit?limit=2", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	var res struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(res.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(res.Events))
+	}
+	if res.Events[0]["action"] != "EXIT_PAYMENT" || res.Events[1]["action"] != "OCR_PROCESSING" {
+		t.Fatalf("expected newest-first events, got %v", res.Events)
+	}
+	first := res.Events[0]
+	if first["id"] != "s1#3" || first["entity_id"] != "s1" || first["timestamp"] != "2026-10-03T15:00:00Z" {
+		t.Fatalf("unexpected event payload: %v", first)
+	}
+	details, ok := first["details"].(map[string]any)
+	if !ok || details["amount_paid"] != 10.0 {
+		t.Fatalf("expected details.amount_paid 10, got %v", first["details"])
+	}
+}
+
+func TestListAuditEvents_DefaultLimit(t *testing.T) {
+	var events []model.AuditEvent
+	for i := 0; i < 150; i++ {
+		events = append(events, model.AuditEvent{ID: fmt.Sprintf("e%d", i), Timestamp: time.Unix(int64(i), 0).UTC().Format(time.RFC3339Nano)})
+	}
+	mux := setupTestMux(nil, service.NewAuditService(&FakeAuditReader{events: events}))
+
+	req := httptest.NewRequest("GET", "/audit", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(res.Events) != 100 {
+		t.Fatalf("expected default limit of 100 events, got %d", len(res.Events))
+	}
+}
+
+func TestListAuditEvents_EmptyListIsArray(t *testing.T) {
+	mux := setupTestMux(nil, service.NewAuditService(&FakeAuditReader{}))
+
+	req := httptest.NewRequest("GET", "/audit", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"events":[]}` {
+		t.Fatalf("expected empty events array, got %s", body)
+	}
+}
+
+func TestListAuditEvents_InvalidLimit(t *testing.T) {
+	mux := setupTestMux(nil, service.NewAuditService(&FakeAuditReader{}))
+
+	for _, q := range []string{"abc", "0", "-5", "501", "1.5", ""} {
+		req := httptest.NewRequest("GET", "/audit?limit="+q, nil)
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("limit=%q: expected status 400, got %d", q, rec.Code)
+		}
+		if body := strings.TrimSpace(rec.Body.String()); body != `{"error":"invalid limit"}` {
+			t.Fatalf("limit=%q: unexpected error body: %s", q, body)
+		}
 	}
 }

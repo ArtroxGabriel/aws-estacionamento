@@ -35,3 +35,7 @@ type EventPublisher interface {
 type AuditLogger interface {
 	LogEvent(ctx context.Context, action, entityID string, details map[string]any) error
 }
+
+type AuditReader interface {
+	ListEvents(ctx context.Context) ([]model.AuditEvent, error)
+}

@@ -46,10 +46,15 @@ func main() {
 			fx.Annotate(repository.NewRedisSpotsRepo, fx.As(new(repository.SpotsRepository))),
 			fx.Annotate(repository.NewS3BlobStorage, fx.As(new(repository.BlobStorage))),
 			fx.Annotate(repository.NewSQSEventPublisher, fx.As(new(repository.EventPublisher))),
-			fx.Annotate(repository.NewDynamoDBAuditLogger, fx.As(new(repository.AuditLogger))),
+			fx.Annotate(
+				repository.NewDynamoDBAuditLogger,
+				fx.As(new(repository.AuditLogger)),
+				fx.As(new(repository.AuditReader)),
+			),
 
-			// 5. Service (defined in internal/service)
+			// 5. Services (defined in internal/service)
 			service.NewParkingService,
+			service.NewAuditService,
 
 			// 6. Transport / HTTP Handler (defined in internal/handler)
 			handler.NewHandler,
