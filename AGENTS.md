@@ -12,7 +12,7 @@
 2. **Amazon RDS**: PostgreSQL (`db.t3.micro`, Single-AZ) para persistência transacional de vagas, sessões de permanência (`PROCESSANDO`, `ESTACIONADO`, `PAGO`) e cálculo de tarifas.
 3. **Amazon S3**: Bucket para arquivos binários (fotos dos veículos capturadas na entrada).
 4. **Amazon ElastiCache**: Cluster Redis nó único (`cache.t3.micro`) mantendo em memória o mapa de vagas disponíveis para leituras de alta frequência e baixa latência.
-5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRADA`, `PROCESSAMENTO_OCR`, `SAIDA_PAGAMENTO`).
+5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
 6. **Amazon SQS**: Desacoplamento assíncrono: API publica mensagem diretamente na fila SQS (`ocr-processamento-fila`, visibility timeout 300 s); o worker Python consome a fila, localiza a placa (OpenCV) e extrai o texto via OCR (Tesseract). Após 3 recebimentos sem sucesso a mensagem vai para a DLQ `ocr-processamento-fila-dlq`.
 
 ## Pipeline da Solução
@@ -63,7 +63,7 @@
 └── docs/                   # Especificações da disciplina
 ```
 
-- `api/`: API REST responsável pelas rotas `/entradas`, `/vagas/disponiveis` e `/saidas/:id/pagar`.
+- `api/`: API REST responsável pelas rotas `/entries`, `/spots/available` e `/exits/{id}/pay`.
 - `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e atualizar o RDS/Redis.
 - `web/`: Interface para o operador e totem de entrada.
 - `infra/`: Definições IaC (OpenTofu) e ambiente local (Docker Compose com Floci).
@@ -97,7 +97,7 @@ Configurar variáveis locais no `.env`:
 ## Architecture Conventions
 
 - **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila SQS e libera a requisição HTTP.
-- **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRADA`, `PROCESSAMENTO_OCR`, `SAIDA_PAGAMENTO`).
+- **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
 - **Cache de Alta Frequência**: A consulta de vagas disponíveis bate exclusivamente no ElastiCache (Redis).
 - **Consistência de Contadores**: O decremento ocorre no término do OCR e o incremento ocorre na liberação da vaga após pagamento.
 
