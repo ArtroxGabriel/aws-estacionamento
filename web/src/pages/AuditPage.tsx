@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
-import { errorMessage, listAuditEvents } from "../services/api";
-import type { AuditAction, AuditEvent } from "../types/api";
-import { describeDetails, plateOf, sortByNewest } from "../utils/audit";
+import { errorMessage, listAuditEvents, listSessions } from "../services/api";
+import type { AuditAction, AuditEvent, Session } from "../types/api";
+import { describeDetails, sessionPlates, sortByNewest } from "../utils/audit";
 import { actionLabel, formatDateTime, normalizePlate, shortId } from "../utils/format";
 
 const actionOptions: AuditAction[] = ["ENTRY", "OCR_PROCESSING", "EXIT_PAYMENT", "POISON_MESSAGE"];
@@ -15,15 +15,25 @@ const actionClasses: Record<string, string> = {
   POISON_MESSAGE: "bg-red-100 text-red-800",
 };
 
-function matchesText(event: AuditEvent, text: string): boolean {
+// Os eventos de pagamento não trazem a placa: ela é buscada nas sessões, e a falha
+// dessa consulta não impede a exibição da auditoria.
+async function loadAudit(): Promise<{ events: AuditEvent[]; plates: Map<string, string> }> {
+  const [events, sessions] = await Promise.all([
+    listAuditEvents(),
+    listSessions("ALL").catch((): Session[] => []),
+  ]);
+  return { events: sortByNewest(events), plates: sessionPlates(events, sessions) };
+}
+
+function matchesText(event: AuditEvent, plate: string | undefined, text: string): boolean {
   if (event.entity_id.startsWith(text.toLowerCase())) return true;
   const plateQuery = normalizePlate(text);
-  const plate = plateOf(event.details);
   return plateQuery !== "" && plate !== undefined && normalizePlate(plate).includes(plateQuery);
 }
 
 export default function AuditPage() {
   const [events, setEvents] = useState<AuditEvent[]>();
+  const [plates, setPlates] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [action, setAction] = useState("");
@@ -32,10 +42,11 @@ export default function AuditPage() {
   // Só altera o estado na resposta; o carregamento inicial parte de loading = true.
   const load = useCallback(
     () =>
-      listAuditEvents()
+      loadAudit()
         .then(
           (result) => {
-            setEvents(sortByNewest(result));
+            setEvents(result.events);
+            setPlates(result.plates);
             setError(undefined);
           },
           (err: unknown) => setError(errorMessage(err)),
@@ -58,9 +69,9 @@ export default function AuditPage() {
   const filtered = useMemo(
     () =>
       (events ?? []).filter(
-        (e) => (action === "" || e.action === action) && (trimmedText === "" || matchesText(e, trimmedText)),
+        (e) => (action === "" || e.action === action) && (trimmedText === "" || matchesText(e, plates.get(e.entity_id), trimmedText)),
       ),
-    [events, action, trimmedText],
+    [events, plates, action, trimmedText],
   );
 
   return (
@@ -150,7 +161,7 @@ export default function AuditPage() {
                     <td className="px-3 py-2 font-mono" title={e.entity_id}>
                       {shortId(e.entity_id)}
                     </td>
-                    <td className="px-3 py-2 font-mono">{plateOf(e.details) ?? "—"}</td>
+                    <td className="px-3 py-2 font-mono">{plates.get(e.entity_id) ?? "—"}</td>
                     <td className="px-3 py-2">{describeDetails(e.details)}</td>
                   </tr>
                 ))}

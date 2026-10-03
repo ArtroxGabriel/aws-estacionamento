@@ -1,16 +1,18 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, listAuditEvents } from "../services/api";
-import type { AuditEvent } from "../types/api";
+import { ApiError, listAuditEvents, listSessions } from "../services/api";
+import type { AuditEvent, Session } from "../types/api";
 import AuditPage from "./AuditPage";
 
 vi.mock("../services/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/api")>()),
   listAuditEvents: vi.fn(),
+  listSessions: vi.fn(),
 }));
 
 const mockedListAuditEvents = vi.mocked(listAuditEvents);
+const mockedListSessions = vi.mocked(listSessions);
 
 const sessionId = "9f2c4e1a7b3d4c5e";
 const events: AuditEvent[] = [
@@ -48,8 +50,9 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-async function renderPage(data: AuditEvent[] = events) {
+async function renderPage(data: AuditEvent[] = events, sessions: Session[] = []) {
   mockedListAuditEvents.mockResolvedValue(data);
+  mockedListSessions.mockResolvedValue(sessions);
   const user = userEvent.setup();
   render(<AuditPage />);
   if (data.length > 0) await screen.findByRole("table");
@@ -85,7 +88,7 @@ describe("AuditPage", () => {
     const input = screen.getByLabelText("Sessão ou placa");
 
     await user.type(input, "abc-1d");
-    expect(rows()).toHaveLength(1);
+    expect(rows()).toHaveLength(3); // entrada, leitura e pagamento da mesma sessão
 
     await user.clear(input);
     await user.type(input, "1111");
@@ -93,13 +96,35 @@ describe("AuditPage", () => {
     expect(within(rows()[0]).getByText("NEW_ACTION")).toBeInTheDocument();
   });
 
-  it("exibe a placa para OCR_PROCESSING e — para ENTRY", async () => {
+  it("exibe a placa da sessão em todos os eventos dela, inclusive no pagamento", async () => {
     await renderPage();
-    const [exit, ocr, entry] = rows();
-    expect(within(ocr).getAllByRole("cell")[3]).toHaveTextContent("ABC1D23");
-    expect(within(entry).getAllByRole("cell")[3]).toHaveTextContent("—");
+    const [exit, ocr, entry, other] = rows();
+    const plateCell = (row: HTMLElement) => within(row).getAllByRole("cell")[3];
+    expect(plateCell(exit)).toHaveTextContent("ABC1D23");
+    expect(plateCell(ocr)).toHaveTextContent("ABC1D23");
+    expect(plateCell(entry)).toHaveTextContent("ABC1D23");
+    expect(plateCell(other)).toHaveTextContent("—");
     expect(within(exit).getAllByRole("cell")[4]).toHaveTextContent(/^Pago · R\$\s10,00$/);
     expect(within(entry).getAllByRole("cell")[2]).toHaveAttribute("title", sessionId);
+  });
+
+  it("usa a placa das sessões quando o evento de OCR não está na lista", async () => {
+    const payment = events[1];
+    await renderPage(
+      [payment],
+      [{ id: sessionId, license_plate: "BRA2E19", status: "PAID", s3_photo_key: "x", entered_at: "" }],
+    );
+    expect(mockedListSessions).toHaveBeenCalledWith("ALL");
+    expect(within(rows()[0]).getAllByRole("cell")[3]).toHaveTextContent("BRA2E19");
+  });
+
+  it("falha ao buscar as sessões não impede a exibição da auditoria", async () => {
+    mockedListAuditEvents.mockResolvedValue([events[1]]);
+    mockedListSessions.mockRejectedValue(new ApiError(500, "boom"));
+    render(<AuditPage />);
+    await screen.findByRole("table");
+    expect(within(rows()[0]).getAllByRole("cell")[3]).toHaveTextContent("—");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("exibe ação desconhecida sem quebrar", async () => {
@@ -116,6 +141,7 @@ describe("AuditPage", () => {
     mockedListAuditEvents
       .mockRejectedValueOnce(new ApiError(500, "boom"))
       .mockResolvedValueOnce(events);
+    mockedListSessions.mockResolvedValue([]);
     const user = userEvent.setup();
     render(<AuditPage />);
 

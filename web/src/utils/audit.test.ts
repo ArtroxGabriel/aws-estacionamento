@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "../types/api";
-import { describeDetails, plateOf, sortByNewest } from "./audit";
+import { describeDetails, plateOf, sessionPlates, sortByNewest } from "./audit";
 
 describe("describeDetails", () => {
   it('monta "Pago · R$ 10,00" para EXIT_PAYMENT', () => {
@@ -47,5 +47,20 @@ describe("sortByNewest", () => {
       event("c", "2026-10-03T14:05:10Z"),
     ]);
     expect(sorted.map((e) => e.id)).toEqual(["c", "b", "a"]);
+  });
+});
+
+describe("sessionPlates", () => {
+  it("combina placas dos eventos de OCR e das sessões", () => {
+    const plates = sessionPlates(
+      [{ id: "a#1", action: "OCR_PROCESSING", entity_id: "a", timestamp: "", details: { license_plate: "AAA1A11" } }],
+      [
+        { id: "b", license_plate: "BBB2B22", status: "PAID", s3_photo_key: "", entered_at: "" },
+        { id: "c", status: "FAILED", s3_photo_key: "", entered_at: "" },
+      ],
+    );
+    expect(plates.get("a")).toBe("AAA1A11");
+    expect(plates.get("b")).toBe("BBB2B22");
+    expect(plates.has("c")).toBe(false);
   });
 });
