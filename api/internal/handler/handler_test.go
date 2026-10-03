@@ -50,6 +50,29 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	return s, nil
 }
 
+func (f *FakeSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
+	s, ok := f.sessions[id]
+	if !ok {
+		return nil
+	}
+	s.Status = "FAILED"
+	return nil
+}
+
+func (f *FakeSessionRepo) FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
+	var res []*model.Session
+	for _, s := range f.sessions {
+		if status != nil && *status != "" && s.Status != *status {
+			continue
+		}
+		if plate != nil && *plate != "" && (s.LicensePlate == nil || *s.LicensePlate != *plate) {
+			continue
+		}
+		res = append(res, s)
+	}
+	return res, nil
+}
+
 func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	var count int64
 	for _, s := range f.sessions {
@@ -128,6 +151,18 @@ func (f *FakeAuditLogger) LogEvent(ctx context.Context, action, entityID string,
 		"details":   details,
 	})
 	return nil
+}
+
+func (f *FakeAuditLogger) GetRecentLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {
+	var logs []*model.AuditLog
+	for _, e := range f.events {
+		logs = append(logs, &model.AuditLog{
+			Action:   e["action"].(string),
+			EntityID: e["entity_id"].(string),
+			Details:  e["details"].(map[string]any),
+		})
+	}
+	return logs, nil
 }
 
 func setupTestMux(svc *service.ParkingService) *http.ServeMux {
@@ -302,5 +337,29 @@ func TestPayExit_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+}
+
+func TestPayExit_InvalidStatus(t *testing.T) {
+	sessionRepo := NewFakeSessionRepo()
+	session := &model.Session{
+		ID:         "test-session-processing",
+		Status:     "PROCESSING",
+		S3PhotoKey: "photos/test.jpg",
+		EnteredAt:  time.Now().Add(-1 * time.Hour),
+	}
+	_ = sessionRepo.Create(context.Background(), session)
+
+	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 10.0}
+	svc := service.NewParkingService(sessionRepo, nil, nil, nil, nil, cfg)
+	mux := setupTestMux(svc)
+
+	req := httptest.NewRequest("POST", "/exits/test-session-processing/pay", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409 Conflict, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -12,7 +12,9 @@ type SessionRepository interface {
 	Create(ctx context.Context, session *model.Session) error
 	GetByID(ctx context.Context, id string) (*model.Session, error)
 	MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error)
+	MarkAsFailed(ctx context.Context, id string) error
 	CountActive(ctx context.Context) (int64, error)
+	FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error)
 }
 
 type SpotsRepository interface {
@@ -33,4 +35,5 @@ type EventPublisher interface {
 
 type AuditLogger interface {
 	LogEvent(ctx context.Context, action, entityID string, details map[string]any) error
+	GetRecentLogs(ctx context.Context, limit int) ([]*model.AuditLog, error)
 }

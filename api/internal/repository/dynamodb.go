@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"api/internal/config"
+	"api/internal/model"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -56,4 +57,24 @@ func (d *DynamoDBAuditLogger) LogEvent(ctx context.Context, action, entityID str
 		return nil
 	}
 	return err
+}
+
+func (d *DynamoDBAuditLogger) GetRecentLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {
+	out, err := d.client.Scan(ctx, &dynamodb.ScanInput{
+		TableName: aws.String(d.tableName),
+		Limit:     aws.Int32(int32(limit)),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var logs []*model.AuditLog
+	for _, item := range out.Items {
+		var l model.AuditLog
+		if err := attributevalue.UnmarshalMap(item, &l); err != nil {
+			return nil, err
+		}
+		logs = append(logs, &l)
+	}
+	return logs, nil
 }

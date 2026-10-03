@@ -28,6 +28,48 @@ def test_last_delivery_that_fails_records_poison():
     assert session_id == SESSION_ID
     assert "unreadable" in reason
     assert sessions.rows[SESSION_ID].status == "FAILED"
+    assert len(audit.failed_entries) == 1
+    assert audit.failed_entries[0][0] == SESSION_ID
+
+
+class ErrorS3:
+    def download(self, key: str) -> bytes:
+        raise RuntimeError("network timeout to S3")
+
+
+def test_transient_failure_on_last_delivery_keeps_session_processing():
+    poller, sessions, _, audit, _ = make_poller(s3=ErrorS3())
+
+    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT))
+
+    assert outcome is Outcome.POISON
+    assert len(audit.poison_entries) == 1
+    assert "S3 download failed" in audit.poison_entries[0][1]
+    assert sessions.rows[SESSION_ID].status == "PROCESSING"
+    assert audit.failed_entries == []
+
+
+def test_session_already_failed_is_terminal_delete():
+    from fakes import FakeSessionRepository, SessionRow
+
+    sessions = FakeSessionRepository(
+        {
+            SESSION_ID: SessionRow(
+                id=SESSION_ID,
+                license_plate=None,
+                status="FAILED",
+                s3_photo_key="photos/test.jpg",
+            )
+        }
+    )
+    poller, _, spots, audit, _ = make_poller(sessions=sessions)
+
+    outcome = poller._handle(make_message(receive_count=1))
+
+    assert outcome is Outcome.DELETE
+    assert spots.decrements == 0
+    assert audit.ocr_entries == []
+    assert audit.poison_entries == []
 
 
 def test_last_delivery_that_succeeds_is_not_poison():

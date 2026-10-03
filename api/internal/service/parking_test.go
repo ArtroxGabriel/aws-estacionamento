@@ -46,10 +46,42 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 	if !ok {
 		return nil, nil
 	}
+	if s.Status != "PARKED" && s.Status != "FAILED" {
+		return nil, nil
+	}
 	s.Status = "PAID"
 	s.ExitedAt = &exitedAt
 	s.AmountPaid = &amount
 	return s, nil
+}
+
+func (f *FakeSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
+	if f.shouldErr {
+		return errors.New("db error")
+	}
+	s, ok := f.sessions[id]
+	if !ok {
+		return nil
+	}
+	s.Status = "FAILED"
+	return nil
+}
+
+func (f *FakeSessionRepo) FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	var res []*model.Session
+	for _, s := range f.sessions {
+		if status != nil && *status != "" && s.Status != *status {
+			continue
+		}
+		if plate != nil && *plate != "" && (s.LicensePlate == nil || *s.LicensePlate != *plate) {
+			continue
+		}
+		res = append(res, s)
+	}
+	return res, nil
 }
 
 func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
@@ -156,6 +188,16 @@ type FakeAuditLogger struct {
 func (f *FakeAuditLogger) LogEvent(ctx context.Context, action, entityID string, details map[string]any) error {
 	f.events = append(f.events, action)
 	return nil
+}
+
+func (f *FakeAuditLogger) GetRecentLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {
+	var logs []*model.AuditLog
+	for _, a := range f.events {
+		logs = append(logs, &model.AuditLog{
+			Action: a,
+		})
+	}
+	return logs, nil
 }
 
 func setupService(shouldErrDB, shouldErrStorage bool) (*service.ParkingService, *FakeSessionRepo, *FakeSpotsRepo, *FakeStorage, *FakePublisher, *FakeAuditLogger) {
@@ -330,7 +372,7 @@ func TestPayExit_DatabaseError(t *testing.T) {
 }
 
 func TestCreateEntry_PublishFailure(t *testing.T) {
-	svc, _, _, _, pub, _ := setupService(false, false)
+	svc, repo, _, _, pub, audit := setupService(false, false)
 	pub.shouldErr = true
 
 	photoBody := bytes.NewReader([]byte("fake-photo"))
@@ -340,6 +382,100 @@ func TestCreateEntry_PublishFailure(t *testing.T) {
 	}
 	if session != nil {
 		t.Fatalf("expected nil session on failure, got %+v", session)
+	}
+
+	if len(repo.sessions) != 1 {
+		t.Fatalf("expected 1 session in repo, got %d", len(repo.sessions))
+	}
+	for _, s := range repo.sessions {
+		if s.Status != "FAILED" {
+			t.Fatalf("expected session status to be FAILED, got %s", s.Status)
+		}
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "ENTRY_FAILED" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected ENTRY_FAILED audit event")
+	}
+}
+
+func TestPayExit_FailedStatus_Success(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+
+	sessionID := "failed-ocr-session"
+	repo.sessions[sessionID] = &model.Session{
+		ID:         sessionID,
+		Status:     "FAILED",
+		S3PhotoKey: "photos/blurry.jpg",
+		EnteredAt:  time.Now().Add(-1 * time.Hour),
+	}
+
+	initialSpots := spots.spots
+	paid, err := svc.PayExit(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("expected success paying FAILED session, got %v", err)
+	}
+	if paid.Status != "PAID" {
+		t.Fatalf("expected status PAID, got %s", paid.Status)
+	}
+	// For FAILED sessions, spots counter must NOT increment because it was never decremented
+	if spots.spots != initialSpots {
+		t.Fatalf("expected spots counter unchanged (%d), got %d", initialSpots, spots.spots)
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "EXIT_PAYMENT" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected EXIT_PAYMENT audit event")
+	}
+}
+
+func TestPayExit_ParkedStatus_Success(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+
+	sessionID := "parked-session"
+	plate := "ABC1D23"
+	repo.sessions[sessionID] = &model.Session{
+		ID:           sessionID,
+		LicensePlate: &plate,
+		Status:       "PARKED",
+		S3PhotoKey:   "photos/valid.jpg",
+		EnteredAt:    time.Now().Add(-1 * time.Hour),
+	}
+
+	initialSpots := spots.spots
+	paid, err := svc.PayExit(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("expected success paying PARKED session, got %v", err)
+	}
+	if paid.Status != "PAID" {
+		t.Fatalf("expected status PAID, got %s", paid.Status)
+	}
+	// For PARKED sessions, spots counter must increment
+	if spots.spots != initialSpots+1 {
+		t.Fatalf("expected spots counter incremented to %d, got %d", initialSpots+1, spots.spots)
+	}
+
+	foundAudit := false
+	for _, a := range audit.events {
+		if a == "EXIT_PAYMENT" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Fatal("expected EXIT_PAYMENT audit event")
 	}
 }
 
