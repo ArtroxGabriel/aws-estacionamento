@@ -83,7 +83,7 @@ func NewAWSConfig(cfg config.Config) (aws.Config, error) {
 
 	if cfg.AWSAccessKeyID != "" && cfg.AWSSecretAccessKey != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AWSAccessKeyID, cfg.AWSSecretAccessKey, ""),
+			credentials.NewStaticCredentialsProvider(cfg.AWSAccessKeyID, cfg.AWSSecretAccessKey, cfg.AWSSessionToken),
 		))
 	}
 
@@ -92,8 +92,9 @@ func NewAWSConfig(cfg config.Config) (aws.Config, error) {
 
 func NewS3Client(awsCfg aws.Config, cfg config.Config) *s3.Client {
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.UsePathStyle = true
+		// Path-style only for emulators (Floci); real S3 uses virtual-hosted style.
 		if cfg.AWSEndpointURL != "" {
+			o.UsePathStyle = true
 			o.BaseEndpoint = &cfg.AWSEndpointURL
 		}
 	})
@@ -129,16 +130,16 @@ func RegisterLifecycle(
 		Handler: handler.WithCORS(mux),
 	}
 
+	migrateCtx, stopMigrations := context.WithCancel(context.Background())
+
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			if err := db.PingContext(ctx); err != nil {
-				log.Printf("[WARN] Postgres ping failed (skipping migrations if offline): %v", err)
-			} else {
-				if err := repository.RunMigrations(db); err != nil {
-					log.Printf("[WARN] Migrations warning: %v", err)
-				} else {
-					log.Println("[INFO] Database migrations applied successfully")
-				}
+			if err := migrate(ctx, db); err != nil {
+				// Postgres may still be booting (e.g. a fresh RDS behind a new
+				// ASG instance): keep retrying in the background so the schema
+				// is created as soon as the database answers.
+				log.Printf("[WARN] Migrations not applied yet, retrying in background: %v", err)
+				go retryMigrations(migrateCtx, db)
 			}
 
 			ln, err := net.Listen("tcp", server.Addr)
@@ -156,10 +157,46 @@ func RegisterLifecycle(
 		},
 		OnStop: func(ctx context.Context) error {
 			log.Println("[INFO] Shutting down application gracefully...")
+			stopMigrations()
 			_ = server.Shutdown(ctx)
 			_ = db.Close()
 			_ = rdb.Close()
 			return nil
 		},
 	})
+}
+
+// --- Migrations ---
+
+const migrationRetryInterval = 5 * time.Second
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+	if err := repository.RunMigrations(db); err != nil {
+		return err
+	}
+	log.Println("[INFO] Database migrations applied successfully")
+	return nil
+}
+
+func retryMigrations(ctx context.Context, db *sql.DB) {
+	ticker := time.NewTicker(migrationRetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, migrationRetryInterval)
+			err := migrate(pingCtx, db)
+			cancel()
+			if err == nil {
+				return
+			}
+			log.Printf("[WARN] Migrations retry failed: %v", err)
+		}
+	}
 }

@@ -61,8 +61,12 @@ api/
 - **Status da Sessão**: `PROCESSING` (na entrada) -> `PARKED` (definido pelo worker após OCR) -> `PAID` (após cobrança na saída).
 - **Logs no DynamoDB**: Criar registros com chave única contendo timestamp, ação (`ENTRY`, `EXIT_PAYMENT`) e payload resumido.
 - **Redis & Anti-Overbooking**: Chave `spots:available` lida em alta frequência. Se o Redis falhar ou a chave sumir (reboot no meio do dia), **a API nunca assume o default 50**: consulta o banco relacional (`totalSpots - count(ativas)`), responde a contagem precisa e reidrata o Redis com `SET spots:available`.
+- **AWS real x Floci**: `AWS_ENDPOINT_URL` e as chaves `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` não têm default. Sem elas o SDK usa os endpoints reais e a cadeia padrão de credenciais (instance profile na EC2); localmente o `.env`/`task dev:api` apontam para o Floci. `AWS_SESSION_TOKEN` é aceito para credenciais temporárias. Path-style no S3 só com endpoint customizado.
+- **RDS exige SSL**: na AWS use `DATABASE_URL=...?sslmode=require` (o PostgreSQL 16 do RDS recusa `sslmode=disable`).
+- **Migrations no boot**: se o Postgres ainda não responder, a API sobe mesmo assim e tenta as migrations a cada 5 s em background (advisory lock do `golang-migrate` torna seguro com várias instâncias do ASG).
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-10-03: Config sem defaults do Floci para endpoint/credenciais (instance profile na AWS), `AWS_SESSION_TOKEN`, retry das migrations e build do Dockerfile no `$BUILDPLATFORM` (cross-compile para `linux/amd64`).
 - 2026-09-21: Reestruturação da API no padrão Go (`cmd/` e `internal/`), migrações via `golang-migrate`, TDD com 100% dos testes passando e endpoints padronizados em inglês.
 - 2026-09-15: Criação inicial do AGENTS.md da API.

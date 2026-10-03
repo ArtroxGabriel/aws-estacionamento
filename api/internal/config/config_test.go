@@ -11,6 +11,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	_ = os.Unsetenv("PORT")
 	_ = os.Unsetenv("AWS_ENDPOINT_URL")
 	_ = os.Unsetenv("AWS_REGION")
+	_ = os.Unsetenv("AWS_ACCESS_KEY_ID")
+	_ = os.Unsetenv("AWS_SECRET_ACCESS_KEY")
+	_ = os.Unsetenv("AWS_SESSION_TOKEN")
 	_ = os.Unsetenv("TOTAL_PARKING_SPOTS")
 	_ = os.Unsetenv("FIXED_PARKING_RATE")
 
@@ -22,11 +25,13 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.AWSRegion != "us-east-1" {
 		t.Fatalf("expected default region us-east-1, got %s", cfg.AWSRegion)
 	}
-	if cfg.AWSAccessKeyID != "mock_key" {
-		t.Fatalf("expected default mock_key, got %s", cfg.AWSAccessKeyID)
+	// Without endpoint/credentials the SDK must use real AWS endpoints and the
+	// default credential chain (EC2 instance profile).
+	if cfg.AWSEndpointURL != "" {
+		t.Fatalf("expected empty endpoint, got %s", cfg.AWSEndpointURL)
 	}
-	if cfg.AWSSecretAccessKey != "mock_secret" {
-		t.Fatalf("expected default mock_secret, got %s", cfg.AWSSecretAccessKey)
+	if cfg.AWSAccessKeyID != "" || cfg.AWSSecretAccessKey != "" || cfg.AWSSessionToken != "" {
+		t.Fatalf("expected no static credentials by default")
 	}
 	if cfg.TotalParkingSpots != 50 {
 		t.Fatalf("expected 50 spots, got %d", cfg.TotalParkingSpots)

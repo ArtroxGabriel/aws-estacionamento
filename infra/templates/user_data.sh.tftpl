@@ -1,0 +1,58 @@
+#!/bin/bash
+# Boot de cada instância do Auto Scaling Group: instala o Docker, baixa as
+# imagens do ECR e sobe web (nginx :80), api (:8080, só na rede interna) e
+# worker OCR. Credenciais AWS vêm do instance profile (IMDSv2, hop limit 2).
+set -euxo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+
+REGISTRY="${registry}"
+API_IMAGE="${api_image}"
+WORKER_IMAGE="${worker_image}"
+WEB_IMAGE="${web_image}"
+
+# As imagens podem ainda não ter sido publicadas (primeiro deploy): tenta até
+# conseguir. O health check do ALB só passa depois que o web subir.
+until aws ecr get-login-password --region "${region}" \
+    | docker login --username AWS --password-stdin "$REGISTRY" \
+  && docker pull "$API_IMAGE" \
+  && docker pull "$WORKER_IMAGE" \
+  && docker pull "$WEB_IMAGE"; do
+  echo "Imagens indisponíveis no ECR, tentando novamente em 15 s..."
+  sleep 15
+done
+
+install -d -m 700 /etc/estacionamento
+
+cat > /etc/estacionamento/api.env <<'EOF'
+AWS_REGION=${region}
+S3_BUCKET_NAME=${bucket}
+SQS_QUEUE_URL=${queue_url}
+DYNAMODB_TABLE_NAME=${table}
+DATABASE_URL=postgres://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}?sslmode=require
+REDIS_URL=${redis_host}:6379
+TOTAL_PARKING_SPOTS=${total_spots}
+EOF
+
+cat > /etc/estacionamento/worker.env <<'EOF'
+AWS_REGION=${region}
+S3_BUCKET_NAME=${bucket}
+SQS_QUEUE_URL=${queue_url}
+DYNAMODB_TABLE_NAME=${table}
+DATABASE_URL=postgresql://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}?sslmode=require
+REDIS_URL=redis://${redis_host}:6379
+EOF
+
+chmod 600 /etc/estacionamento/*.env
+
+docker network create estacionamento || true
+
+docker run -d --name api --network estacionamento --restart unless-stopped \
+  --env-file /etc/estacionamento/api.env "$API_IMAGE"
+
+docker run -d --name worker --network estacionamento --restart unless-stopped \
+  --stop-timeout 30 --env-file /etc/estacionamento/worker.env "$WORKER_IMAGE"
+
+docker run -d --name web --network estacionamento --restart unless-stopped \
+  -p 80:80 -e API_UPSTREAM=http://api:8080 "$WEB_IMAGE"

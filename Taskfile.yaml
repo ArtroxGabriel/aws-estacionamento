@@ -7,6 +7,14 @@ vars:
   WORKER_DIR: worker
   WEB_DIR: web
   DOCKER_COMPOSE_FILE: "{{.TERRAFORM_DIR}}/docker-compose.yaml"
+  AWS_REGION_REAL: us-east-1
+  ASG_NAME: estacionamento-asg
+  # O .env aponta AWS_ENDPOINT_URL para o Floci e usa chaves falsas; o AWS CLI e
+  # o provider do OpenTofu leem essas variáveis. As tasks da AWS real começam
+  # com este trecho para descartá-las e usar ~/.aws/credentials (ou o ambiente).
+  AWS_REAL: |
+    if [ "$AWS_ACCESS_KEY_ID" = "mock_key" ]; then unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; fi
+    case "$AWS_ENDPOINT_URL" in *localhost*|*127.0.0.1*|*floci*) unset AWS_ENDPOINT_URL;; esac
 
 dotenv: [".env"]
 
@@ -59,43 +67,130 @@ tasks:
     desc: Gera o plano de execução do OpenTofu apontando para o Floci
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
+      - tofu workspace select default
       - tofu plan -var="use_localstack=true"
 
   tf:plan:aws:
-    desc: Gera o plano de execução do OpenTofu para o AWS Academy
+    desc: Gera o plano de execução do OpenTofu para a AWS (workspace "aws")
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - tofu plan -var="use_localstack=false"
+      - |
+        {{.AWS_REAL}}
+        tofu workspace select -or-create aws
+        tofu plan -var="use_localstack=false"
 
   tf:apply:local:
     desc: Provisiona recursos locais apontando para o Floci via OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
+      - tofu workspace select default
       - tofu apply -var="use_localstack=true" -auto-approve
 
   tf:apply:aws:
-    desc: Provisiona recursos reais no AWS Academy via OpenTofu
+    desc: Provisiona recursos reais na AWS via OpenTofu (workspace "aws")
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - tofu apply -var="use_localstack=false"
+      - |
+        {{.AWS_REAL}}
+        tofu workspace select -or-create aws
+        tofu apply -var="use_localstack=false"
 
   tf:destroy:aws:
-    desc: Destrói recursos no AWS Academy para evitar cobrança de créditos
+    desc: Destrói recursos na AWS para evitar cobrança (workspace "aws")
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - tofu destroy -var="use_localstack=false" -auto-approve
+      - |
+        {{.AWS_REAL}}
+        tofu workspace select aws
+        tofu destroy -var="use_localstack=false" -auto-approve
 
   tf:refresh:
-    desc: Atualiza o estado do OpenTofu com os recursos reais no AWS Academy
+    desc: Atualiza o estado do OpenTofu com os recursos reais na AWS
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
-      - tofu refresh -var="use_localstack=false"
+      - |
+        {{.AWS_REAL}}
+        tofu workspace select aws
+        tofu refresh -var="use_localstack=false"
 
   tf:output:
-    desc: Exibe os outputs do OpenTofu
+    desc: Exibe os outputs do OpenTofu (workspace atual)
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
       - tofu output
+
+  tf:output:aws:
+    desc: Exibe os outputs do OpenTofu da AWS (URL do ALB, ASG, ECR...)
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - tofu workspace select aws
+      - tofu output
+
+  aws:images:
+    desc: Build (linux/amd64) e push das imagens api, worker e web para o ECR
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        # Não usa `tofu output`: o apply com -target do deploy:aws não grava outputs.
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="$ACCOUNT.dkr.ecr.{{.AWS_REGION_REAL}}.amazonaws.com"
+        aws ecr get-login-password --region {{.AWS_REGION_REAL}} | docker login --username AWS --password-stdin "$REGISTRY"
+        for app in api worker web; do
+          docker buildx build --platform linux/amd64 --provenance=false -t "$REGISTRY/estacionamento-${app}:latest" --push "./${app}"
+        done
+
+  aws:rollout:
+    desc: Recria as instâncias do ASG aos poucos para pegarem as imagens novas do ECR
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        aws autoscaling start-instance-refresh --region {{.AWS_REGION_REAL}} \
+          --auto-scaling-group-name {{.ASG_NAME}} --preferences MinHealthyPercentage=50
+
+  deploy:aws:
+    desc: Deploy completo na AWS (ECR → imagens → infraestrutura completa)
+    cmds:
+      - task: tf:init
+      - cmd: |
+          {{.AWS_REAL}}
+          cd {{.TERRAFORM_DIR}}
+          tofu workspace select -or-create aws
+          tofu apply -var="use_localstack=false" -target=aws_ecr_repository.app -auto-approve
+      - task: aws:images
+      - task: tf:apply:aws
+      - task: tf:output:aws
+
+  smoke:aws:
+    desc: "Testa o fluxo completo pelo ALB (ex.: task smoke:aws PHOTO=carro.jpg)"
+    requires:
+      vars: [PHOTO]
+    cmds:
+      - |
+        URL=$(cd {{.TERRAFORM_DIR}} && tofu workspace select aws >/dev/null && tofu output -raw alb_url)
+        bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
+
+  load:aws:
+    desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws DURATION=8m CONCURRENCY=300)"
+    vars:
+      DURATION: '{{.DURATION | default "5m"}}'
+      CONCURRENCY: '{{.CONCURRENCY | default "200"}}'
+    cmds:
+      - |
+        URL=$(cd {{.TERRAFORM_DIR}} && tofu workspace select aws >/dev/null && tofu output -raw alb_url)
+        echo "Carga em $URL/api/spots/available por {{.DURATION}} com {{.CONCURRENCY}} conexões"
+        hey -z {{.DURATION}} -c {{.CONCURRENCY}} "$URL/api/spots/available"
+
+  stress:aws:
+    desc: "Plano B do vídeo: ocupa 100% da CPU das instâncias atuais via SSM (ex.: task stress:aws DURATION=300)"
+    vars:
+      DURATION: '{{.DURATION | default "300"}}'
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        aws ssm send-command --region {{.AWS_REGION_REAL}} --document-name AWS-RunShellScript \
+          --targets "Key=tag:aws:autoscaling:groupName,Values={{.ASG_NAME}}" \
+          --parameters '{"commands":["for i in $(seq $(nproc)); do timeout {{.DURATION}} yes > /dev/null & done; wait"]}' \
+          --query 'Command.CommandId' --output text
 
   dev:api:
     desc: Executa a API Go em modo desenvolvimento

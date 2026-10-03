@@ -15,3 +15,5 @@ Sistema de Gestão de Vagas de Estacionamento cobrindo 6 serviçoes da AWS, incl
 
 - [Especificação Oficial](/docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
 - [Visão Geral & Farol de Revisão de PRs (GOAL.md)](/docs/GOAL.md)
+- [Deploy na AWS (ALB + Auto Scaling)](/docs/DEPLOY-AWS.md)
+- [Checklist de Deploy na AWS](/docs/CHECKLIST-AWS.md)

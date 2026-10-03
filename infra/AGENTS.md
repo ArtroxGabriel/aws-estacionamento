@@ -16,10 +16,12 @@
 ```text
 infra/
 ├── docker-compose.yaml     # Floci (4566, proxy RDS 5432-5440, proxy ElastiCache 6379-6399)
-├── provider.tf             # Provider AWS com chaveamento para Floci (S3, SQS, DynamoDB, RDS, ElastiCache)
+├── provider.tf             # Provider AWS com chaveamento para Floci + variáveis (região, tipo de instância, instance profile)
 ├── main.tf                 # Buckets S3, Fila SQS + DLQ, DynamoDB, RDS PostgreSQL e ElastiCache Redis
-├── outputs.tf              # ARNs e URLs dos recursos provisionados
-└── autoscaling.tf          # (Parte 2) Launch Template, ASG, ALB e CloudWatch Alarms
+├── network.tf              # (AWS) VPC default, subnets nas AZs que oferecem o tipo de instância e security groups
+├── autoscaling.tf          # (AWS) ECR, IAM, Launch Template, ALB, ASG (1–3) e alarmes de CPU
+├── templates/user_data.sh.tftpl  # Boot da EC2: Docker + pull do ECR + api/worker/web
+└── outputs.tf              # ARNs, URLs, URL do ALB, nome do ASG e registry ECR
 ```
 
 ## Common Commands
@@ -30,17 +32,30 @@ infra/
 - `task tf:apply:local`: Provisiona recursos no Floci local via OpenTofu
 - `task tf:apply:aws`: Provisiona recursos na AWS Academy via OpenTofu
 - `task tf:destroy:aws`: Destrói recursos na AWS Academy (preservar créditos)
+- `task deploy:aws`: Deploy completo (ECR → build/push das imagens `linux/amd64` → `tofu apply` completo → outputs)
+- `task aws:images` + `task aws:rollout`: Publica imagens novas e recria as instâncias do ASG
+- `task load:aws` / `task stress:aws`: Carga HTTP no ALB (`hey`) / CPU 100% nas instâncias via SSM, para o vídeo
 - `task tf:clean`: Limpa cache e arquivos de estado locais do OpenTofu/Terraform (.terraform, .lock, .tfstate)
 
 ## Architecture Conventions
 
 - A variável `use_localstack` (default `true`) controla se os endpoints apontam para `http://localhost:4566` ou para os serviços gerenciados da AWS.
+- **Estados separados**: Floci no workspace `default`, AWS no workspace `aws`. Uma precondition no bucket S3 recusa `use_localstack=false` fora do workspace `aws` (e vice-versa). As tasks `tf:*` já selecionam o workspace.
+- Recursos exclusivos da AWS (rede, ECR, IAM, EC2/ALB/ASG, senha do RDS) usam `count = local.aws_count` e não existem no Floci.
+- **IAM**: `instance_profile_name` vazio cria a role `estacionamento-app` (conta própria). Na AWS Academy, onde não se cria IAM, use `TF_VAR_instance_profile_name=LabInstanceProfile`.
+- **Segredos**: senha do RDS gerada por `random_password` na AWS (fica no state local e no user data do launch template); RDS sem acesso público e portas 5432/6379 abertas só para o SG das instâncias.
+- **Containers e IMDS**: launch template com IMDSv2 e hop limit 2, senão os containers não obtêm as credenciais do instance profile.
+- **Tasks da AWS e o `.env`**: as tasks AWS descartam `AWS_ENDPOINT_URL` do Floci e as chaves `mock_key` herdadas do `.env` antes de chamar `tofu`/`aws`.
 - Fila `ocr-processamento-fila`: `visibility_timeout_seconds = 300` e `redrive_policy` para `ocr-processamento-fila-dlq` com `maxReceiveCount = 3`. O `maxReceiveCount` deve ser igual a `MAX_RECEIVE_COUNT` em `worker/worker.py` (o worker audita a mensagem como `POISON_MESSAGE` na última entrega).
 - Configurações da Parte 2 (Auto Scaling):
   - CPU > 70% por > 1 min: dispara scale-out (+1 instância, máx 3).
   - CPU < 25% por > 1 min: dispara scale-in (-1 instância, mín 1).
+  - Implementado com `SimpleScaling` (cooldown 60 s) + alarmes `CPUUtilization` (Average, dimensão `AutoScalingGroupName`, período 60 s, 1 datapoint) e detailed monitoring no launch template. Não trocar por target tracking: os alarmes gerenciados usam 3/15 datapoints.
+  - Health check do Target Group em `/api/health` (nginx → `GET /health` da API).
 
 ## Changelog
+
+- 2026-10-03: Parte 2 na AWS (ECR, IAM, SGs, launch template, ALB, ASG 1–3, alarmes de CPU), workspaces separados local/AWS, bucket com sufixo do account id, senha do RDS gerada e RDS privado.
 
 - 2026-09-29: DLQ `ocr-processamento-fila-dlq` + redrive policy (`maxReceiveCount = 3`) e visibility timeout de 300 s na fila de OCR.
 - 2026-09-25: Migração da ferramenta de IaC de Terraform para OpenTofu (open-source MPL v2.0).

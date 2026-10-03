@@ -1,5 +1,5 @@
 ARG GO_VERSION=1.27.1
-FROM golang:${GO_VERSION}-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
 ARG APP_NAME=app
 ARG TARGET_PATH=./cmd/api
