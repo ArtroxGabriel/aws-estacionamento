@@ -98,6 +98,12 @@ resource "aws_iam_role_policy" "app" {
         Action   = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
         Resource = aws_dynamodb_table.logs.arn
       },
+      {
+        # OCR das placas (OCR_ENGINE=rekognition); DetectText não tem recurso.
+        Effect   = "Allow"
+        Action   = "rekognition:DetectText"
+        Resource = "*"
+      },
     ]
   })
 }

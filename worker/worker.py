@@ -22,12 +22,13 @@ from config import Config, ConfigError, load_config
 from ocr.clean import PlateResult
 from ocr.clean import normalize as normalize_plate
 from ocr.processor import OcrResult, extract_text
+from ocr.rekognition import HybridOcr
 from parser import (
     SessionMessage,
     parse_session_message,
 )
 from storage.audit import AuditError, AuditLogger
-from storage.clients import dynamodb_client, s3_client, sqs_client
+from storage.clients import dynamodb_client, rekognition_client, s3_client, sqs_client
 from storage.s3_store import RetrievalError, S3Connector
 from storage.session_repo import SessionRepository
 from storage.spots import (
@@ -793,6 +794,12 @@ def main(argv: list[str] | None = None) -> int:
         sessions = SessionRepository(cfg.database_url)
         spots = SpotsCounter(cfg.redis_url)
         audit = AuditLogger(dynamodb, cfg.dynamodb_table_name)
+        # Rekognition (AWS only) reads real photos far better than Tesseract
+        # and falls back to it; the emulator has no Rekognition.
+        ocr = extract_text
+        if cfg.ocr_engine == "rekognition":
+            ocr = HybridOcr(rekognition_client(cfg))
+        logger.info("OCR engine: %s", cfg.ocr_engine)
     except (SpotsError, AuditError) as exc:
         logger.error("connector initialization failed; aborting: %s", exc)
         return 2
@@ -810,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
         sessions=sessions,
         spots=spots,
         audit=audit,
-        ocr=extract_text,
+        ocr=ocr,
         normalizer=normalize_plate,
     )
 

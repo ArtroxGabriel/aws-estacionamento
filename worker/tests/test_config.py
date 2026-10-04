@@ -102,3 +102,17 @@ def test_all_clients_use_default_aws_endpoints_without_override(monkeypatch):
     for client in build_all(cfg):
         assert client.meta.endpoint_url.endswith(".amazonaws.com")
         assert client.meta.region_name == "us-east-1"
+
+
+def test_ocr_engine_defaults_to_tesseract():
+    assert load_config(BASE_ENV).ocr_engine == "tesseract"
+
+
+def test_ocr_engine_accepts_rekognition_case_insensitive():
+    assert load_config({**BASE_ENV, "OCR_ENGINE": " Rekognition "}).ocr_engine == "rekognition"
+
+
+def test_unknown_ocr_engine_is_rejected():
+    with pytest.raises(ConfigError) as excinfo:
+        load_config({**BASE_ENV, "OCR_ENGINE": "bedrock"})
+    assert "OCR_ENGINE" in excinfo.value.invalid

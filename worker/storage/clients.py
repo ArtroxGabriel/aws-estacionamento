@@ -84,3 +84,14 @@ def dynamodb_client(cfg: Config):
 
     session = build_boto3_session(cfg)
     return session.client("dynamodb", endpoint_url=cfg.aws_endpoint_url or None)
+
+
+def rekognition_client(cfg: Config):
+    """Build the Rekognition client (OCR_ENGINE=rekognition).
+
+    Always the real AWS endpoint: the local emulator does not implement
+    Rekognition, so ``AWS_ENDPOINT_URL`` is deliberately not applied.
+    """
+
+    session = build_boto3_session(cfg)
+    return session.client("rekognition")
