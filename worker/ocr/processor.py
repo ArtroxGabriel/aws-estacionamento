@@ -180,7 +180,10 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
     mercosul = bool(bands) or any(line.mercosul for line in lines)
     # (prepared image, Tesseract modes, is a located plate)
     jobs = [(_preprocess_plate(strip), _PLATE_CONFIGS, True) for strip in bands]
-    jobs += [(_preprocess_plate(line.image, left_trim=0), _LINE_CONFIGS, True) for line in lines]
+    for line in lines:
+        jobs.append((_preprocess_plate(line.image, left_trim=0), _LINE_CONFIGS, True))
+        if line.wide is not None:
+            jobs.append((_preprocess_plate(line.wide, left_trim=0), _LINE_CONFIGS, True))
     jobs.append((_preprocess(image), _TESSERACT_CONFIGS, False))
 
     # Run Tesseract under a timeout guard (Req 4.2, 4.6) shared by every call.
