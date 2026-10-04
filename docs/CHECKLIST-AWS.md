@@ -1,7 +1,7 @@
 # Checklist: feito e falta
 
 > Atualizado em 2026-10-03, na branch `feat/aws-deploy`. Prazo de entrega: **10/10/2026, 23h59** (link do código + link do vídeo da Parte 2).
-> Deploy: [DEPLOY-AWS.md](DEPLOY-AWS.md) · Visão geral: [README](../README.md) · Contratos: [GOAL.md](GOAL.md)
+> Deploy: [DEPLOY-AWS.md](DEPLOY-AWS.md) · Visão geral: [README](../README.md) · Contratos: [GOAL.md](GOAL.md) · Por que cada mudança: [DECISOES.md](DECISOES.md)
 
 ## Falta fazer
 
@@ -16,6 +16,9 @@
 - [ ] Abrir o PR de `feat/aws-deploy` para a `main` e fazer o merge.
 - [ ] Enviar o link do repositório e o link do vídeo.
 - [ ] `task tf:destroy:aws` depois de gravar (o bootstrap pode ficar: custo ~zero).
+
+### Decisão do time
+- [ ] **Formatos de placa:** manter só o Brasil ou aceitar os 4 países do Mercosul? Veja [DECISOES.md#D8](DECISOES.md#d8-formatos-de-placa-aceitos--️-em-aberto).
 
 ### Deploy pelo GitHub Actions (depende do dono do repositório)
 - [ ] Em *Settings → Environments*, criar o environment `aws` com a variável `AWS_ROLE_ARN = arn:aws:iam::707991310385:role/estacionamento-github-deploy`.

@@ -1,6 +1,6 @@
 # AWS Estacionamento
 
-Sistema de gestão de estacionamento com leitura automática de placas. Usa 6 serviços da AWS (EC2, RDS, S3, ElastiCache, DynamoDB e SQS), com Load Balancer e Auto Scaling.
+Sistema de gestão de estacionamento com leitura automática de placas. Usa os 6 serviços exigidos da AWS (EC2, RDS, S3, ElastiCache, DynamoDB e SQS), com Load Balancer e Auto Scaling. Usa também o Rekognition (leitura da placa) e o CloudFront (HTTPS); o motivo de cada um está em [docs/DECISOES.md](docs/DECISOES.md).
 
 Trabalho Prático 1 de Desenvolvimento de Software para Nuvem (UFC).
 
@@ -124,4 +124,5 @@ O que já foi feito e validado na AWS, e o que falta para a entrega (prazo: 10/1
 - [GOAL.md: visão geral, contratos e roteiro do vídeo](docs/GOAL.md)
 - [Deploy na AWS](docs/DEPLOY-AWS.md)
 - [Checklist: feito e falta](docs/CHECKLIST-AWS.md)
+- [Decisões de arquitetura: o que mudou e por quê](docs/DECISOES.md)
 - [Exemplos de fotos e vídeos](examples/README.md)
