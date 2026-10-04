@@ -163,8 +163,12 @@ def main() -> int:
         writer.writerow(["arquivo", "placa_esperada"])
         writer.writerows(rows)
     (args.destino / "ORIGEM.md").write_text(
-        f"Fotos de https://universe.roboflow.com/{args.workspace}/{args.projeto} "
-        f"(versão {args.versao}), licença {info.get('license', '?')}. Não versionar.\n"
+        f"# Origem\n\n- Dataset: {info.get('name', args.projeto)} (versão {args.versao}), "
+        f"https://universe.roboflow.com/{args.workspace}/{args.projeto}\n"
+        f"- Licença: {info.get('license', '?')}\n"
+        f"- Alterações: sorteio de {len(rows)} placas únicas em formato válido (semente 42), "
+        "arquivos renomeados e gabarito.csv montado a partir das caixas de cada caractere "
+        "(scripts/baixar_roboflow.py).\n"
     )
     print(
         f"{len(unique)} placas únicas em formato válido ({invalid} descartadas: formato inválido ou sem caixas); "

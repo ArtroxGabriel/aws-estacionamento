@@ -75,8 +75,8 @@ api/       API REST em Go
 worker/    Worker de OCR em Python (OpenCV + Tesseract)
 web/       Frontend React + Vite + Tailwind (nginx em produção)
 infra/     OpenTofu: Floci local (infra/), AWS (infra/aws), bootstrap OIDC (infra/bootstrap)
-examples/  Fotos e vídeo reais para testar a leitura de placas (com gabarito)
-scripts/   Smoke test, avaliação de OCR
+examples/  Fotos, vídeo e datasets com gabarito (1.000 reais do Roboflow + 400 sintéticas no repo)
+scripts/   Smoke test, avaliação de OCR, download/geração de datasets; analise-ocr/ com as simulações das decisões
 docs/      Especificação, GOAL, deploy e checklist
 ```
 
@@ -127,5 +127,7 @@ O que já foi feito e validado na AWS, e o que falta para a entrega (prazo: 10/1
 - [GOAL.md: visão geral, contratos e roteiro do vídeo](docs/GOAL.md)
 - [Deploy na AWS](docs/DEPLOY-AWS.md)
 - [Checklist: feito e falta](docs/CHECKLIST-AWS.md)
-- [Decisões de arquitetura: o que mudou e por quê](docs/DECISOES.md)
+- [Arquitetura: como funciona e o que mudou em relação à `main`](docs/ARQUITETURA.md)
+- [Decisões de arquitetura: o porquê de cada mudança](docs/DECISOES.md)
+- [Análise do OCR: scripts das medições](scripts/analise-ocr/README.md)
 - [Exemplos de fotos e vídeos](examples/README.md)

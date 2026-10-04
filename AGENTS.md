@@ -64,8 +64,11 @@
 ├── api/                    # API REST em Go
 ├── worker/                 # Worker assíncrono OCR em Python
 ├── web/                    # Frontend React + Vite
-├── infra/                  # OpenTofu e Docker Compose
-└── docs/                   # Especificações da disciplina
+├── infra/                  # OpenTofu (módulo + Floci); aws/ = root da AWS; bootstrap/ = OIDC + state
+├── .github/                # Workflow "Deploy AWS" (OIDC)
+├── examples/               # Fotos, vídeo e datasets com gabarito (examples/README.md)
+├── scripts/                # Smoke, avaliação de OCR, datasets; analise-ocr/ = simulações das decisões
+└── docs/                   # Especificação, GOAL, ARQUITETURA, DECISOES, DEPLOY-AWS, CHECKLIST-AWS
 ```
 
 - `api/`: API REST responsável pelas rotas `/entries`, `/spots/available` e `/exits/{id}/pay`.
@@ -120,6 +123,8 @@ Configurar variáveis locais no `.env`:
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
+
+- 2026-10-04: Datasets versionados (1.000 recortes do Roboflow + 400 sintéticas, com respostas guardadas), scripts de análise em `scripts/analise-ocr/`, `docs/ARQUITETURA.md` com o antes × depois.
 
 - 2026-10-03: Leitura de placas com Amazon Rekognition na AWS (Tesseract de reserva) e dataset de 114 fotos reais + 300 sintéticas (`task dataset:*`, `task ocr:dataset`): Tesseract 52% → Rekognition 96% nas reais.
 

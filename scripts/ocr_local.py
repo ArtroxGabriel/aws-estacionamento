@@ -170,6 +170,10 @@ def main() -> int:
     images: list[Path] = []
     videos: list[Path] = []
     for path in args.paths:
+        if not path.exists():
+            # Ex.: examples/dataset/openalpr-br só existe após `task dataset:baixar`.
+            print(f"{path}: não encontrado, pulando (veja examples/README.md)")
+            continue
         files = sorted(path.iterdir()) if path.is_dir() else [path]
         for file in files:
             if file.suffix.lower() in IMAGE_EXT:

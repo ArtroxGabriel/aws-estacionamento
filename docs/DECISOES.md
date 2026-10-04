@@ -2,7 +2,7 @@
 
 Registro do que mudou no projeto, por quê, e o que cada decisão implica. Cada item segue a mesma ordem: contexto → decisão → por quê → consequências → onde está no código.
 
-> Branch `feat/aws-deploy`, 2026-10-03. Visão geral em [README](../README.md); estado atual em [CHECKLIST-AWS.md](CHECKLIST-AWS.md).
+> Branch `feat/aws-deploy`, 2026-10-04. Visão geral e antes × depois em [ARQUITETURA.md](ARQUITETURA.md); estado atual em [CHECKLIST-AWS.md](CHECKLIST-AWS.md).
 
 ## Serviços AWS usados
 
@@ -232,14 +232,15 @@ O caixa aceita os mesmos formatos na placa digitada.
 
 ---
 
-## D9. Dataset de teste fora do git
+## D9. Datasets de teste e licenças
 
 **Contexto:** Para medir a leitura com fotos reais, usamos dois datasets públicos:
 - as 114 fotos brasileiras do benchmark do OpenALPR (AGPL-3.0);
 - recortes de placas do projeto `cafuringa/placas` do Roboflow Universe (CC BY 4.0).
 
 **Decisão:**
-- As fotos não são versionadas. `task dataset:baixar` e `task dataset:roboflow` as baixam para `examples/dataset/` (ignorado pelo git) e geram o gabarito. Cada pasta traz um `ORIGEM.md` com a fonte e a licença.
+- **OpenALPR (AGPL):** as fotos não são versionadas; `task dataset:baixar` baixa e gera o gabarito.
+- **Roboflow (CC BY 4.0, que permite redistribuir com crédito) e sintéticas (nossas):** versionadas em `examples/dataset/`, com gabarito, as respostas dos motores e um `ORIGEM.md` com fonte, licença e alterações. O export bruto do Roboflow (~700 MB) fica fora.
 - A chave do Roboflow vem da variável de ambiente `ROBOFLOW_API_KEY`, nunca de arquivo do repositório.
 
 **Por quê:**

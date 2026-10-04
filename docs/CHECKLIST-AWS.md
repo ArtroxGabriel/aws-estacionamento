@@ -1,7 +1,7 @@
 # Checklist: feito e falta
 
 > Atualizado em 2026-10-03, na branch `feat/aws-deploy`. Prazo de entrega: **10/10/2026, 23h59** (link do código + link do vídeo da Parte 2).
-> Deploy: [DEPLOY-AWS.md](DEPLOY-AWS.md) · Visão geral: [README](../README.md) · Contratos: [GOAL.md](GOAL.md) · Por que cada mudança: [DECISOES.md](DECISOES.md)
+> Deploy: [DEPLOY-AWS.md](DEPLOY-AWS.md) · Visão geral: [README](../README.md) · Arquitetura e antes × depois: [ARQUITETURA.md](ARQUITETURA.md) · Contratos: [GOAL.md](GOAL.md) · Por que cada mudança: [DECISOES.md](DECISOES.md)
 
 ## Falta fazer
 

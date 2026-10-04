@@ -32,13 +32,19 @@ Fotos e vídeos para testar e demonstrar a leitura de placas.
 - **O conjunto do Roboflow é o mais difícil:** são só recortes da placa esticados para 640×640, e muitos parecem gerados por aplicativo. Esse formato não é o de uma câmera de cancela. O Tesseract tira 3% porque procura a placa *dentro* de uma foto de carro.
 - **Medições locais rodam com `OMP_THREAD_LIMIT=1`.** Sem isso, o Tesseract abre uma thread por CPU, os processos paralelos disputam a máquina e algumas fotos estouram o limite de 10 s.
 
-## Dataset grande (`dataset/`, não versionado)
+## Datasets (`dataset/`)
 
-- `roboflow-cafuringa/`: 1.000 recortes reais de placas brasileiras, sorteados (semente fixa) entre 3.241 do projeto [cafuringa/placas](https://universe.roboflow.com/cafuringa/placas-whmhj) do Roboflow Universe (licença **CC BY 4.0**). O dataset anota cada caractere; o script remonta o texto da placa, inclusive a de moto em duas linhas. Baixe com `ROBOFLOW_API_KEY=... task dataset:roboflow N=1000`. A chave fica só no ambiente, nunca no repositório.
+| Pasta | No repositório? | Conteúdo | Licença |
+|---|---|---|---|
+| `roboflow-cafuringa/` | ✅ sim | 1.000 recortes reais de placas brasileiras (Mercosul e antigas, inclusive de moto), sorteados (semente 42) entre 3.241 do projeto [cafuringa/placas](https://universe.roboflow.com/cafuringa/placas-whmhj) do Roboflow Universe | CC BY 4.0, crédito em `ORIGEM.md` |
+| `sintetico/` | ✅ sim | 400 placas geradas por nós, dos 4 países do Mercosul, com o nome do país na faixa | nossa |
+| `openalpr-br/` | ❌ não, baixe com `task dataset:baixar` | 114 fotos de carros em estacionamentos de Salvador e região, de frente e de traseira, com placa cinza (antes de 2018) | [AGPL-3.0](https://github.com/openalpr/benchmarks/tree/master/endtoend/br): versioná-las poderia impor a AGPL ao projeto |
 
-- `openalpr-br/`: 114 fotos de carros em estacionamentos de Salvador e região, de frente e de traseira, com placa cinza (antes de 2018). É de [OpenALPR benchmarks](https://github.com/openalpr/benchmarks/tree/master/endtoend/br) (AGPL-3.0), por isso as fotos são baixadas por script e não ficam no repositório.
-- `sintetico/`: placas geradas com semente fixa (o mesmo comando gera o mesmo conjunto), dos 4 países do Mercosul, com o nome do país na faixa: Brasil Mercosul ~48%, Brasil antiga ~16%, Argentina Mercosul ~15%, Argentina antiga ~3%, Paraguai ~9% e Uruguai ~9%.
-- Para incluir fotos suas: crie uma pasta com as fotos e um `gabarito.csv` (`arquivo,placa_esperada`) e rode `task ocr:dataset DIRS=sua/pasta` ou `task eval:aws DIR=sua/pasta`.
+- **Gabarito e origem:** cada pasta tem um `gabarito.csv` (`arquivo,placa_esperada`) e um `ORIGEM.md`.
+- **Respostas guardadas:** as versionadas trazem as respostas dos motores (`rekognition.json`, `rekognition_framed.json`, `tesseract.json`), para refazer as simulações de [`scripts/analise-ocr`](../scripts/analise-ocr/README.md) sem chamar a AWS.
+- **Roboflow:** o dataset anota cada caractere, e `scripts/baixar_roboflow.py` remonta o texto da placa, inclusive a de moto em duas linhas. Para baixar de novo ou outro projeto: `ROBOFLOW_API_KEY=... task dataset:roboflow N=1000`. A chave fica só no ambiente, nunca no repositório.
+- **Sintéticas:** `task dataset:sintetico N=400` gera exatamente estas fotos.
+- **Fotos suas:** crie uma pasta com as fotos e um `gabarito.csv` e rode `task ocr:dataset DIRS=sua/pasta` (local) ou `task eval:aws DIR=sua/pasta` (sistema no ar).
 
 ## Fotos (`fotos/`, gabarito em `fotos/gabarito.csv`)
 
