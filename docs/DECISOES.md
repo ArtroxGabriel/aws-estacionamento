@@ -226,6 +226,7 @@ O caixa aceita os mesmos formatos na placa digitada.
 - A moldura recupera placas em closes. Nas fotos de câmera ela quase nunca é acionada (2 de 114, ganhando 1 placa).
 - Ela também traz leituras erradas: no Roboflow, ~1 errada para cada 4 recuperadas. **77% dessas erram 1 caractere** (`V`/`Y`, `W`/`N`), e o operador corrige com "Corrigir placa" no caixa. O pagamento é pelo ticket, então uma placa errada não cobra o carro de outra pessoa.
 - Uma 2ª chamada custa mais US$ 0,001, só nas fotos em que a primeira falhou.
+- Se o Rekognition respondeu e nenhuma placa segura foi encontrada, o resultado é **placa ilegível**: sessão `FAILED` na hora (D4), não "erro de OCR", que o worker tentaria de novo por ~15 min. Um bug nisso foi pego pelo `task smoke:aws` na AWS e corrigido, com teste.
 
 **Onde:** `worker/ocr/rekognition.py` (`framed`, `_detect`, `_exact_fallback`).
 
