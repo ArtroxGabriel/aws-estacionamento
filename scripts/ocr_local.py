@@ -1,5 +1,8 @@
 """Roda o OCR do worker (mesmo código da AWS) em fotos e vídeos locais.
 
+Rode com OMP_THREAD_LIMIT=1 (a task já faz isso): o Tesseract abre uma thread
+por CPU e, com vários processos em paralelo, estoura o limite de 10 s por foto.
+
 Executado dentro da imagem do worker (veja `task ocr:local`). Fotos: lê a
 placa de cada uma e, se a pasta tiver um gabarito.csv, compara. Vídeos: amostra
 quadros (padrão 1 por segundo), lê cada um e mostra a placa mais votada.

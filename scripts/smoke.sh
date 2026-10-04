@@ -8,7 +8,7 @@ set -euo pipefail
 
 BASE="${1:?uso: scripts/smoke.sh <base_url> <foto.jpg>}"
 PHOTO="${2:?uso: scripts/smoke.sh <base_url> <foto.jpg>}"
-NO_PLATE_PHOTO="${3:-examples/fotos/carro-argentino-rua.jpg}"
+NO_PLATE_PHOTO="${3:-examples/fotos/carro-placa-coberta.jpg}"
 API="${BASE%/}/api"
 OCR_TIMEOUT="${OCR_TIMEOUT:-90}"
 

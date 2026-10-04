@@ -26,7 +26,7 @@ A especificação exige 6 serviços. Os demais entraram para resolver problemas 
 
 ## D1. Amazon Rekognition para ler a placa
 
-**Contexto:** O worker lia a placa com Tesseract (OCR de código aberto) + OpenCV. Em 5 fotos de exemplo funcionava. Para testar de verdade, montamos um dataset de 114 fotos **reais** de carros em estacionamentos de Salvador ([examples/README.md](../examples/README.md)). Nele, o Tesseract leu só **42%** das placas. Na metade das vezes não encontrava a placa na foto, e em 10% leu a placa errada.
+**Contexto:** O worker lia a placa com Tesseract (OCR de código aberto) + OpenCV. Em 5 fotos de exemplo funcionava. Para testar de verdade, montamos um dataset de 114 fotos **reais** de carros em estacionamentos de Salvador ([examples/README.md](../examples/README.md)). Nele, o Tesseract leu só **52%** das placas. Na metade das vezes não encontrava a placa na foto, e em 10% leu a placa errada.
 
 **Decisão:** Na AWS, o worker usa o **Amazon Rekognition** (`DetectText`) como motor principal, com o Tesseract como reserva.
 - Entre os textos que o Rekognition encontra, vence a **placa mais alta na foto**, que é a do carro em primeiro plano, não a dos carros ao fundo.
@@ -35,7 +35,7 @@ A especificação exige 6 serviços. Os demais entraram para resolver problemas 
 - Liga com `OCR_ENGINE=rekognition`.
 
 **Por quê:**
-- **Precisão medida, não estimada.** Nas 114 fotos reais: Tesseract 42% → Rekognition **96%** (110/114). Nas 300 sintéticas: 88% → **94%**.
+- **Precisão medida, não estimada.** Nas 114 fotos reais: Tesseract 52% → Rekognition **96%** (110/114). Nas 400 sintéticas dos 4 países: 73% → **98%**.
   - Para não "decorar" o conjunto, a regra da placa mais alta foi ajustada olhando só metade das fotos reais. Na outra metade, que nunca foi usada para ajustar, também deu 96%.
   - Conferido pelo sistema no ar (foto → API → SQS → worker): 110/114.
 - **Custo:** US$ 0,001 por foto, com 5 mil fotos por mês grátis no primeiro ano. Um estacionamento com 1.000 entradas por dia sairia por ~US$ 30/mês.
@@ -168,26 +168,35 @@ A especificação exige 6 serviços. Os demais entraram para resolver problemas 
 
 ---
 
-## D8. Formatos de placa aceitos — ⚠️ em aberto
+## D8. Placas dos 4 países do Mercosul
 
-**Contexto:** A especificação do professor **não fala em placas**. A regra atual foi decidida pelo time, no `Requirement 5` de `.kiro/specs/python-ocr-worker/requirements.md` (29/09) e no contrato do worker em `docs/GOAL.md`. Ela aceita só os formatos **brasileiros**:
+**Contexto:** A especificação do professor **não fala em placas**. A regra inicial do time aceitava só os formatos **brasileiros**. Ela está no `Requirement 5` de `.kiro/specs/python-ocr-worker/requirements.md` (29/09) e no contrato do worker em `docs/GOAL.md`. Um carro argentino ou paraguaio virava "falha no OCR" e não podia nem ter a placa digitada no caixa. Como o padrão Mercosul é regional e estacionamentos do Sul e de fronteira recebem carros desses países, o time decidiu em 03/10 aceitar os 4 países.
 
-| País | Formato | Exemplo | Aceito hoje? |
+**Decisão:**
+
+| País | Formato | Exemplo | Quando a leitura automática aceita |
 |---|---|---|---|
-| Brasil (Mercosul) | LLL N L NN | `ABC1D23` | ✅ |
-| Brasil (antiga) | LLL NNNN | `ABC1234` | ✅ |
-| Argentina (Mercosul) | LL NNN LL | `AB123CD` | ❌ |
-| Argentina (antiga) | LLL NNN | `ABC123` | ❌ |
-| Uruguai (Mercosul) | LLL NNNN | `ABC1234` | ✅ por coincidência: mesmo formato da placa antiga brasileira |
-| Paraguai (Mercosul) | LLLL NNN | `ABCD123` | ❌ |
+| Brasil (Mercosul) | LLL N L NN | `ABC1D23` | Sempre |
+| Brasil (antiga) / Uruguai (Mercosul) | LLL NNNN | `ABC1234` | Sempre. Com faixa azul brasileira detectada, só se aparecer `URUGUAY` |
+| Argentina (Mercosul) | LL NNN LL | `AB123CD` | Sempre: nenhuma placa brasileira começa com 2 letras e 3 dígitos |
+| Argentina (antiga, preta) | LLL NNN | `ABC123` | Só com `ARGENTINA` lido na placa, e só como linha inteira |
+| Paraguai (Mercosul) | LLLL NNN | `ABCD123` | Só com `PARAGUAY` lido na placa |
 
-Por isso as fotos de carros argentinos em `examples/fotos` estão no gabarito como "nenhuma placa": testam que o sistema **não inventa** uma placa brasileira. Isso não é uma exigência do trabalho.
+O caixa aceita os mesmos formatos na placa digitada.
 
-**Opções:**
-1. **Manter só o Brasil (atual).** Carro estrangeiro cai em "falha no OCR" e o operador digita a placa no caixa. O próprio caixa também só aceita formato brasileiro.
-2. **Aceitar os 4 países do Mercosul.** Mais realista para estacionamentos no Sul e em cidades de fronteira. Exige mudar o normalizador do worker, a validação da API e a do caixa. Aumenta o risco de ler um texto qualquer como placa: o formato argentino antigo tem só 6 caracteres, e um adesivo como "ABC123" passaria.
+**Por quê das condições:** os carros brasileiros são a maioria, e as condições evitam que leituras brasileiras com erro virem placas estrangeiras.
+- O OCR às vezes perde o último caractere: `PJC4903` vira `PJC490`, que tem o formato argentino antigo.
+- O `1` às vezes é lido como `I`: `ABC1234` vira `ABCI234`, que tem o formato paraguaio.
+- As placas desses países trazem o nome do país impresso, então exigir o nome é seguro.
+- As correções de caracteres confundidos (`1`→`I`, `0`→`O`) continuam só para o Brasil, porque foram calibradas na fonte da placa brasileira. Placas estrangeiras só são aceitas com leitura exata.
 
-**Decisão:** pendente com o time.
+**Consequências:**
+- Mudaram o normalizador do worker, a validação da API e a do caixa.
+- O caminho do Rekognition repassa as linhas com o nome do país como contexto para cada candidata a placa.
+- O dataset sintético agora tem os 4 países. Resultados em [examples/README.md](../examples/README.md).
+- Para o teste de "placa ilegível", as fotos de carros argentinos deram lugar a `examples/fotos/carro-placa-coberta.jpg` (placa borrada).
+
+**Onde:** `worker/ocr/clean.py`, `worker/ocr/rekognition.py`, `api/internal/service/parking.go`, `web/src/utils/format.ts`, `scripts/gerar_sinteticas.py`.
 
 ---
 

@@ -17,9 +17,6 @@
 - [ ] Enviar o link do repositório e o link do vídeo.
 - [ ] `task tf:destroy:aws` depois de gravar (o bootstrap pode ficar: custo ~zero).
 
-### Decisão do time
-- [ ] **Formatos de placa:** manter só o Brasil ou aceitar os 4 países do Mercosul? Veja [DECISOES.md#D8](DECISOES.md#d8-formatos-de-placa-aceitos--️-em-aberto).
-
 ### Deploy pelo GitHub Actions (depende do dono do repositório)
 - [ ] Em *Settings → Environments*, criar o environment `aws` com a variável `AWS_ROLE_ARN = arn:aws:iam::707991310385:role/estacionamento-github-deploy`.
 - [ ] Rodar *Actions → Deploy AWS → apply* uma vez para validar o workflow no GitHub. Os mesmos passos já foram validados localmente.
@@ -38,6 +35,7 @@
   - **exclusão** (`DELETE /sessions/{id}`, com remoção da foto), que completa o CRUD.
 - [x] **Worker (Python):**
   - leitura de placa com **Amazon Rekognition** na AWS (Tesseract de reserva e no Floci);
+  - **placas dos 4 países do Mercosul** (Brasil, Argentina, Paraguai, Uruguai), também no caixa ([DECISOES.md D8](DECISOES.md#d8-placas-dos-4-países-do-mercosul));
   - SQS com long polling, OCR (OpenCV + Tesseract), efeitos transacionais e DLQ;
   - **placa ilegível vira `FAILED` na hora** (antes eram 3 tentativas, ~15 min).
 - [x] **Frontend (React):**
@@ -89,7 +87,7 @@
 - [x] **Dataset grande:**
   - 114 fotos reais de estacionamento com gabarito (`task dataset:baixar`, OpenALPR, não versionado);
   - 300 sintéticas Mercosul/antigas (`task dataset:sintetico`).
-- [x] **Amazon Rekognition como motor na AWS**, com Tesseract de reserva. Fotos reais: **42% → 96%** (110/114, conferido também pelo sistema no ar); sintéticas: 88% → 94%.
+- [x] **Amazon Rekognition como motor na AWS**, com Tesseract de reserva. Fotos reais: Tesseract 52% → Rekognition **96%** (110/114, conferido também pelo sistema no ar); 400 sintéticas dos 4 países: 73% → **98%**.
 - [x] Ajustes feitos com metade das fotos reais e conferidos na outra metade (96%), para não "decorar" o conjunto.
 
 ### Imagens e vídeo reais

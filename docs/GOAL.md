@@ -73,7 +73,7 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente, desde a 
   4. **Healthcheck (`GET /health`):**
      * Retorna `200 OK` (`{"status":"UP"}`) para o Target Group do Load Balancer monitorar a saúde da instância.
   5. **Placa digitada no caixa (`PATCH /sessions/{id}`):**
-     * Quando o OCR não lê a placa (sessão `FAILED`) ou lê errado (`PARKED`), o operador digita a placa (`ABC1D23` ou `ABC1234`).
+     * Quando o OCR não lê a placa (sessão `FAILED`) ou lê errado (`PARKED`), o operador digita a placa (qualquer formato dos 4 países do Mercosul; ver `docs/DECISOES.md`, D8).
      * `FAILED` → `PARKED` com `DECR spots:available`, porque a sessão `FAILED` nunca ocupou vaga no contador. Em `PARKED`, só troca a placa.
      * Grava auditoria `PLATE_CORRECTION` com a placa nova e a anterior.
   6. **Exclusão (`DELETE /sessions/{id}`):**
@@ -89,7 +89,7 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente, desde a 
 * **Responsabilidades:**
   1. **Consumo Desacoplado:** Faz polling contínuo (Long Polling 20s) na fila **Amazon SQS** (`ocr-processamento-fila`).
   2. **Tratamento de Imagem:** Baixa a foto original do **Amazon S3**, aplica pré-processamento (rescaling, escala de cinza, limiarização via Pillow/OpenCV) para evidenciar a área da placa.
-  3. **Extração de Placa (OCR):** Na AWS, usa o **Amazon Rekognition** (`DetectText`), escolhendo a placa mais alta na foto (o carro em primeiro plano). Localmente, ou se o Rekognition falhar ou não achar placa, roda o Tesseract na imagem tratada. Em ambos os casos normaliza para o padrão Mercosul (`ABC1D23`) ou antigo (`ABC-1234`). Medido em 114 fotos reais: Tesseract 42%, Rekognition 96%.
+  3. **Extração de Placa (OCR):** Na AWS, usa o **Amazon Rekognition** (`DetectText`), escolhendo a placa mais alta na foto (o carro em primeiro plano). Localmente, ou se o Rekognition falhar ou não achar placa, roda o Tesseract na imagem tratada. Em ambos os casos normaliza para uma placa dos 4 países do Mercosul: Brasil `ABC1D23`/`ABC-1234` (também Uruguai), Argentina `AB123CD`/`ABC123` e Paraguai `ABCD123`. As regras de cada formato estão em `docs/DECISOES.md` (D8). Medido em 114 fotos reais: Tesseract 52%, Rekognition 96%.
   4. **Confirmação da Vaga:**
      * Atualiza a sessão no **RDS** (`UPDATE sessions SET license_plate = :plate, status = 'PARKED' WHERE id = :id`).
      * Decrementa atomicamente as vagas no **Redis** (`DECR spots:available`).
@@ -134,7 +134,7 @@ Qualquer PR que inventar nomes diferentes deve ser ajustada para seguir estes pa
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `VARCHAR(64)` (PK) | Hash hexadecimal de 32 caracteres da sessão |
-| `license_plate`| `VARCHAR(16)` (NULL) | Placa identificada pelo OCR (nula na entrada) |
+| `license_plate`| `VARCHAR(16)` (NULL) | Placa identificada pelo OCR ou digitada no caixa (nula na entrada); 6 ou 7 caracteres, formatos do Mercosul |
 | `status` | `VARCHAR(20)` | `'PROCESSING'` -> `'PARKED'` -> `'PAID'`, ou `'PROCESSING'` -> `'FAILED'` (placa ilegível / falha ao publicar na fila) -> `'PARKED'` (placa digitada) ou `'PAID'` |
 | `s3_photo_key` | `TEXT` | Caminho no S3: `photos/{session_id}_{filename}` |
 | `entered_at` | `TIMESTAMP WITH TZ` | Horário de passagem pela cancela |

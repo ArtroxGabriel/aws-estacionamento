@@ -18,7 +18,7 @@ Trabalho Prático 1 de Desenvolvimento de Software para Nuvem (UFC).
 É a automação de um estacionamento, do jeito dos estacionamentos de shopping que leem a placa:
 
 1. **Entrada:** a câmera da cancela tira uma foto do carro. No sistema, a tela **Entrada** faz esse papel: envia a foto. A cancela abre na hora e o motorista recebe um ticket.
-2. **Leitura da placa:** em segundo plano, um worker lê a placa na foto com OCR e marca o carro como estacionado. Se a placa for ilegível, a sessão fica com falha e o operador digita a placa no caixa.
+2. **Leitura da placa:** em segundo plano, um worker lê a placa na foto com OCR e marca o carro como estacionado. Aceita placas dos 4 países do Mercosul: Brasil, Argentina, Paraguai e Uruguai. Se a placa for ilegível, a sessão fica com falha e o operador digita a placa no caixa.
 3. **Painel:** mostra quantas vagas livres restam, atualizando sozinho.
 4. **Caixa / Saída:** o operador acha o carro pela placa ou pelo ticket e cobra (tarifa fixa). Também pode informar ou corrigir a placa e excluir um registro.
 5. **Auditoria:** histórico de tudo (entrada, leitura, pagamento, correções, exclusões, falhas).
@@ -112,7 +112,7 @@ Passo a passo completo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md).
 | `task ocr:local` | Roda o OCR localmente em fotos e vídeos de `examples/` |
 | `task load:aws` / `task stress:aws` | Carga para o vídeo de elasticidade |
 
-**Precisão da leitura de placas:** 96% em 114 fotos reais de estacionamento (110/114) e 94% em 300 sintéticas. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
+**Precisão da leitura de placas:** 96% em 114 fotos reais de estacionamento (110/114) e 98% em 400 sintéticas dos 4 países do Mercosul. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
 
 ## Situação atual e o que falta
 

@@ -121,7 +121,7 @@ Configurar variáveis locais no `.env`:
 
 ## Changelog
 
-- 2026-10-03: Leitura de placas com Amazon Rekognition na AWS (Tesseract de reserva) e dataset de 114 fotos reais + 300 sintéticas (`task dataset:*`, `task ocr:dataset`): 42% → 96% nas reais.
+- 2026-10-03: Leitura de placas com Amazon Rekognition na AWS (Tesseract de reserva) e dataset de 114 fotos reais + 300 sintéticas (`task dataset:*`, `task ocr:dataset`): Tesseract 52% → Rekognition 96% nas reais.
 
 - 2026-10-03: Placa ilegível vira `FAILED` na hora; caixa com placa digitada/corrigida (`PATCH /sessions/{id}`) e exclusão (`DELETE /sessions/{id}`); OCR mais robusto em fotos reais (`examples/`, 5/5); HTTPS via CloudFront; README reescrito.
 
