@@ -10,7 +10,8 @@
   - Elasticidade: 1 instância → `task load:aws` (+ `task stress:aws` para chegar a 3) → alarme → 2–3 instâncias → fim da carga → volta para 1.
   - Fluxo funcional (prova os 6 serviços):
     - entrada com `examples/fotos/placa-real-mercosul-lsn4i49.jpg` → placa lida → painel → pagamento → auditoria;
-    - entrada com `examples/fotos/carro-argentino-rua.jpg` → "falha no OCR" → placa digitada no caixa;
+    - entrada com `examples/fotos/carro-placa-coberta.jpg` → "falha no OCR" → placa digitada no caixa;
+    - entrada com `examples/fotos/carro-argentino-rua.jpg` → placa argentina `MWV724` lida (4 países do Mercosul);
     - no console: S3, DynamoDB, SQS, RDS e EC2.
 - [ ] Preencher as matrículas no `README.md` (`Item2.2`, `Item2.3`, `Item2.4`).
 - [ ] Abrir o PR de `feat/aws-deploy` para a `main` e fazer o merge.
