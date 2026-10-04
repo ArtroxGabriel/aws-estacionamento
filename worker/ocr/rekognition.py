@@ -135,16 +135,18 @@ class HybridOcr:
         """
 
         result = self._fallback(image_bytes)
-        if not result.ok or not result.raw_text:
-            return result
-        plate = self._normalizer(result.raw_text, mercosul=result.mercosul)
-        if plate.ok:
-            swaps = _swaps(plate.plate, result.raw_text)
-            if swaps == 0 or (swaps == 1 and result.mercosul):
-                return OcrResult(
-                    ok=True, raw_text=plate.plate, error=None, mercosul=result.mercosul
-                )
-        return OcrResult(ok=False, raw_text=None, error="no_text")
+        if result.ok and result.raw_text:
+            plate = self._normalizer(result.raw_text, mercosul=result.mercosul)
+            if plate.ok:
+                swaps = _swaps(plate.plate, result.raw_text)
+                if swaps == 0 or (swaps == 1 and result.mercosul):
+                    return OcrResult(
+                        ok=True, raw_text=plate.plate, error=None, mercosul=result.mercosul
+                    )
+        # Rekognition answered and no safe plate was found: an unreadable plate
+        # (FAILED at once, the cashier types it), not an OCR error, which the
+        # worker would retry for ~15 min with the same result.
+        return OcrResult(ok=True, raw_text="", error=None)
 
 
 def _swaps(plate: str, raw: str) -> int:

@@ -90,7 +90,7 @@ def test_words_are_ignored_only_lines_count():
 
     result = HybridOcr(client, fallback=fallback)(jpeg(800, 600))
 
-    assert not result.ok
+    assert not normalize(result.raw_text or "").ok
 
 
 def test_prepare_rescales_large_photos_to_a_jpeg():
@@ -146,10 +146,10 @@ def test_tesseract_fallback_keeps_only_safe_reads():
         return HybridOcr(client, fallback=fallback)(jpeg(800, 600))
 
     assert run("noise\nABC-1234").raw_text == "ABC1234"  # exact
-    assert not run("ABC12S4").ok  # one correction, no Mercosul band
+    assert run("ABC12S4").raw_text == ""  # one correction, no Mercosul band
     # One correction on a located Mercosul plate: the I read as 1 (LSN4I49).
     assert run("LSN4149", mercosul=True).raw_text == "LSN4I49"
-    assert not run("PII7AII", mercosul=True).ok  # noise needing several corrections
+    assert run("PII7AII", mercosul=True).raw_text == ""  # noise needing several corrections
 
 
 class SequenceRekognition:
@@ -183,3 +183,22 @@ def test_a_plate_found_at_first_is_not_retried():
     HybridOcr(client, fallback=FakeTesseract(None))(jpeg(800, 600))
 
     assert len(client.calls) == 1
+
+
+def test_no_plate_after_rekognition_answered_is_unreadable_not_an_ocr_error():
+    """An OCR error is retried (3 deliveries, ~15 min); an unreadable plate
+    goes to FAILED at once. Rekognition answering without a plate is final."""
+    client = FakeRekognition([line("BRASIL", 0.05)])
+
+    for tesseract in (FakeTesseract(None), FakeTesseract("ABC12S4")):
+        result = HybridOcr(client, fallback=tesseract)(jpeg(800, 600))
+        assert result.ok
+        assert not normalize(result.raw_text).ok
+
+
+def test_rekognition_outage_still_uses_the_full_tesseract_result():
+    client = FakeRekognition(error=RuntimeError("ThrottlingException"))
+
+    result = HybridOcr(client, fallback=FakeTesseract(None))(jpeg(800, 600))
+
+    assert not result.ok and result.error == "no_text"
