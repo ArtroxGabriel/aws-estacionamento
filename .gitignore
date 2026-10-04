@@ -22,3 +22,6 @@ __pycache__/
 node_modules/
 dist/
 
+
+# Datasets baixados/gerados (task dataset:*), não versionados
+examples/dataset/

@@ -205,6 +205,38 @@ tasks:
           -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
           estacionamento-worker:local ocr_local.py {{.CLI_ARGS | default "examples/fotos examples/videos"}}
 
+  dataset:baixar:
+    desc: Baixa 115 fotos reais de carros brasileiros com gabarito (OpenALPR, AGPL-3.0) para examples/dataset/openalpr-br
+    cmds:
+      - python3 scripts/baixar_dataset.py examples/dataset/openalpr-br
+
+  dataset:sintetico:
+    desc: "Gera placas sintéticas Mercosul/antigas com variações em examples/dataset/sintetico (ex.: task dataset:sintetico N=300)"
+    vars:
+      N: '{{.N | default "200"}}'
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        docker run --rm --entrypoint python \
+          -v "$PWD/examples:/app/examples" -v "$PWD/scripts/gerar_sinteticas.py:/app/gerar_sinteticas.py:ro" \
+          estacionamento-worker:local gerar_sinteticas.py examples/dataset/sintetico {{.N}}
+
+  ocr:dataset:
+    desc: "Mede o OCR em todo o dataset, listando só os erros (ENGINE=rekognition usa a AWS como em produção)"
+    vars:
+      ENGINE: '{{.ENGINE | default "tesseract"}}'
+      DIRS: '{{.DIRS | default "examples/fotos examples/dataset/openalpr-br examples/dataset/sintetico"}}'
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        {{.AWS_REAL}}
+        ENV_FILE=$(mktemp)
+        if [ "{{.ENGINE}}" = "rekognition" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
+        docker run --rm --entrypoint python --env-file "$ENV_FILE" \
+          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
+          estacionamento-worker:local ocr_local.py --erros --engine {{.ENGINE}} {{.DIRS}}
+        rm -f "$ENV_FILE"
+
   load:aws:
     desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"
     vars:

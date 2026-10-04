@@ -4,20 +4,31 @@ Executado dentro da imagem do worker (veja `task ocr:local`). Fotos: lê a
 placa de cada uma e, se a pasta tiver um gabarito.csv, compara. Vídeos: amostra
 quadros (padrão 1 por segundo), lê cada um e mostra a placa mais votada.
 
-Uso: python ocr_local.py <arquivo_ou_pasta>... [--fps 1]
+Com gabarito, cada foto é classificada como OK, ERRADA (leu outra placa, o
+pior caso: cobraria o carro errado) ou NAO_LEU (o caixa digita a placa).
+
+Uso: python ocr_local.py <arquivo_ou_pasta>... [--fps 1] [--erros] [--jobs N]
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
+import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
 from ocr.clean import normalize
 from ocr.processor import extract_text
+
+# Motor de OCR, escolhido por --engine antes de criar os processos: "tesseract"
+# (padrão, igual ao Floci) ou "rekognition" (igual à AWS, com Tesseract de
+# reserva; precisa de credenciais AWS no ambiente).
+OCR = extract_text
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png"}
 # Uma leitura isolada num vídeo costuma ser engano (reflexo, placa ao fundo):
@@ -27,7 +38,7 @@ VIDEO_EXT = {".mp4", ".webm", ".mov", ".avi", ".mkv"}
 
 
 def read_plate(image_bytes: bytes) -> str | None:
-    result = extract_text(image_bytes)
+    result = OCR(image_bytes)
     if not result.ok:
         return None
     plate = normalize(result.raw_text or "", mercosul=result.mercosul)
@@ -42,24 +53,59 @@ def load_answers(folder: Path) -> dict[str, str]:
         return {row["arquivo"]: row["placa_esperada"] for row in csv.DictReader(f)}
 
 
-def run_images(paths: list[Path]) -> None:
-    answers: dict[str, str] = {}
-    for folder in {p.parent for p in paths}:
-        answers.update(load_answers(folder))
+def use_engine(engine: str) -> None:
+    """Escolhe o motor em cada processo (o forkserver não herda o global)."""
+    global OCR
+    if engine == "rekognition":
+        import boto3
+        from ocr.rekognition import HybridOcr
 
-    hits = total = 0
-    for path in paths:
-        plate = read_plate(path.read_bytes())
-        line = f"{path.name:42s} lida={plate or '-':9s}"
-        if path.name in answers:
+        OCR = HybridOcr(boto3.client("rekognition", region_name="us-east-1"))
+
+
+def read_file(path: Path) -> str | None:
+    return read_plate(path.read_bytes())
+
+
+def run_images(paths: list[Path], only_errors: bool, jobs: int, engine: str) -> None:
+    started = time.monotonic()
+    with ProcessPoolExecutor(
+        max_workers=jobs, initializer=use_engine, initargs=(engine,)
+    ) as pool:
+        plates = list(pool.map(read_file, paths, chunksize=4))
+
+    by_folder: dict[Path, list[tuple[Path, str | None]]] = {}
+    for path, plate in zip(paths, plates, strict=True):
+        by_folder.setdefault(path.parent, []).append((path, plate))
+
+    for folder, results in by_folder.items():
+        answers = load_answers(folder)
+        counts: Counter[str] = Counter()
+        print(f"== {folder}")
+        for path, plate in results:
+            if path.name not in answers:
+                print(f"{path.name:42s} lida={plate or '-'}")
+                continue
             expected = answers[path.name]
-            ok = (plate or "") == expected
-            hits += ok
-            total += 1
-            line += f" esperada={expected or '(nenhuma)':9s} {'OK' if ok else 'ERRO'}"
-        print(line)
-    if total:
-        print(f"Acertos: {hits}/{total}")
+            if (plate or "") == expected:
+                verdict = "OK"
+            elif plate is None:
+                verdict = "NAO_LEU"
+            else:
+                verdict = "ERRADA"
+            counts[verdict] += 1
+            if not only_errors or verdict != "OK":
+                print(
+                    f"{path.name:42s} lida={plate or '-':9s} esperada={expected or '(nenhuma)':9s} {verdict}"
+                )
+        total = sum(counts.values())
+        if total:
+            summary = " · ".join(
+                f"{v} {counts[v]}/{total} ({100 * counts[v] / total:.0f}%)"
+                for v in ("OK", "ERRADA", "NAO_LEU")
+            )
+            print(f"Resumo: {summary}")
+    print(f"{len(paths)} fotos em {time.monotonic() - started:.0f}s ({jobs} processos)")
 
 
 def run_video(path: Path, fps: float) -> None:
@@ -96,13 +142,26 @@ def run_video(path: Path, fps: float) -> None:
     if count >= MIN_VOTES:
         print(f"  placa confirmada: {plate} ({count} quadros)  leituras: {dict(votes)}")
     else:
-        print(f"  nenhuma placa confirmada (mínimo {MIN_VOTES} quadros)  leituras: {dict(votes)}")
+        print(
+            f"  nenhuma placa confirmada (mínimo {MIN_VOTES} quadros)  leituras: {dict(votes)}"
+        )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
-    parser.add_argument("--fps", type=float, default=1.0, help="quadros por segundo nos vídeos")
+    parser.add_argument(
+        "--fps", type=float, default=1.0, help="quadros por segundo nos vídeos"
+    )
+    parser.add_argument(
+        "--erros", action="store_true", help="lista só as fotos com erro"
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=os.cpu_count() or 1, help="processos em paralelo"
+    )
+    parser.add_argument(
+        "--engine", choices=("tesseract", "rekognition"), default="tesseract"
+    )
     args = parser.parse_args()
 
     images: list[Path] = []
@@ -116,7 +175,8 @@ def main() -> int:
                 videos.append(file)
 
     if images:
-        run_images(images)
+        run_images(images, args.erros, args.jobs, args.engine)
+    use_engine(args.engine)
     for video in videos:
         run_video(video, args.fps)
     return 0
