@@ -208,12 +208,22 @@ tasks:
           estacionamento-worker:local ocr_local.py {{.CLI_ARGS | default "examples/fotos examples/videos"}}
 
   dataset:baixar:
-    desc: Baixa 115 fotos reais de carros brasileiros com gabarito (OpenALPR, AGPL-3.0) para examples/dataset/openalpr-br
+    desc: Baixa 114 fotos reais de carros brasileiros com gabarito (OpenALPR, AGPL-3.0) para examples/dataset/openalpr-br
     cmds:
       - python3 scripts/baixar_dataset.py examples/dataset/openalpr-br
 
+  dataset:roboflow:
+    desc: "Baixa um dataset de caracteres de placa do Roboflow com gabarito (exige ROBOFLOW_API_KEY no ambiente; ex.: task dataset:roboflow N=1000)"
+    vars:
+      WS: '{{.WS | default "cafuringa"}}'
+      PROJ: '{{.PROJ | default "placas-whmhj"}}'
+      VER: '{{.VER | default "1"}}'
+      N: '{{.N | default "1000"}}'
+    cmds:
+      - python3 scripts/baixar_roboflow.py {{.WS}} {{.PROJ}} {{.VER}} examples/dataset/roboflow-{{.WS}} --amostra {{.N}}
+
   dataset:sintetico:
-    desc: "Gera placas sintéticas Mercosul/antigas com variações em examples/dataset/sintetico (ex.: task dataset:sintetico N=300)"
+    desc: "Gera placas sintéticas dos 4 países do Mercosul com variações em examples/dataset/sintetico (ex.: task dataset:sintetico N=400)"
     vars:
       N: '{{.N | default "200"}}'
     cmds:
@@ -233,7 +243,7 @@ tasks:
       - |
         {{.AWS_REAL}}
         ENV_FILE=$(mktemp)
-        if [ "{{.ENGINE}}" = "rekognition" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
+        if [ "{{.ENGINE}}" != "tesseract" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
         docker run --rm --entrypoint python --env-file "$ENV_FILE" -e OMP_THREAD_LIMIT=1 \
           -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
           estacionamento-worker:local ocr_local.py --erros --engine {{.ENGINE}} {{.DIRS}}
