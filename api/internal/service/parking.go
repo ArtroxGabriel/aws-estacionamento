@@ -25,8 +25,12 @@ var (
 	ErrSessionNotEditable   = errors.New("session plate can only be set while PARKED or FAILED")
 )
 
-// Mercosul (ABC1D23) or old format (ABC1234), after removing spaces/hyphens.
-var platePattern = regexp.MustCompile(`^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$`)
+// Plates of the Mercosul countries typed by the cashier, after removing
+// spaces/hyphens (docs/DECISOES.md, D8): Brazil ABC1D23 / ABC1234 (also
+// Uruguay), Argentina AB123CD / ABC123 and Paraguay ABCD123.
+var platePattern = regexp.MustCompile(
+	`^([A-Z]{3}[0-9][A-Z0-9][0-9]{2}|[A-Z]{2}[0-9]{3}[A-Z]{2}|[A-Z]{4}[0-9]{3}|[A-Z]{3}[0-9]{3})$`,
+)
 var nonAlnum = regexp.MustCompile(`[^A-Z0-9]`)
 
 func normalizePlate(raw string) (string, error) {

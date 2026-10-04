@@ -6,6 +6,7 @@ import io
 
 from PIL import Image
 
+from ocr.clean import normalize
 from ocr.processor import OcrResult
 from ocr.rekognition import MAX_LONG_SIDE, HybridOcr, prepare
 
@@ -113,3 +114,22 @@ def test_undecodable_bytes_go_straight_to_tesseract():
     assert client.calls == []
     assert fallback.calls == 1
     assert not result.ok
+
+
+def test_country_name_on_another_line_unlocks_its_format():
+    # Rekognition returns "ARGENTINA" and the plate as separate lines.
+    client = FakeRekognition([line("ARGENTINA", 0.02), line("MWV 724", 0.06)])
+
+    result = HybridOcr(client, fallback=FakeTesseract(None))(jpeg(800, 600))
+
+    assert result.ok
+    assert normalize(result.raw_text).plate == "MWV724"
+
+
+def test_six_characters_without_the_country_name_fall_back():
+    client = FakeRekognition([line("MWV 724", 0.06)])
+    fallback = FakeTesseract(None)
+
+    HybridOcr(client, fallback=fallback)(jpeg(800, 600))
+
+    assert fallback.calls == 1

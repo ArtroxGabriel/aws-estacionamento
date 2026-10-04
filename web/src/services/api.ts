@@ -8,7 +8,8 @@ import type {
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
 
 export const NETWORK_ERROR_MESSAGE = "Não foi possível conectar à API.";
-export const INVALID_PLATE_MESSAGE = "Placa inválida. Use o formato ABC1D23 ou ABC1234.";
+export const INVALID_PLATE_MESSAGE =
+  "Placa inválida. Formatos aceitos: ABC1D23 ou ABC1234 (Brasil/Uruguai), AB123CD ou ABC123 (Argentina), ABCD123 (Paraguai).";
 
 export class ApiError extends Error {
   status: number; // 0 = falha de rede

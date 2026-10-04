@@ -141,7 +141,7 @@ func (h *Handler) HandleUpdatePlate(w http.ResponseWriter, r *http.Request) {
 	session, err := h.svc.UpdatePlate(r.Context(), r.PathValue("id"), body.LicensePlate)
 	switch {
 	case errors.Is(err, service.ErrInvalidPlate):
-		writeError(w, http.StatusBadRequest, "invalid license plate (expected ABC1D23 or ABC1234)")
+		writeError(w, http.StatusBadRequest, "invalid license plate (expected ABC1D23, ABC1234, AB123CD, ABC123 or ABCD123)")
 	case errors.Is(err, service.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, service.ErrSessionNotEditable):

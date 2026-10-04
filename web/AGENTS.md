@@ -43,7 +43,7 @@ Testes ficam ao lado do arquivo testado (`*.test.ts(x)`).
 
 Na Auditoria, a placa e o resultado do OCR vêm da sessão (`GET /sessions?status=ALL`), pois os eventos são imutáveis: `ENTRY` guarda `PROCESSING` e `EXIT_PAYMENT` não traz placa. Falhas (`OCR_FAILED`, `POISON_MESSAGE`, `ENTRY_FAILED`) aparecem destacadas, com o motivo do worker traduzido em `src/utils/audit.ts` e o filtro "Somente falhas".
 
-No Caixa, cada linha tem **Pagar e liberar**, **Informar placa** (sessão `FAILED`, OCR não leu) ou **Corrigir placa** (leitura errada) e **Excluir**, com confirmação. A placa é validada no navegador (`isValidPlate`, mesma regra da API: `ABC1D23` ou `ABC1234`) e enviada normalizada via `PATCH /sessions/{id}`; a exclusão usa `DELETE /sessions/{id}`. Na Auditoria, `PLATE_CORRECTION` mostra a placa nova e a anterior, e `SESSION_DELETE` o status que a sessão tinha.
+No Caixa, cada linha tem **Pagar e liberar**, **Informar placa** (sessão `FAILED`, OCR não leu) ou **Corrigir placa** (leitura errada) e **Excluir**, com confirmação. A placa é validada no navegador (`isValidPlate`, mesma regra da API: formatos dos 4 países do Mercosul) e enviada normalizada via `PATCH /sessions/{id}`; a exclusão usa `DELETE /sessions/{id}`. Na Auditoria, `PLATE_CORRECTION` mostra a placa nova e a anterior, e `SESSION_DELETE` o status que a sessão tinha.
 
 As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED`/`FAILED` retorna 409.
 

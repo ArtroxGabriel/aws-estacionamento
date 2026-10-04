@@ -103,8 +103,14 @@ describe("isValidPlate", () => {
     expect(isValidPlate(" lsn 4i49 ")).toBe(true);
   });
 
+  it("aceita os formatos de Argentina e Paraguai", () => {
+    expect(isValidPlate("AA 562 AN")).toBe(true);
+    expect(isValidPlate("MWV 724")).toBe(true);
+    expect(isValidPlate("ABCD 123")).toBe(true);
+  });
+
   it("recusa tamanhos e posições fora do padrão", () => {
-    for (const plate of ["", "AB12345", "ABCD123", "1234567", "ABC12345", "ABC1DD3"]) {
+    for (const plate of ["", "AB12345", "1234567", "ABC12345", "ABC1DD3", "AB1234"]) {
       expect(isValidPlate(plate)).toBe(false);
     }
   });

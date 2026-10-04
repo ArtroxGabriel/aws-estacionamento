@@ -600,7 +600,7 @@ func TestUpdatePlate_RejectsInvalidPlate(t *testing.T) {
 	svc, repo, _, _, _, _ := setupService(false, false)
 	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
 
-	for _, plate := range []string{"", "AB12345", "ABCD123", "1234567", "ABC12345"} {
+	for _, plate := range []string{"", "AB12345", "1234567", "ABC12345", "AB1234", "ABCDE12"} {
 		if _, err := svc.UpdatePlate(context.Background(), "s1", plate); !errors.Is(err, service.ErrInvalidPlate) {
 			t.Fatalf("plate %q: expected ErrInvalidPlate, got %v", plate, err)
 		}
@@ -668,5 +668,22 @@ func TestDeleteSession_NotFound(t *testing.T) {
 
 	if _, err := svc.DeleteSession(context.Background(), "missing"); !errors.Is(err, service.ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestUpdatePlate_AcceptsMercosulCountries(t *testing.T) {
+	for plate, want := range map[string]string{
+		"abc-1d23": "ABC1D23", // Brasil (Mercosul)
+		"ABC 1234": "ABC1234", // Brasil (antiga) / Uruguai
+		"AA 562 AN": "AA562AN", // Argentina (Mercosul)
+		"MWV 724":   "MWV724",  // Argentina (antiga)
+		"ABCD 123":  "ABCD123", // Paraguai
+	} {
+		svc, repo, _, _, _, _ := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
+		got, err := svc.UpdatePlate(context.Background(), "s1", plate)
+		if err != nil || *got.LicensePlate != want {
+			t.Fatalf("%q: expected %s, got %v, %v", plate, want, got, err)
+		}
 	}
 }

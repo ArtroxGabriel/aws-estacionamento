@@ -78,10 +78,17 @@ class HybridOcr:
 
         lines = [d for d in response.get("TextDetections", []) if d.get("Type") == "LINE"]
         lines.sort(key=lambda d: d["Geometry"]["BoundingBox"]["Height"], reverse=True)
+        # The country name of a foreign Mercosul plate comes as its own line;
+        # it is what unlocks the Paraguayan and old Argentine formats.
+        countries = [
+            d["DetectedText"]
+            for d in lines
+            if any(c in d["DetectedText"].upper() for c in ("ARGENTINA", "PARAGUAY", "URUGUAY"))
+        ]
         for detection in lines:
-            text = detection["DetectedText"]
-            if self._normalizer(text).ok:
-                return OcrResult(ok=True, raw_text=text, error=None)
+            raw = "\n".join([detection["DetectedText"], *countries])
+            if self._normalizer(raw).ok:
+                return OcrResult(ok=True, raw_text=raw, error=None)
 
         logger.info("Rekognition found no plate, falling back to Tesseract")
         return self._fallback(image_bytes)
