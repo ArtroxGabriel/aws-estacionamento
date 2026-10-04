@@ -107,12 +107,15 @@ Passo a passo completo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md).
 |---|---|
 | `task smoke:aws` | Fluxo completo no ar: entrada → OCR → pagamento; placa ilegível → placa digitada → pagamento; exclusão |
 | `task eval:aws` | Envia as fotos de uma pasta ao sistema no ar e compara com o gabarito (`DIR=examples/dataset/openalpr-br` → 110/114) |
-| `task dataset:baixar` / `task dataset:sintetico` | Baixa 114 fotos reais de estacionamento e gera placas sintéticas, com gabarito |
+| `task dataset:baixar` / `task dataset:roboflow` / `task dataset:sintetico` | Baixa 114 fotos reais de estacionamento e 1.000 recortes do Roboflow, e gera placas sintéticas, com gabarito |
 | `task ocr:dataset` | Mede o OCR em todo o dataset (`ENGINE=rekognition` para o motor da AWS) |
 | `task ocr:local` | Roda o OCR localmente em fotos e vídeos de `examples/` |
 | `task load:aws` / `task stress:aws` | Carga para o vídeo de elasticidade |
 
-**Precisão da leitura de placas:** 96% em 114 fotos reais de estacionamento (110/114) e 98% em 400 sintéticas dos 4 países do Mercosul. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
+**Precisão da leitura de placas** (1.520 fotos com gabarito):
+- 97% em 114 fotos reais de estacionamento;
+- 98% em 400 sintéticas dos 4 países do Mercosul;
+- 76% em 1.000 recortes reais do Roboflow, o conjunto mais difícil. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
 
 ## Situação atual e o que falta
 

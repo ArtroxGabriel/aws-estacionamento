@@ -6,25 +6,35 @@ Fotos e vídeos para testar e demonstrar a leitura de placas.
 |---|---|
 | `task ocr:local` | Roda o OCR do worker (mesmo código da AWS) localmente em `fotos/` e `videos/` |
 | `task dataset:baixar` | Baixa 114 fotos reais de carros brasileiros com gabarito para `dataset/openalpr-br/` |
-| `task dataset:sintetico N=300` | Gera placas sintéticas (Mercosul e antigas) com variações em `dataset/sintetico/` |
+| `task dataset:sintetico N=400` | Gera placas sintéticas dos 4 países do Mercosul com variações em `dataset/sintetico/` |
+| `task dataset:roboflow N=1000` | Baixa recortes reais de placas do Roboflow com gabarito (exige `ROBOFLOW_API_KEY` no ambiente) |
 | `task ocr:dataset` | Mede o OCR em todos os conjuntos (OK / leu errado / não leu); `ENGINE=rekognition` usa o mesmo motor da AWS |
 | `task eval:aws DIR=...` | Envia cada foto de uma pasta ao sistema no ar como uma entrada real e compara com o gabarito |
 | `task smoke:aws` | Fluxo completo (entrada → OCR → pagamento → placa digitada → exclusão) |
 
-## Resultados (2026-10-03)
+## Resultados (2026-10-04)
 
-| Conjunto | Fotos | Tesseract (só local / reserva) | **Rekognition + Tesseract (AWS)** |
-|---|---|---|---|
-| `fotos/` (repo) | 6 | 4/6 | **5/6**: a `AA 562 AN` tem as letras `AA` gastas; o Rekognition lê só `562 AN` e ela vira "falha no OCR" |
-| `dataset/openalpr-br` (reais, estacionamentos em Salvador-BA) | 114 | 59 (52%) · 18 erradas | **110 (96%)** · 2 erradas · 2 não lidas |
-| `dataset/sintetico` (4 países do Mercosul, com ruído, desfoque e inclinação) | 400 | 292 (73%) · 65 erradas | **391 (98%)** · 9 erradas |
+**1.520 fotos com gabarito**, medidas com o código real do worker (`task ocr:dataset ENGINE=...`):
 
-- Na AWS o worker usa o Amazon Rekognition (`OCR_ENGINE=rekognition`): entre os textos detectados, vence a **placa mais alta na foto** (o carro em primeiro plano, não os de fundo). Se ele falhar ou não achar placa, cai no Tesseract.
-- O resultado nas 114 reais foi conferido também pelo sistema no ar (`task eval:aws DIR=examples/dataset/openalpr-br`): 110/114.
-- Para não "decorar" o conjunto, os ajustes foram feitos olhando só metade das fotos reais. A outra metade (nunca usada nos ajustes) deu 96%.
-- As medições locais rodam com `OMP_THREAD_LIMIT=1`. Sem isso, o Tesseract abre uma thread por CPU, os processos paralelos disputam a máquina e algumas fotos estouram o limite de 10 s: o Tesseract caía para 32% nas reais só por isso.
+| Conjunto | Fotos | Tesseract (só local) | **Motor da AWS** | Lidas erradas (AWS) |
+|---|---|---|---|---|
+| `fotos/` (repo) | 6 | 4/6 | **5/6** | 0 |
+| `dataset/openalpr-br`: fotos reais de estacionamentos em Salvador-BA | 114 | 59 (52%) | **111 (97%)** | 2 |
+| `dataset/sintetico`: 4 países do Mercosul, com ruído, desfoque e inclinação | 400 | 292 (73%) | **391 (98%)** | 9 |
+| `dataset/roboflow-cafuringa`: recortes reais de placas brasileiras (Roboflow), sorteio de 1.000 | 1.000 | 32 (3%) | **761 (76%)** | 203 (77% delas erram só 1 caractere) |
+
+- **Motor da AWS** (`OCR_ENGINE=rekognition`):
+  1. Amazon Rekognition na foto; vence a placa **mais alta** (o carro em primeiro plano).
+  2. Se não achar placa, uma 2ª chamada com a foto **centralizada numa moldura**, porque o Rekognition erra texto que ocupa a imagem inteira (close da placa).
+  3. Se ainda não achar, o Tesseract, aceitando **só leitura exata**, ou 1 correção com a faixa Mercosul detectada.
+
+  O motivo de cada passo está em [docs/DECISOES.md](../docs/DECISOES.md) (D1 e D10).
+- **O conjunto do Roboflow é o mais difícil:** são só recortes da placa esticados para 640×640, e muitos parecem gerados por aplicativo. Esse formato não é o de uma câmera de cancela. O Tesseract tira 3% porque procura a placa *dentro* de uma foto de carro.
+- **Medições locais rodam com `OMP_THREAD_LIMIT=1`.** Sem isso, o Tesseract abre uma thread por CPU, os processos paralelos disputam a máquina e algumas fotos estouram o limite de 10 s.
 
 ## Dataset grande (`dataset/`, não versionado)
+
+- `roboflow-cafuringa/`: 1.000 recortes reais de placas brasileiras, sorteados (semente fixa) entre 3.241 do projeto [cafuringa/placas](https://universe.roboflow.com/cafuringa/placas-whmhj) do Roboflow Universe (licença **CC BY 4.0**). O dataset anota cada caractere; o script remonta o texto da placa, inclusive a de moto em duas linhas. Baixe com `ROBOFLOW_API_KEY=... task dataset:roboflow N=1000`. A chave fica só no ambiente, nunca no repositório.
 
 - `openalpr-br/`: 114 fotos de carros em estacionamentos de Salvador e região, de frente e de traseira, com placa cinza (antes de 2018). É de [OpenALPR benchmarks](https://github.com/openalpr/benchmarks/tree/master/endtoend/br) (AGPL-3.0), por isso as fotos são baixadas por script e não ficam no repositório.
 - `sintetico/`: placas geradas com semente fixa (o mesmo comando gera o mesmo conjunto), dos 4 países do Mercosul, com o nome do país na faixa: Brasil Mercosul ~48%, Brasil antiga ~16%, Argentina Mercosul ~15%, Argentina antiga ~3%, Paraguai ~9% e Uruguai ~9%.

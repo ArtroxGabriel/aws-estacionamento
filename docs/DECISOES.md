@@ -16,7 +16,7 @@ A especificação exige 6 serviços. Os demais entraram para resolver problemas 
 | ElastiCache (Redis) | ✅ Sim | Contador de vagas | — |
 | DynamoDB | ✅ Sim | Auditoria | — |
 | SQS (+ DLQ) | ✅ Sim | Desacoplar entrada e OCR | — |
-| **Rekognition** | Não | Leitura da placa (OCR) na AWS | [D1](#d1-amazon-rekognition-para-ler-a-placa) |
+| **Rekognition** | Não | Leitura da placa (OCR) na AWS | [D1](#d1-amazon-rekognition-para-ler-a-placa), [D10](#d10-política-de-leitura-moldura-e-reserva-segura) |
 | **CloudFront** | Não | HTTPS sem domínio próprio | [D2](#d2-cloudfront-para-ter-https) |
 | ECR | Não | Guardar as imagens Docker | [D3](#d3-deploy-por-imagens-no-ecr-e-github-actions-com-oidc) |
 | CloudWatch | Não (vem com o Auto Scaling) | Alarmes de CPU que disparam o scaling | [D7](#d7-alarmes-próprios-de-1-minuto-simple-scaling) |
@@ -200,12 +200,50 @@ O caixa aceita os mesmos formatos na placa digitada.
 
 ---
 
+## D10. Política de leitura: moldura e reserva segura
+
+**Contexto:** Com 1.000 recortes reais de placas do Roboflow, apareceram dois problemas.
+1. **Close da placa:** quando o texto ocupa a imagem inteira, o Rekognition muitas vezes não lê nada. Em 100 recortes: 13 lidos com a proporção certa, **83** com a placa centralizada numa moldura.
+2. **Reserva com Tesseract criando placas falsas:** onde o Rekognition não achava placa, o Tesseract lia ruído, e a correção de caracteres transformava esse ruído numa placa válida, porém errada (`THH8H18` → `PII7A11`). Nas 1.520 fotos de teste, a reserva recuperava 7 placas e criava 14 leituras erradas.
+
+**Decisão:**
+1. Se o Rekognition não achar placa, faz **uma 2ª chamada com a foto centralizada numa moldura** (o dobro do tamanho).
+2. A reserva com Tesseract só aceita **leitura exata**, ou 1 correção quando a faixa Mercosul foi detectada. Esse é o caso típico `I`/`1` da fonte Mercosul, como a `LSN4I49`, cujo holograma também engana o Rekognition.
+
+**Por quê** (medido com as respostas guardadas, simulando cada alternativa nas 1.520 fotos):
+
+| Política | Acertos | Lidas erradas |
+|---|---|---|
+| Só Rekognition | 921 | 120 |
+| + reserva Tesseract com correções (anterior) | 928 | 134 |
+| + reserva só exata / 1 correção com faixa | 928 | 125 |
+| **+ 2ª chamada com moldura (atual)** | **1.268** | **214** |
+
+- **Limite de confiança do Rekognition, testado e descartado:** com 70%, os acertos nas fotos reais caem de 96% para 80%, e os erros quase não diminuem.
+- **Evidência `BRASIL` da mesma placa, testada e descartada:** ficou igual ou pior.
+
+**Consequências:**
+- A moldura recupera placas em closes. Nas fotos de câmera ela quase nunca é acionada (2 de 114, ganhando 1 placa).
+- Ela também traz leituras erradas: no Roboflow, ~1 errada para cada 4 recuperadas. **77% dessas erram 1 caractere** (`V`/`Y`, `W`/`N`), e o operador corrige com "Corrigir placa" no caixa. O pagamento é pelo ticket, então uma placa errada não cobra o carro de outra pessoa.
+- Uma 2ª chamada custa mais US$ 0,001, só nas fotos em que a primeira falhou.
+
+**Onde:** `worker/ocr/rekognition.py` (`framed`, `_detect`, `_exact_fallback`).
+
+---
+
 ## D9. Dataset de teste fora do git
 
-**Contexto:** Para medir a leitura de placas com fotos reais, usamos as 114 fotos brasileiras do benchmark público do OpenALPR, que é licenciado como AGPL-3.0.
+**Contexto:** Para medir a leitura com fotos reais, usamos dois datasets públicos:
+- as 114 fotos brasileiras do benchmark do OpenALPR (AGPL-3.0);
+- recortes de placas do projeto `cafuringa/placas` do Roboflow Universe (CC BY 4.0).
 
-**Decisão:** As fotos não são versionadas. `task dataset:baixar` as baixa para `examples/dataset/` (ignorado pelo git) e gera o gabarito.
+**Decisão:**
+- As fotos não são versionadas. `task dataset:baixar` e `task dataset:roboflow` as baixam para `examples/dataset/` (ignorado pelo git) e geram o gabarito. Cada pasta traz um `ORIGEM.md` com a fonte e a licença.
+- A chave do Roboflow vem da variável de ambiente `ROBOFLOW_API_KEY`, nunca de arquivo do repositório.
 
-**Por quê:** Copiar material AGPL para dentro do repositório poderia impor essa licença ao projeto. Também evita colocar ~80 MB no git.
+**Por quê:**
+- Copiar material AGPL para o repositório poderia impor essa licença ao projeto.
+- São dezenas de MB.
+- O export do Roboflow veio com os nomes das classes corrompidos. O mapeamento classe → caractere foi deduzido comparando as caixas com as fotos e conferido em amostras (`KNOWN_MAPS` em `scripts/baixar_roboflow.py`).
 
 **Onde:** `scripts/baixar_dataset.py`, `scripts/gerar_sinteticas.py`, `examples/README.md`.

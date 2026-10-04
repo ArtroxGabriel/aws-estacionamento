@@ -87,6 +87,7 @@
 - [x] **Dataset grande:**
   - 114 fotos reais de estacionamento com gabarito (`task dataset:baixar`, OpenALPR, não versionado);
   - 300 sintéticas Mercosul/antigas (`task dataset:sintetico`).
+- [x] **Roboflow:** 1.000 recortes reais de placas brasileiras (`task dataset:roboflow`). Ali apareceram o problema do close da placa (resolvido com a 2ª chamada com moldura) e as placas falsas criadas pela reserva (resolvido aceitando só leitura segura), [DECISOES D10](DECISOES.md#d10-política-de-leitura-moldura-e-reserva-segura). Total: **1.268 acertos em 1.520 fotos**.
 - [x] **Amazon Rekognition como motor na AWS**, com Tesseract de reserva. Fotos reais: Tesseract 52% → Rekognition **96%** (110/114, conferido também pelo sistema no ar); 400 sintéticas dos 4 países: 73% → **98%**.
 - [x] Ajustes feitos com metade das fotos reais e conferidos na outra metade (96%), para não "decorar" o conjunto.
 
