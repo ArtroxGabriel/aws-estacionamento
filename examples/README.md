@@ -5,8 +5,29 @@ Fotos e vídeos para testar e demonstrar a leitura de placas.
 | Comando | O que faz |
 |---|---|
 | `task ocr:local` | Roda o OCR do worker (mesmo código da AWS) localmente em `fotos/` e `videos/` |
-| `task eval:aws` | Envia cada foto de `fotos/` ao sistema na AWS como uma entrada real e compara com o gabarito |
-| `task smoke:aws` | Fluxo completo (entrada → OCR → pagamento → auditoria) com `fotos/sintetica-bra2e19.jpg` |
+| `task dataset:baixar` | Baixa 114 fotos reais de carros brasileiros com gabarito para `dataset/openalpr-br/` |
+| `task dataset:sintetico N=300` | Gera placas sintéticas (Mercosul e antigas) com variações em `dataset/sintetico/` |
+| `task ocr:dataset` | Mede o OCR em todos os conjuntos (OK / leu errado / não leu); `ENGINE=rekognition` usa o mesmo motor da AWS |
+| `task eval:aws DIR=...` | Envia cada foto de uma pasta ao sistema no ar como uma entrada real e compara com o gabarito |
+| `task smoke:aws` | Fluxo completo (entrada → OCR → pagamento → placa digitada → exclusão) |
+
+## Resultados (2026-10-03)
+
+| Conjunto | Fotos | Tesseract (só local) | **Rekognition + Tesseract (AWS)** |
+|---|---|---|---|
+| `fotos/` (repo) | 5 | 5/5 | **5/5** |
+| `dataset/openalpr-br` (reais, estacionamento em Salvador-BA) | 114 | 48 (42%) · 11 erradas | **110 (96%)** · 2 erradas · 2 não lidas |
+| `dataset/sintetico` (Mercosul/antigas com ruído, desfoque, inclinação) | 300 | 263 (88%) · 26 erradas | **283 (94%)** · 16 erradas |
+
+- Na AWS o worker usa o Amazon Rekognition (`OCR_ENGINE=rekognition`): entre os textos detectados, vence a **placa mais alta na foto** (o carro em primeiro plano, não os de fundo). Se ele falhar ou não achar placa, cai no Tesseract.
+- O resultado nas 114 reais foi conferido também pelo sistema no ar (`task eval:aws DIR=examples/dataset/openalpr-br`): 110/114.
+- Para não "decorar" o conjunto, os ajustes foram feitos olhando só metade das fotos reais. A outra metade (nunca usada nos ajustes) deu 96%.
+
+## Dataset grande (`dataset/`, não versionado)
+
+- `openalpr-br/`: 114 fotos de carros em estacionamentos de Salvador e região, de frente e de traseira, com placa cinza (antes de 2018). É de [OpenALPR benchmarks](https://github.com/openalpr/benchmarks/tree/master/endtoend/br) (AGPL-3.0), por isso as fotos são baixadas por script e não ficam no repositório.
+- `sintetico/`: placas geradas com semente fixa (o mesmo comando gera o mesmo conjunto), 3/4 Mercosul e 1/4 antigas.
+- Para incluir fotos suas: crie uma pasta com as fotos e um `gabarito.csv` (`arquivo,placa_esperada`) e rode `task ocr:dataset DIRS=sua/pasta` ou `task eval:aws DIR=sua/pasta`.
 
 ## Fotos (`fotos/`, gabarito em `fotos/gabarito.csv`)
 

@@ -22,8 +22,9 @@
 - [ ] Rodar *Actions → Deploy AWS → apply* uma vez para validar o workflow no GitHub. Os mesmos passos já foram validados localmente.
 
 ### Ideias futuras (só citar no vídeo/README, sem implementar)
-- Trocar o Tesseract pelo Amazon Rekognition (DetectText), chamado por uma Lambda que consome a fila SQS.
+- Mover o OCR para uma Lambda consumindo a fila SQS (o Rekognition já é usado pelo worker).
 - HTTPS com domínio próprio (ACM no ALB) no lugar do domínio do CloudFront.
+- Dataset com placas Mercosul reais (ex.: RodoSol-ALPR / UFPR-ALPR, mediante solicitação aos autores).
 
 ## Feito
 
@@ -33,6 +34,7 @@
   - **placa digitada/corrigida no caixa** (`PATCH /sessions/{id}`);
   - **exclusão** (`DELETE /sessions/{id}`, com remoção da foto), que completa o CRUD.
 - [x] **Worker (Python):**
+  - leitura de placa com **Amazon Rekognition** na AWS (Tesseract de reserva e no Floci);
   - SQS com long polling, OCR (OpenCV + Tesseract), efeitos transacionais e DLQ;
   - **placa ilegível vira `FAILED` na hora** (antes eram 3 tentativas, ~15 min).
 - [x] **Frontend (React):**
@@ -79,6 +81,13 @@
 - [x] **Carga:** 100 % de respostas 200 a ~4.200 req/s, depois de corrigir a tabela conntrack da `t3.micro` (antes: 75 % de 502/503 a 150 req/s).
 - [x] **Elasticidade:** CPU a 84 % → alarme → 1 → 2 instâncias; fim da carga → 2 → 1.
 - [x] Deploy por commit (tag = SHA), com os mesmos passos do workflow.
+
+### Leitura de placas: dataset e precisão
+- [x] **Dataset grande:**
+  - 114 fotos reais de estacionamento com gabarito (`task dataset:baixar`, OpenALPR, não versionado);
+  - 300 sintéticas Mercosul/antigas (`task dataset:sintetico`).
+- [x] **Amazon Rekognition como motor na AWS**, com Tesseract de reserva. Fotos reais: **42% → 96%** (110/114, conferido também pelo sistema no ar); sintéticas: 88% → 94%.
+- [x] Ajustes feitos com metade das fotos reais e conferidos na outra metade (96%), para não "decorar" o conjunto.
 
 ### Imagens e vídeo reais
 - [x] `examples/` com fotos reais, um vídeo real, gabarito e créditos de licença.

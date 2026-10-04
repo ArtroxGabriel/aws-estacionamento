@@ -16,6 +16,7 @@ acertos=0
 printf "%-40s %-10s %-10s %s\n" "FOTO" "ESPERADA" "LIDA" "RESULTADO"
 
 while IFS=, read -r arquivo esperada; do
+  esperada="${esperada%$'\r'}"  # gabaritos gerados em Python terminam em \r\n
   [ "$arquivo" = "arquivo" ] && continue
   id=$(curl -fsS -F "photo=@${DIR}/${arquivo}" "$API/entries" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')

@@ -190,11 +190,13 @@ tasks:
         bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
 
   eval:aws:
-    desc: Envia as fotos de examples/fotos ao sistema na AWS e compara com o gabarito
+    desc: "Envia as fotos de uma pasta com gabarito ao sistema na AWS e compara (ex.: task eval:aws DIR=examples/dataset/openalpr-br)"
+    vars:
+      DIR: '{{.DIR | default "examples/fotos"}}'
     cmds:
       - |
         URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
-        bash scripts/eval-ocr.sh "$URL" examples/fotos
+        bash scripts/eval-ocr.sh "$URL" {{.DIR}}
 
   ocr:local:
     desc: "Roda o OCR do worker localmente em fotos/vídeos (ex.: task ocr:local -- examples/videos)"

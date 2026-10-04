@@ -46,6 +46,7 @@ Trabalho Prático 1 de Desenvolvimento de Software para Nuvem (UFC).
 | **ElastiCache (Redis)** | Contador de vagas livres, consultado o tempo todo pelo painel |
 | **SQS** (+ DLQ) | Desacopla a entrada da leitura da placa: a cancela não espera o OCR |
 | **DynamoDB** | Auditoria de toda ação, com tipo, dados e horário |
+| Rekognition | Leitura da placa na AWS (96% em 114 fotos reais), com Tesseract de reserva |
 | CloudFront | HTTPS sem domínio próprio, na frente do ALB |
 
 **Status de uma sessão:**
@@ -105,11 +106,13 @@ Passo a passo completo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md).
 | Comando | O que faz |
 |---|---|
 | `task smoke:aws` | Fluxo completo no ar: entrada → OCR → pagamento; placa ilegível → placa digitada → pagamento; exclusão |
-| `task eval:aws` | Envia as fotos de `examples/fotos` ao sistema no ar e compara com o gabarito (resultado atual: 5/5) |
+| `task eval:aws` | Envia as fotos de uma pasta ao sistema no ar e compara com o gabarito (`DIR=examples/dataset/openalpr-br` → 110/114) |
+| `task dataset:baixar` / `task dataset:sintetico` | Baixa 114 fotos reais de estacionamento e gera placas sintéticas, com gabarito |
+| `task ocr:dataset` | Mede o OCR em todo o dataset (`ENGINE=rekognition` para o motor da AWS) |
 | `task ocr:local` | Roda o OCR localmente em fotos e vídeos de `examples/` |
 | `task load:aws` / `task stress:aws` | Carga para o vídeo de elasticidade |
 
-Sobre fotos e vídeos reais, veja [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
+**Precisão da leitura de placas:** 96% em 114 fotos reais de estacionamento (110/114) e 94% em 300 sintéticas. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
 
 ## Situação atual e o que falta
 

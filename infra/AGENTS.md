@@ -50,6 +50,7 @@ infra/
 - Recursos exclusivos da AWS (rede, ECR, IAM, EC2/ALB/ASG, senha do RDS) usam `count = local.aws_count` e não existem no Floci.
 - **IAM**: `instance_profile_name` vazio cria a role `estacionamento-app` (conta própria). Na AWS Academy, onde não se cria IAM, use `TF_VAR_instance_profile_name=LabInstanceProfile`.
 - **Segredos**: senha do RDS gerada por `random_password` na AWS (fica no state local e no user data do launch template); RDS sem acesso público e portas 5432/6379 abertas só para o SG das instâncias.
+- **OCR na AWS**: o worker roda com `OCR_ENGINE=rekognition` (`user_data`) e a role `estacionamento-app` tem `rekognition:DetectText`. Na Academy, a `LabRole` precisa permitir o Rekognition; se não permitir, o worker cai sozinho no Tesseract.
 - **Conntrack na t3.micro**: o `user_data` sobe `nf_conntrack_max` (de 7680 para 131072) e encurta o TIME_WAIT para 30 s. Sem isso, a ~150 req/s a tabela enche, o kernel descarta SYNs e o ALB derruba a instância (testado em 2026-10-03). O nginx também usa keepalive com a API.
 - **Conta AWS nova**: o primeiro ASG da conta pode falhar porque a role `AWSServiceRoleForAutoScaling` ainda não propagou. Basta rodar o apply de novo.
 - **Containers e IMDS**: launch template com IMDSv2 e hop limit 2, senão os containers não obtêm as credenciais do instance profile.
