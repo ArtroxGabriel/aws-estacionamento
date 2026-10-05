@@ -30,7 +30,7 @@ func NewServeMux(h *Handler) *http.ServeMux {
 func WithCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -46,6 +46,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /entries", h.HandleCreateEntry)
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
 	mux.HandleFunc("GET /sessions", h.HandleGetSessions)
+	mux.HandleFunc("PATCH /sessions/{id}", h.HandleUpdatePlate)
+	mux.HandleFunc("DELETE /sessions/{id}", h.HandleDeleteSession)
 	mux.HandleFunc("GET /audit", h.HandleGetAuditLogs)
 }
 
@@ -123,6 +125,44 @@ func (h *Handler) HandlePayExit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, paidSession)
+}
+
+// HandleUpdatePlate receives {"license_plate": "..."} typed by the cashier.
+func (h *Handler) HandleUpdatePlate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		LicensePlate string `json:"license_plate"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	session, err := h.svc.UpdatePlate(r.Context(), r.PathValue("id"), body.LicensePlate)
+	switch {
+	case errors.Is(err, service.ErrInvalidPlate):
+		writeError(w, http.StatusBadRequest, "invalid license plate (expected ABC1D23, ABC1234, AB123CD, ABC123 or ABCD123)")
+	case errors.Is(err, service.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
+	case errors.Is(err, service.ErrSessionNotEditable):
+		writeError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, session)
+	}
+}
+
+func (h *Handler) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	session, err := h.svc.DeleteSession(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, service.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, session)
+	}
 }
 
 func (h *Handler) HandleGetSessions(w http.ResponseWriter, r *http.Request) {

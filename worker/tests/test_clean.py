@@ -55,6 +55,8 @@ def test_extracts_plate_from_ocr_text(raw, expected):
         # Without the BRASIL header, fewest swaps wins: Old_Format needs one.
         ("FFTRS105", "FTR5105"),
         ("ABC12S4", "ABC1254"),
+        # Paraguayan ABCD123 needs the PARAGUAY marker; without it this is a
+        # Brazilian old plate with the 0 read as D.
         ("ABCD123", "ABC0123"),
     ],
 )
@@ -132,7 +134,7 @@ def test_unreadable(raw):
 def test_output_invariant(raw):
     result = normalize(raw)
     if result.ok:
-        assert re.fullmatch(r"[A-Z0-9]{7}", result.plate)
+        assert re.fullmatch(r"[A-Z0-9]{6,7}", result.plate)
         assert normalize(result.plate) == result
     else:
         assert result.plate is None
@@ -149,3 +151,59 @@ def test_valid_plates_are_idempotent(plate):
 def test_letters_only_never_match(raw):
     result = normalize(raw)
     assert (result.ok, result.plate) == (False, None)
+
+
+def test_located_mercosul_plate_is_not_read_as_an_old_format_plate():
+    # Real photo (examples/fotos/placa-real-mercosul-lsn4i49.jpg): Tesseract
+    # reads the I as 1, and "LSN4149" is a valid Old_Format plate. A plate
+    # located by its Mercosul band can only be Mercosul.
+    assert normalize("SITUS\nSITUS\nLSN41495", mercosul=True).plate == "LSN4I49"
+
+
+def test_mercosul_header_rules_out_an_exact_old_format_read():
+    assert normalize("BRASIL\nLSN4149").plate == "LSN4I49"
+
+
+def test_exact_old_format_plate_without_mercosul_evidence_is_kept():
+    assert normalize("LSN4149").plate == "LSN4149"
+
+
+# --- Mercosul countries (docs/DECISOES.md, D8) ---
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("AA 562 AN", "AA562AN"),  # Argentina, Mercosul: distinctive, no marker needed
+        ("REPUBLICA ARGENTINA\nAA 562 AN", "AA562AN"),
+        ("ARGENTINA\nMWV 724", "MWV724"),  # Argentina, old 6-character plate
+        ("PARAGUAY\nABCD 123", "ABCD123"),  # Paraguay, Mercosul
+        ("URUGUAY\nSBA 1234", "SBA1234"),  # Uruguay: same pattern as the Brazilian old plate
+    ],
+)
+def test_reads_plates_of_other_mercosul_countries(raw, expected):
+    assert normalize(raw).plate == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "PJC490",  # a Brazilian plate with the last character dropped by OCR
+        "MWV 724",  # 6 characters without ARGENTINA: not trusted
+        "XABC123",  # inside a longer line, never a 6-character plate
+    ],
+)
+def test_six_character_plates_need_the_argentina_marker(raw):
+    assert not normalize(raw).ok
+
+
+def test_uruguay_marker_allows_the_four_digit_pattern_on_a_mercosul_plate():
+    # With the band located, LLLNNNN is normally the Brazilian LSN4I49 misread...
+    assert normalize("LSN4149", mercosul=True).plate == "LSN4I49"
+    # ...but a Uruguayan Mercosul plate really is LLLNNNN.
+    assert normalize("URUGUAY\nSBA1234", mercosul=True).plate == "SBA1234"
+
+
+def test_brazilian_reads_are_unchanged_by_foreign_formats():
+    assert normalize("BRASIL\nLSN4149").plate == "LSN4I49"
+    assert normalize("FFTRS105").plate == "FTR5105"

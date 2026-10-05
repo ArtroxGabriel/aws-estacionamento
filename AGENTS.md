@@ -35,6 +35,11 @@
 [Consulta de Vagas] ──> GET /spots/available
     └── Responde instantaneamente direto da memória do ElastiCache
 
+[Placa ilegível] ──> Worker marca a sessão "FAILED" na 1ª entrega (auditoria "OCR_FAILED")
+    └── Caixa digita a placa: PATCH /sessions/:id ("FAILED" → "PARKED", DECR da vaga, auditoria "PLATE_CORRECTION")
+
+[Exclusão] ──> DELETE /sessions/:id (remove a sessão e a foto do S3, INCR se estava "PARKED", auditoria "SESSION_DELETE")
+
 [Saída/Pagamento] ──> POST /exits/:id/pay
     ├── Calcula valor com base no tempo de permanência ou tarifa fixa no RDS
     ├── Atualiza registro para "PAID" e libera a vaga no RDS
@@ -59,8 +64,11 @@
 ├── api/                    # API REST em Go
 ├── worker/                 # Worker assíncrono OCR em Python
 ├── web/                    # Frontend React + Vite
-├── infra/                  # OpenTofu e Docker Compose
-└── docs/                   # Especificações da disciplina
+├── infra/                  # OpenTofu (módulo + Floci); aws/ = root da AWS; bootstrap/ = OIDC + state
+├── .github/                # Workflow "Deploy AWS" (OIDC)
+├── examples/               # Fotos, vídeo e datasets com gabarito (examples/README.md)
+├── scripts/                # Smoke, avaliação de OCR, datasets; analise-ocr/ = simulações das decisões
+└── docs/                   # Especificação, GOAL, ARQUITETURA, DECISOES, DEPLOY-AWS, CHECKLIST-AWS
 ```
 
 - `api/`: API REST responsável pelas rotas `/entries`, `/spots/available` e `/exits/{id}/pay`.
@@ -78,6 +86,8 @@
   - `task tf:apply:local`: Provisiona no Floci (`use_localstack=true`)
   - `task tf:apply:aws`: Provisiona recursos na AWS Academy
   - `task tf:destroy:aws`: Destrói recursos na AWS Academy
+  - `task deploy:aws`: Deploy completo na AWS (ECR, imagens, infra, URL do ALB). Ver `docs/DEPLOY-AWS.md`
+  - GitHub Actions → *Deploy AWS* (apply/plan/destroy via OIDC). Pré-requisito: `task aws:bootstrap` + environment `aws` com `AWS_ROLE_ARN`
 - **Execução dos Serviços**:
   - `task dev:api`: Executa a API Go
   - `task dev:worker`: Executa o Worker Python
@@ -105,6 +115,7 @@ Configurar variáveis locais no `.env`:
 
 ## Known Gotchas
 
+- **Local x AWS no OpenTofu**: o Floci usa o state local em `infra/`; a AWS usa `infra/aws`, com state remoto no S3 compartilhado com o GitHub Actions. Use sempre as tasks `tf:*:local` / `tf:*:aws`.
 - **Créditos AWS Academy**: Sempre executar `task tf:destroy:aws` ao encerrar os testes em nuvem.
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
 - **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
@@ -112,6 +123,16 @@ Configurar variáveis locais no `.env`:
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
+
+- 2026-10-04: Datasets versionados (1.000 recortes do Roboflow + 400 sintéticas, com respostas guardadas), scripts de análise em `scripts/analise-ocr/`, `docs/ARQUITETURA.md` com o antes × depois.
+
+- 2026-10-03: Leitura de placas com Amazon Rekognition na AWS (Tesseract de reserva) e dataset de 114 fotos reais + 300 sintéticas (`task dataset:*`, `task ocr:dataset`): Tesseract 52% → Rekognition 96% nas reais.
+
+- 2026-10-03: Placa ilegível vira `FAILED` na hora; caixa com placa digitada/corrigida (`PATCH /sessions/{id}`) e exclusão (`DELETE /sessions/{id}`); OCR mais robusto em fotos reais (`examples/`, 5/5); HTTPS via CloudFront; README reescrito.
+
+- 2026-10-03: Deploy na AWS pelo GitHub Actions com OIDC e state remoto no S3.
+
+- 2026-10-03: Deploy na AWS: Parte 2 (ALB + ASG + alarmes) no OpenTofu, imagens no ECR e API sem defaults do Floci (instance profile, RDS com SSL).
 
 - 2026-10-03: Frontend web (painel, totem de entrada, caixa/saída e auditoria) consumindo a API existente.
 - 2026-09-30: Worker com Dockerfile (Tesseract + OpenCV), localização da placa Mercosul, DLQ na fila de OCR e efeitos colaterais transacionais.

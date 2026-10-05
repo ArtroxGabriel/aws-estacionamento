@@ -25,6 +25,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 - **Audit_Entry**: A DynamoDB item with `id` = `<session_id>#<timestamp_nano>`, `action`, `entity_id`, `timestamp`, and `details`.
 - **Mercosul_Format**: A license-plate format matching the pattern `ABC1D23` (three letters, one digit, one letter, two digits).
 - **Old_Format**: A legacy Brazilian license-plate format matching the pattern `ABC-1234` (three letters, hyphen, four digits).
+- **Foreign Mercosul formats** (added 2026-10-03, see `docs/DECISOES.md`, D8): Argentina `AB123CD` (always) and `ABC123` (only with `ARGENTINA` read, as a whole line), Paraguay `ABCD123` (only with `PARAGUAY` read); Uruguay's Mercosul plate shares the Old_Format pattern. Requirement 5 applies to them for exact matches only; positional corrections stay Brazilian.
 - **PROCESSING**: The initial session status set by the API on entry.
 - **PARKED**: The session status set by the Worker after successful OCR extraction.
 - **Poison_Message**: A message that repeatedly fails processing and exceeds the configured redelivery threshold.

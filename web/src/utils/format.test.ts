@@ -5,6 +5,7 @@ import {
   formatDateTime,
   formatDuration,
   formatTime,
+  isValidPlate,
   normalizePlate,
   shortId,
   statusLabel,
@@ -92,5 +93,25 @@ describe("actionLabel", () => {
   it("devolve a própria ação quando desconhecida", () => {
     expect(actionLabel("NEW_ACTION")).toBe("NEW_ACTION");
     expect(actionLabel("toString")).toBe("toString");
+  });
+});
+
+describe("isValidPlate", () => {
+  it("aceita Mercosul e formato antigo, com ou sem hífen e espaços", () => {
+    expect(isValidPlate("ABC1D23")).toBe(true);
+    expect(isValidPlate("abc-1234")).toBe(true);
+    expect(isValidPlate(" lsn 4i49 ")).toBe(true);
+  });
+
+  it("aceita os formatos de Argentina e Paraguai", () => {
+    expect(isValidPlate("AA 562 AN")).toBe(true);
+    expect(isValidPlate("MWV 724")).toBe(true);
+    expect(isValidPlate("ABCD 123")).toBe(true);
+  });
+
+  it("recusa tamanhos e posições fora do padrão", () => {
+    for (const plate of ["", "AB12345", "1234567", "ABC12345", "ABC1DD3", "AB1234"]) {
+      expect(isValidPlate(plate)).toBe(false);
+    }
   });
 });

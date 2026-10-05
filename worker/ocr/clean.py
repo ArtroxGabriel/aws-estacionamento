@@ -1,8 +1,10 @@
 """Plate_Normalizer — pure license-plate normalization.
 
-Normalizes raw OCR text into a canonical Brazilian license plate. Supports the
-Mercosul format (``ABC1D23``) and the legacy Old_Format (``ABC1234`` — the
-hyphen in ``ABC-1234`` is stripped during normalization). This module performs
+Normalizes raw OCR text into a canonical license plate of a Mercosul country
+(docs/DECISOES.md, D8): Brazil's Mercosul format (``ABC1D23``) and legacy
+Old_Format (``ABC1234`` — the hyphen in ``ABC-1234`` is stripped; Uruguay's
+Mercosul plate has the same pattern), Argentina's Mercosul (``AB123CD``) and old
+(``ABC123``) formats, and Paraguay's Mercosul format (``ABCD123``). This module performs
 no I/O and never raises for domain outcomes: an unreadable plate is returned as
 a ``PlateResult`` with ``ok=False`` and ``plate=None``.
 
@@ -53,9 +55,25 @@ _MAX_CORRECTIONS = 2
 # typeface's 5, I and slashed 0 are read as S, 1 and O ("FTRS1O5" -> "FTR5I05").
 _MAX_CORRECTIONS_LOCATED = 3
 
-# Text printed only on Mercosul plates; when OCR reads it, the plate cannot be
-# in the Old_Format.
+# Argentina (Mercosul): letter-letter-digit-digit-digit-letter-letter -> AB123CD.
+# No Brazilian plate starts with two letters and three digits, so it is safe to
+# accept without any other evidence.
+AR_MERCOSUL = re.compile(r"^[A-Z]{2}[0-9]{3}[A-Z]{2}$")
+# Paraguay (Mercosul): four letters, three digits -> ABCD123. A Brazilian old
+# plate with its 1 read as I ("ABCI234") has the same shape, so it is only
+# accepted when OCR also read PARAGUAY on the plate.
+PY_MERCOSUL = re.compile(r"^[A-Z]{4}[0-9]{3}$")
+# Argentina (old, 1995-2016): three letters, three digits -> ABC123. A Brazilian
+# plate whose last character OCR dropped ("PJC490") has the same shape, so it
+# needs ARGENTINA on the plate and must be a whole line, never part of one.
+AR_OLD = re.compile(r"^[A-Z]{3}[0-9]{3}$")
+
+# Text printed only on Brazilian Mercosul plates; when OCR reads it, the plate
+# cannot be in the Old_Format.
 _MERCOSUL_MARKERS = ("BRASIL", "MERCOSUL")
+# Country names printed on the other Mercosul plates; they unlock the formats
+# above and, like the Brazilian markers, are removed before searching.
+_COUNTRY_MARKERS = ("ARGENTINA", "PARAGUAY", "URUGUAY")
 
 
 def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
@@ -93,7 +111,21 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
         return PlateResult(ok=False, plate=None, reason="empty")
 
     candidates = _candidates(raw)
-    exact = [plate for plate in map(_find_plate, candidates) if plate is not None]
+    text = _clean(raw)
+    # With Brazilian Mercosul evidence (band located or header read) the
+    # Old_Format is ruled out: an exact read such as "LSN4149" is the Mercosul
+    # "LSN4I49" with the I read as 1. Uruguay's Mercosul plate really is
+    # LLLNNNN, so its country name brings that pattern back.
+    mercosul_header = any(marker in text for marker in _MERCOSUL_MARKERS)
+    only_mercosul = mercosul or mercosul_header
+    patterns: tuple[re.Pattern[str], ...] = (MERCOSUL, AR_MERCOSUL)
+    if not only_mercosul or "URUGUAY" in text:
+        patterns += (OLD,)
+    if "PARAGUAY" in text:
+        patterns += (PY_MERCOSUL,)
+    exact = [plate for c in candidates if (plate := _find_plate(c, patterns)) is not None]
+    if not exact and "ARGENTINA" in text:
+        exact = [c for c in candidates if AR_OLD.match(c)]
     if exact:
         # Req 5.2 / 5.3 / 5.6: canonical format, returned as-is. Several crops
         # and Tesseract modes read the same plate, so the most frequent exact
@@ -103,8 +135,11 @@ def normalize(raw: str, *, mercosul: bool = False) -> PlateResult:
         plate = max(exact, key=lambda p: (counts[p], -exact.index(p)))
         return PlateResult(ok=True, plate=plate, reason=None)
 
-    mercosul_header = any(marker in _clean(raw) for marker in _MERCOSUL_MARKERS)
-    templates = (_TEMPLATES[0],) if mercosul or mercosul_header else _TEMPLATES
+    if any(marker in text for marker in _COUNTRY_MARKERS):
+        # Character corrections are calibrated on the Brazilian typeface;
+        # other countries' plates are only accepted when read exactly.
+        return PlateResult(ok=False, plate=None, reason="no_match")
+    templates = (_TEMPLATES[0],) if only_mercosul else _TEMPLATES
     max_swaps = _MAX_CORRECTIONS_LOCATED if mercosul else _MAX_CORRECTIONS
     for cleaned in candidates:
         plate = _find_corrected_plate(cleaned, templates, max_swaps)
@@ -127,7 +162,7 @@ def _candidates(raw: str) -> list[str]:
     candidates = []
     for line in raw.splitlines():
         cleaned = _clean(line)
-        for marker in _MERCOSUL_MARKERS:
+        for marker in _MERCOSUL_MARKERS + _COUNTRY_MARKERS:
             cleaned = cleaned.replace(marker, "")
         if cleaned:
             candidates.append(cleaned)
@@ -140,12 +175,14 @@ def _clean(text: str) -> str:
     return _NON_ALNUM.sub("", text).upper()
 
 
-def _find_plate(cleaned: str) -> str | None:
-    """Return the first 7-character window matching a plate format, if any."""
+def _find_plate(
+    cleaned: str, patterns: tuple[re.Pattern[str], ...] = (MERCOSUL, OLD)
+) -> str | None:
+    """Return the first 7-character window matching one of ``patterns``, if any."""
 
     for start in range(len(cleaned) - _MAX_LEN + 1):
         window = cleaned[start : start + _MAX_LEN]
-        if MERCOSUL.match(window) or OLD.match(window):
+        if any(pattern.match(window) for pattern in patterns):
             return window
     return None
 

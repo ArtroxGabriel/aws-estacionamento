@@ -8,6 +8,8 @@ import type {
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
 
 export const NETWORK_ERROR_MESSAGE = "Não foi possível conectar à API.";
+export const INVALID_PLATE_MESSAGE =
+  "Placa inválida. Formatos aceitos: ABC1D23 ou ABC1234 (Brasil/Uruguai), AB123CD ou ABC123 (Argentina), ABCD123 (Paraguai).";
 
 export class ApiError extends Error {
   status: number; // 0 = falha de rede
@@ -90,6 +92,21 @@ export function payExit(id: string): Promise<Session> {
   return request<Session>(`/exits/${encodeURIComponent(id)}/pay`, { method: "POST" });
 }
 
+// Placa digitada pelo operador: em sessão FAILED (OCR não leu) ela passa a PARKED;
+// em PARKED corrige uma leitura errada.
+export function updatePlate(id: string, plate: string): Promise<Session> {
+  return request<Session>(`/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ license_plate: plate }),
+  });
+}
+
+// Exclui a sessão (e a foto no S3). A API devolve a sessão excluída.
+export function deleteSession(id: string): Promise<Session> {
+  return request<Session>(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 // A API devolve os 50 eventos mais recentes (lista crua, ou `null` se vazia).
 export async function listAuditEvents(): Promise<AuditEvent[]> {
   const data = await request<AuditEvent[] | null>("/audit");
@@ -103,9 +120,16 @@ export function isTransientError(err: unknown): boolean {
 }
 
 // Converte um erro em mensagem para a interface (seção 3.3 de docs/frontend.md).
-export function errorMessage(err: unknown, context: "session" | "resource" = "resource"): string {
+export function errorMessage(
+  err: unknown,
+  context: "session" | "resource" | "plate" = "resource",
+): string {
   if (!(err instanceof ApiError)) return "Erro inesperado. Tente novamente.";
   if (err.status === 0) return NETWORK_ERROR_MESSAGE;
+  if (context === "plate" && err.status === 400) return INVALID_PLATE_MESSAGE;
+  if (context === "plate" && err.status === 409) {
+    return "Só é possível alterar a placa de veículos estacionados ou com falha no OCR.";
+  }
   if (err.status === 404) {
     return context === "session" ? "Sessão não encontrada." : "Recurso não encontrado.";
   }

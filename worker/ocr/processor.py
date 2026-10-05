@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 from PIL.Image import UnidentifiedImageError
 
 from ocr.clean import has_exact_plate
@@ -86,7 +86,10 @@ def _decode(image_bytes: bytes) -> Image.Image:
 def _binarize(image: Image.Image) -> Image.Image:
     """Grayscale then binary threshold, with Otsu's per-image cut-off."""
 
-    gray = ImageOps.grayscale(image)
+    # A 5x5 median removes JPEG/sensor noise that otherwise survives the
+    # threshold as specks and breaks characters (real photo KLV-8465 in
+    # examples/fotos was unreadable without it).
+    gray = ImageOps.grayscale(image).filter(ImageFilter.MedianFilter(5))
     threshold = otsu_threshold(gray.histogram())
     return gray.point(lambda px: 255 if px > threshold else 0, mode="1")
 
@@ -177,7 +180,10 @@ def extract_text(image_bytes: bytes, timeout_s: float = 10.0) -> OcrResult:
     mercosul = bool(bands) or any(line.mercosul for line in lines)
     # (prepared image, Tesseract modes, is a located plate)
     jobs = [(_preprocess_plate(strip), _PLATE_CONFIGS, True) for strip in bands]
-    jobs += [(_preprocess_plate(line.image, left_trim=0), _LINE_CONFIGS, True) for line in lines]
+    for line in lines:
+        jobs.append((_preprocess_plate(line.image, left_trim=0), _LINE_CONFIGS, True))
+        if line.wide is not None:
+            jobs.append((_preprocess_plate(line.wide, left_trim=0), _LINE_CONFIGS, True))
     jobs.append((_preprocess(image), _TESSERACT_CONFIGS, False))
 
     # Run Tesseract under a timeout guard (Req 4.2, 4.6) shared by every call.

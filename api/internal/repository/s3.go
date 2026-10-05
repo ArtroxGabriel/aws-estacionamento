@@ -59,3 +59,11 @@ func (s *S3BlobStorage) Download(ctx context.Context, key string) (io.ReadCloser
 
 	return output.Body, contentType, nil
 }
+
+func (s *S3BlobStorage) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}

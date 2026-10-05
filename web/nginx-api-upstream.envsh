@@ -1,0 +1,6 @@
+#!/bin/sh
+# Lido (source) pelo entrypoint do nginx antes do envsubst dos templates:
+# deriva host:porta de API_UPSTREAM (ex.: http://api:8080 -> api:8080) para o
+# bloco `upstream`, que é o que permite keepalive entre nginx e API.
+API_UPSTREAM_HOST="${API_UPSTREAM#*://}"
+export API_UPSTREAM_HOST="${API_UPSTREAM_HOST%%/*}"

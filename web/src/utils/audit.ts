@@ -81,6 +81,8 @@ export function sessionInfo(
     // POISON_MESSAGE sozinho não encerra a sessão (falhas de infraestrutura mantêm
     // PROCESSING para reprocessamento); só OCR_FAILED marca FAILED.
     if (e.action === "OCR_FAILED") current.status ??= "FAILED";
+    // Placa digitada no caixa: a sessão saiu de FAILED e está estacionada.
+    if (e.action === "PLATE_CORRECTION") current.status ??= "PARKED";
     if (isFailureAction(e.action)) {
       const reason = stringField(e.details, "reason") ?? stringField(e.details, "error");
       if (reason) current.failure ??= failureReasonLabel(reason);
@@ -104,6 +106,16 @@ function entryOutcome(info: SessionInfo | undefined): string | undefined {
 }
 
 export function describeEvent(event: AuditEvent, info: SessionInfo | undefined): string {
+  if (event.action === "PLATE_CORRECTION") {
+    const plate = plateOf(event.details) ?? "—";
+    const previous = stringField(event.details, "previous_plate");
+    return previous ? `${plate} (antes: ${previous})` : `${plate} (digitada no caixa)`;
+  }
+  if (event.action === "SESSION_DELETE") {
+    const status = stringField(event.details, "status");
+    const label = status && isSessionStatus(status) ? statusLabel(status) : status;
+    return label ? `Registro excluído · estava ${label}` : "Registro excluído";
+  }
   if (event.action === "ENTRY") {
     const outcome = entryOutcome(info);
     if (outcome) return outcome;

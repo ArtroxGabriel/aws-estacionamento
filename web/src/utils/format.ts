@@ -40,6 +40,14 @@ export function normalizePlate(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+// Placas dos países do Mercosul, mesma regra da API (docs/DECISOES.md, D8):
+// Brasil ABC1D23 / ABC1234 (também Uruguai), Argentina AB123CD / ABC123, Paraguai ABCD123.
+export function isValidPlate(value: string): boolean {
+  return /^([A-Z]{3}[0-9][A-Z0-9][0-9]{2}|[A-Z]{2}[0-9]{3}[A-Z]{2}|[A-Z]{4}[0-9]{3}|[A-Z]{3}[0-9]{3})$/.test(
+    normalizePlate(value),
+  );
+}
+
 const statusLabels: Record<SessionStatus, string> = {
   PROCESSING: "Processando",
   PARKED: "Estacionado",
@@ -58,6 +66,8 @@ const actionLabels: Record<string, string> = {
   POISON_MESSAGE: "Falha no processamento",
   OCR_FAILED: "Falha no OCR",
   ENTRY_FAILED: "Falha na entrada",
+  PLATE_CORRECTION: "Placa informada",
+  SESSION_DELETE: "Exclusão",
 };
 
 export function actionLabel(action: string): string {

@@ -3,10 +3,20 @@ version: "3"
 vars:
   ENV_FILE: .env
   TERRAFORM_DIR: infra
+  AWS_TF_DIR: infra/aws
+  BOOTSTRAP_DIR: infra/bootstrap
   API_DIR: api
   WORKER_DIR: worker
   WEB_DIR: web
   DOCKER_COMPOSE_FILE: "{{.TERRAFORM_DIR}}/docker-compose.yaml"
+  AWS_REGION_REAL: us-east-1
+  ASG_NAME: estacionamento-asg
+  # O .env aponta AWS_ENDPOINT_URL para o Floci e usa chaves falsas; o AWS CLI e
+  # o provider do OpenTofu leem essas variáveis. As tasks da AWS real começam
+  # com este trecho para descartá-las e usar ~/.aws/credentials (ou o ambiente).
+  AWS_REAL: |
+    if [ "$AWS_ACCESS_KEY_ID" = "mock_key" ]; then unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; fi
+    case "$AWS_ENDPOINT_URL" in *localhost*|*127.0.0.1*|*floci*) unset AWS_ENDPOINT_URL;; esac
 
 dotenv: [".env"]
 
@@ -61,41 +71,211 @@ tasks:
     cmds:
       - tofu plan -var="use_localstack=true"
 
-  tf:plan:aws:
-    desc: Gera o plano de execução do OpenTofu para o AWS Academy
-    dir: "{{.TERRAFORM_DIR}}"
-    cmds:
-      - tofu plan -var="use_localstack=false"
-
   tf:apply:local:
     desc: Provisiona recursos locais apontando para o Floci via OpenTofu
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
       - tofu apply -var="use_localstack=true" -auto-approve
 
-  tf:apply:aws:
-    desc: Provisiona recursos reais no AWS Academy via OpenTofu
-    dir: "{{.TERRAFORM_DIR}}"
+  aws:bootstrap:
+    desc: "Uma vez por conta: bucket do state remoto + OIDC do GitHub + role de deploy (precisa de admin)"
+    dir: "{{.BOOTSTRAP_DIR}}"
     cmds:
-      - tofu apply -var="use_localstack=false"
+      - |
+        {{.AWS_REAL}}
+        tofu init -input=false
+        tofu apply
+        tofu output
+
+  tf:init:aws:
+    desc: Inicializa infra/aws com o state remoto no S3 (criado por aws:bootstrap)
+    dir: "{{.AWS_TF_DIR}}"
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        tofu init -input=false -reconfigure -backend-config="bucket=estacionamento-tofu-state-$ACCOUNT"
+
+  tf:plan:aws:
+    desc: Gera o plano de execução do OpenTofu para a AWS (state remoto)
+    dir: "{{.AWS_TF_DIR}}"
+    deps: [tf:init:aws]
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        tofu plan
+
+  tf:apply:aws:
+    desc: Provisiona recursos reais na AWS via OpenTofu (state remoto)
+    dir: "{{.AWS_TF_DIR}}"
+    deps: [tf:init:aws]
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        tofu apply
 
   tf:destroy:aws:
-    desc: Destrói recursos no AWS Academy para evitar cobrança de créditos
-    dir: "{{.TERRAFORM_DIR}}"
+    desc: Destrói recursos na AWS para evitar cobrança (mantém o bootstrap)
+    dir: "{{.AWS_TF_DIR}}"
+    deps: [tf:init:aws]
     cmds:
-      - tofu destroy -var="use_localstack=false" -auto-approve
+      - |
+        {{.AWS_REAL}}
+        tofu destroy -auto-approve
 
   tf:refresh:
-    desc: Atualiza o estado do OpenTofu com os recursos reais no AWS Academy
-    dir: "{{.TERRAFORM_DIR}}"
+    desc: Atualiza o state remoto com os recursos reais na AWS
+    dir: "{{.AWS_TF_DIR}}"
+    deps: [tf:init:aws]
     cmds:
-      - tofu refresh -var="use_localstack=false"
+      - |
+        {{.AWS_REAL}}
+        tofu refresh
 
   tf:output:
-    desc: Exibe os outputs do OpenTofu
+    desc: Exibe os outputs do OpenTofu local (Floci)
     dir: "{{.TERRAFORM_DIR}}"
     cmds:
       - tofu output
+
+  tf:output:aws:
+    desc: Exibe os outputs da AWS (URL do ALB, ASG, ECR...)
+    dir: "{{.AWS_TF_DIR}}"
+    deps: [tf:init:aws]
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        tofu output
+
+  aws:images:
+    desc: Build (linux/amd64) e push das imagens api, worker e web para o ECR
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        # Não usa `tofu output`: o apply com -target do deploy:aws não grava outputs.
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="$ACCOUNT.dkr.ecr.{{.AWS_REGION_REAL}}.amazonaws.com"
+        aws ecr get-login-password --region {{.AWS_REGION_REAL}} | docker login --username AWS --password-stdin "$REGISTRY"
+        for app in api worker web; do
+          docker buildx build --platform linux/amd64 --provenance=false -t "$REGISTRY/estacionamento-${app}:latest" --push "./${app}"
+        done
+
+  aws:rollout:
+    desc: Recria as instâncias do ASG aos poucos para pegarem as imagens novas do ECR
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        aws autoscaling start-instance-refresh --region {{.AWS_REGION_REAL}} \
+          --auto-scaling-group-name {{.ASG_NAME}} --preferences MinHealthyPercentage=50
+
+  deploy:aws:
+    desc: Deploy completo na AWS pela máquina local (ECR → imagens → infraestrutura completa)
+    cmds:
+      - task: tf:init:aws
+      - cmd: |
+          {{.AWS_REAL}}
+          cd {{.AWS_TF_DIR}}
+          tofu apply -target=module.app.aws_ecr_repository.app -auto-approve
+      - task: aws:images
+      - task: tf:apply:aws
+      - task: tf:output:aws
+
+  smoke:aws:
+    desc: "Testa o fluxo completo pela URL HTTPS (ex.: task smoke:aws PHOTO=carro.jpg)"
+    vars:
+      PHOTO: '{{.PHOTO | default "examples/fotos/sintetica-bra2e19.jpg"}}'
+    cmds:
+      - |
+        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
+        bash scripts/smoke.sh "$URL" "{{.PHOTO}}"
+
+  eval:aws:
+    desc: "Envia as fotos de uma pasta com gabarito ao sistema na AWS e compara (ex.: task eval:aws DIR=examples/dataset/openalpr-br)"
+    vars:
+      DIR: '{{.DIR | default "examples/fotos"}}'
+    cmds:
+      - |
+        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw app_url)
+        bash scripts/eval-ocr.sh "$URL" {{.DIR}}
+
+  ocr:local:
+    desc: "Roda o OCR do worker localmente em fotos/vídeos (ex.: task ocr:local -- examples/videos)"
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        docker run --rm --entrypoint python -e OMP_THREAD_LIMIT=1 \
+          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
+          estacionamento-worker:local ocr_local.py {{.CLI_ARGS | default "examples/fotos examples/videos"}}
+
+  dataset:baixar:
+    desc: Baixa 114 fotos reais de carros brasileiros com gabarito (OpenALPR, AGPL-3.0) para examples/dataset/openalpr-br
+    cmds:
+      - python3 scripts/baixar_dataset.py examples/dataset/openalpr-br
+
+  dataset:roboflow:
+    desc: "Baixa um dataset de caracteres de placa do Roboflow com gabarito (exige ROBOFLOW_API_KEY no ambiente; ex.: task dataset:roboflow N=1000)"
+    vars:
+      WS: '{{.WS | default "cafuringa"}}'
+      PROJ: '{{.PROJ | default "placas-whmhj"}}'
+      VER: '{{.VER | default "1"}}'
+      N: '{{.N | default "1000"}}'
+    cmds:
+      - python3 scripts/baixar_roboflow.py {{.WS}} {{.PROJ}} {{.VER}} examples/dataset/roboflow-{{.WS}} --amostra {{.N}}
+
+  dataset:sintetico:
+    desc: "Gera placas sintéticas dos 4 países do Mercosul com variações em examples/dataset/sintetico (ex.: task dataset:sintetico N=400)"
+    vars:
+      N: '{{.N | default "200"}}'
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        docker run --rm --entrypoint python -e OMP_THREAD_LIMIT=1 \
+          -v "$PWD/examples:/app/examples" -v "$PWD/scripts/gerar_sinteticas.py:/app/gerar_sinteticas.py:ro" \
+          estacionamento-worker:local gerar_sinteticas.py examples/dataset/sintetico {{.N}}
+
+  ocr:dataset:
+    desc: "Mede o OCR em todo o dataset, listando só os erros (ENGINE=rekognition usa a AWS como em produção)"
+    vars:
+      ENGINE: '{{.ENGINE | default "tesseract"}}'
+      DIRS: '{{.DIRS | default "examples/fotos examples/dataset/openalpr-br examples/dataset/sintetico"}}'
+    cmds:
+      - docker build -q -t estacionamento-worker:local ./worker
+      - |
+        {{.AWS_REAL}}
+        ENV_FILE=$(mktemp)
+        if [ "{{.ENGINE}}" != "tesseract" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
+        docker run --rm --entrypoint python --env-file "$ENV_FILE" -e OMP_THREAD_LIMIT=1 \
+          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
+          estacionamento-worker:local ocr_local.py --erros --engine {{.ENGINE}} {{.DIRS}}
+        rm -f "$ENV_FILE"
+
+  load:aws:
+    desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"
+    vars:
+      MINUTES: '{{.MINUTES | default "6"}}'
+      CONCURRENCY: '{{.CONCURRENCY | default "600"}}'
+    cmds:
+      - |
+        URL=$(cd {{.AWS_TF_DIR}} && tofu output -raw alb_url)
+        echo "Carga em $URL/api/spots/available por {{.MINUTES}} min com {{.CONCURRENCY}} conexões"
+        # O hey para sozinho em 1 milhão de respostas (~4 min a 4 mil req/s):
+        # roda em rodadas de 2 min até completar o tempo pedido.
+        END=$(( $(date +%s) + {{.MINUTES}} * 60 ))
+        while [ "$(date +%s)" -lt "$END" ]; do
+          hey -z 2m -c {{.CONCURRENCY}} "$URL/api/spots/available" | grep -E "Requests/sec|^ +\[[0-9]{3}\]"
+        done
+
+  stress:aws:
+    desc: "Plano B do vídeo: ocupa 100% da CPU das instâncias atuais via SSM (ex.: task stress:aws DURATION=300)"
+    vars:
+      DURATION: '{{.DURATION | default "300"}}'
+    cmds:
+      - |
+        {{.AWS_REAL}}
+        aws ssm send-command --region {{.AWS_REGION_REAL}} --document-name AWS-RunShellScript \
+          --targets "Key=tag:aws:autoscaling:groupName,Values={{.ASG_NAME}}" \
+          --parameters '{"commands":["for i in $(seq $(nproc)); do timeout {{.DURATION}} yes > /dev/null & done; wait"]}' \
+          --query 'Command.CommandId' --output text
 
   dev:api:
     desc: Executa a API Go em modo desenvolvimento

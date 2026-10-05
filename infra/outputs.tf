@@ -33,3 +33,23 @@ output "elasticache_endpoint" {
   description = "Endpoint do cluster ElastiCache Redis"
   value       = try(aws_elasticache_replication_group.redis.primary_endpoint_address, "localhost")
 }
+
+output "alb_url" {
+  description = "URL pública da aplicação (Application Load Balancer)"
+  value       = local.is_aws ? "http://${aws_lb.app[0].dns_name}" : null
+}
+
+output "asg_name" {
+  description = "Nome do Auto Scaling Group"
+  value       = local.is_aws ? aws_autoscaling_group.app[0].name : null
+}
+
+output "ecr_registry" {
+  description = "Registry ECR onde as imagens api/worker/web são publicadas"
+  value       = local.is_aws ? local.registry : null
+}
+
+output "app_url" {
+  description = "URL HTTPS da aplicação (CloudFront na frente do ALB)"
+  value       = local.is_aws ? "https://${aws_cloudfront_distribution.app[0].domain_name}" : null
+}

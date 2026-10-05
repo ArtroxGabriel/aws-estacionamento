@@ -22,3 +22,10 @@ __pycache__/
 node_modules/
 dist/
 
+
+# Datasets (examples/README.md): o OpenALPR é AGPL-3.0 e só é baixado
+# (task dataset:baixar); do Roboflow não vai o export bruto (~700 MB).
+examples/dataset/openalpr-br/
+examples/dataset/*/raw/
+examples/dataset/*/export.zip
+__pycache__/

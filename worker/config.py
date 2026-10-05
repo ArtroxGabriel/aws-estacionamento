@@ -37,6 +37,10 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 _DB_SCHEMES = frozenset({"postgres", "postgresql"})
 _REDIS_SCHEMES = frozenset({"redis", "rediss"})
 
+# OCR engines: Tesseract everywhere; Amazon Rekognition only on real AWS (the
+# local emulator does not implement it), always with Tesseract as fallback.
+_OCR_ENGINES = frozenset({"tesseract", "rekognition"})
+
 
 @dataclass(frozen=True)
 class Config:
@@ -56,6 +60,7 @@ class Config:
     redis_url: str
     s3_bucket_name: str
     dynamodb_table_name: str
+    ocr_engine: str = "tesseract"  # "tesseract" | "rekognition" (AWS only)
 
 
 class ConfigError(Exception):
@@ -172,6 +177,10 @@ def load_config(env: Mapping[str, str]) -> Config:
     if endpoint and not _has_scheme(endpoint, _HTTP_SCHEMES):
         invalid.append("AWS_ENDPOINT_URL")
 
+    ocr_engine = _clean(env.get("OCR_ENGINE")).lower() or "tesseract"
+    if ocr_engine not in _OCR_ENGINES:
+        invalid.append("OCR_ENGINE")
+
     if missing or invalid:
         raise ConfigError(missing=missing, invalid=invalid)
 
@@ -186,4 +195,5 @@ def load_config(env: Mapping[str, str]) -> Config:
         redis_url=redis_url,
         s3_bucket_name=s3_bucket_name,
         dynamodb_table_name=dynamodb_table_name,
+        ocr_engine=ocr_engine,
     )

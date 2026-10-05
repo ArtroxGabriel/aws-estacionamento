@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"regexp"
 	"strings"
@@ -20,7 +21,25 @@ var (
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrInvalidPhoto         = errors.New("photo is required")
 	ErrInvalidSessionStatus = errors.New("session is not in PARKED status")
+	ErrInvalidPlate         = errors.New("invalid license plate")
+	ErrSessionNotEditable   = errors.New("session plate can only be set while PARKED or FAILED")
 )
+
+// Plates of the Mercosul countries typed by the cashier, after removing
+// spaces/hyphens (docs/DECISOES.md, D8): Brazil ABC1D23 / ABC1234 (also
+// Uruguay), Argentina AB123CD / ABC123 and Paraguay ABCD123.
+var platePattern = regexp.MustCompile(
+	`^([A-Z]{3}[0-9][A-Z0-9][0-9]{2}|[A-Z]{2}[0-9]{3}[A-Z]{2}|[A-Z]{4}[0-9]{3}|[A-Z]{3}[0-9]{3})$`,
+)
+var nonAlnum = regexp.MustCompile(`[^A-Z0-9]`)
+
+func normalizePlate(raw string) (string, error) {
+	plate := nonAlnum.ReplaceAllString(strings.ToUpper(raw), "")
+	if !platePattern.MatchString(plate) {
+		return "", ErrInvalidPlate
+	}
+	return plate, nil
+}
 
 type ParkingService struct {
 	sessionRepo repository.SessionRepository
@@ -148,6 +167,97 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	})
 
 	return paidSession, nil
+}
+
+// UpdatePlate lets the cashier type the plate when OCR failed (FAILED ->
+// PARKED, which now takes a spot) or fix a misread one (PARKED stays PARKED).
+func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate string) (*model.Session, error) {
+	plate, err := normalizePlate(rawPlate)
+	if err != nil {
+		return nil, err
+	}
+	session, err := s.sessionRepo.GetByID(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve session: %w", err)
+	}
+	if session == nil {
+		return nil, ErrSessionNotFound
+	}
+	if session.Status != "PARKED" && session.Status != "FAILED" {
+		return nil, ErrSessionNotEditable
+	}
+
+	previousStatus := session.Status
+	var previousPlate any
+	if session.LicensePlate != nil {
+		previousPlate = *session.LicensePlate
+	}
+
+	updated, err := s.sessionRepo.UpdatePlate(ctx, sessionID, plate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update session: %w", err)
+	}
+	if updated == nil {
+		return nil, ErrSessionNotEditable
+	}
+
+	// A FAILED session never took a spot (the worker only decrements on a
+	// readable plate); now that it is PARKED it must.
+	if previousStatus == "FAILED" {
+		_, _ = s.spotsRepo.Decrement(ctx)
+	}
+
+	_ = s.audit.LogEvent(ctx, "PLATE_CORRECTION", sessionID, map[string]any{
+		"license_plate":   plate,
+		"previous_plate":  previousPlate,
+		"previous_status": previousStatus,
+		"status":          updated.Status,
+	})
+
+	return updated, nil
+}
+
+// DeleteSession removes a session and its photo (the D of the CRUD). A PARKED
+// session gives its spot back; the others never held one in the counter.
+func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*model.Session, error) {
+	session, err := s.sessionRepo.GetByID(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve session: %w", err)
+	}
+	if session == nil {
+		return nil, ErrSessionNotFound
+	}
+
+	deleted, err := s.sessionRepo.Delete(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete session: %w", err)
+	}
+	if !deleted {
+		return nil, ErrSessionNotFound
+	}
+
+	if session.Status == "PARKED" {
+		_, _ = s.spotsRepo.Increment(ctx)
+	}
+	// Best effort: an orphan photo costs cents, a failed delete must not
+	// resurrect the session.
+	if session.S3PhotoKey != "" {
+		if err := s.storage.Delete(ctx, session.S3PhotoKey); err != nil {
+			log.Printf("[WARN] session %s deleted but photo %s was not: %v", sessionID, session.S3PhotoKey, err)
+		}
+	}
+
+	var plate any
+	if session.LicensePlate != nil {
+		plate = *session.LicensePlate
+	}
+	_ = s.audit.LogEvent(ctx, "SESSION_DELETE", sessionID, map[string]any{
+		"status":        session.Status,
+		"license_plate": plate,
+		"s3_photo_key":  session.S3PhotoKey,
+	})
+
+	return session, nil
 }
 
 var unsafeNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]`)

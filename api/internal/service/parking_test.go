@@ -84,6 +84,30 @@ func (f *FakeSessionRepo) FindAll(ctx context.Context, status *string, plate *st
 	return res, nil
 }
 
+func (f *FakeSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error) {
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	s, ok := f.sessions[id]
+	if !ok || (s.Status != "PARKED" && s.Status != "FAILED") {
+		return nil, nil
+	}
+	s.LicensePlate = &plate
+	s.Status = "PARKED"
+	return s, nil
+}
+
+func (f *FakeSessionRepo) Delete(ctx context.Context, id string) (bool, error) {
+	if f.shouldErr {
+		return false, errors.New("db error")
+	}
+	if _, ok := f.sessions[id]; !ok {
+		return false, nil
+	}
+	delete(f.sessions, id)
+	return true, nil
+}
+
 func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	if f.shouldErr {
 		return 0, errors.New("db error")
@@ -140,6 +164,7 @@ func (f *FakeSpotsRepo) Decrement(ctx context.Context) (int64, error) {
 // FakeStorage implements repository.BlobStorage
 type FakeStorage struct {
 	uploaded  map[string][]byte
+	deleted   []string
 	shouldErr bool
 }
 
@@ -164,6 +189,15 @@ func (f *FakeStorage) Download(ctx context.Context, key string) (io.ReadCloser, 
 		return nil, "", io.EOF
 	}
 	return io.NopCloser(bytes.NewReader(data)), "image/jpeg", nil
+}
+
+func (f *FakeStorage) Delete(ctx context.Context, key string) error {
+	if f.shouldErr {
+		return errors.New("s3 delete error")
+	}
+	f.deleted = append(f.deleted, key)
+	delete(f.uploaded, key)
+	return nil
 }
 
 // FakePublisher implements repository.EventPublisher
@@ -516,3 +550,140 @@ func TestPayExit_InvalidStatus(t *testing.T) {
 	}
 }
 
+
+func hasEvent(audit *FakeAuditLogger, action string) bool {
+	for _, a := range audit.events {
+		if a == action {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUpdatePlate_FailedSessionBecomesParkedAndTakesASpot(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED", EnteredAt: time.Now()}
+	before := spots.spots
+
+	got, err := svc.UpdatePlate(context.Background(), "s1", " abc-1d23 ")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if got.Status != "PARKED" || got.LicensePlate == nil || *got.LicensePlate != "ABC1D23" {
+		t.Fatalf("expected PARKED with ABC1D23, got %s %v", got.Status, got.LicensePlate)
+	}
+	// The FAILED session never took a spot; now that it is PARKED it does.
+	if spots.spots != before-1 {
+		t.Fatalf("expected spots %d, got %d", before-1, spots.spots)
+	}
+	if !hasEvent(audit, "PLATE_CORRECTION") {
+		t.Fatal("expected PLATE_CORRECTION audit event")
+	}
+}
+
+func TestUpdatePlate_ParkedSessionKeepsTheCounter(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	old := "ABC1234"
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "PARKED", LicensePlate: &old}
+	before := spots.spots
+
+	got, err := svc.UpdatePlate(context.Background(), "s1", "LSN4I49")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if *got.LicensePlate != "LSN4I49" || spots.spots != before {
+		t.Fatalf("expected LSN4I49 and spots %d, got %s and %d", before, *got.LicensePlate, spots.spots)
+	}
+}
+
+func TestUpdatePlate_RejectsInvalidPlate(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
+
+	for _, plate := range []string{"", "AB12345", "1234567", "ABC12345", "AB1234", "ABCDE12"} {
+		if _, err := svc.UpdatePlate(context.Background(), "s1", plate); !errors.Is(err, service.ErrInvalidPlate) {
+			t.Fatalf("plate %q: expected ErrInvalidPlate, got %v", plate, err)
+		}
+	}
+}
+
+func TestUpdatePlate_OnlyParkedOrFailed(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	repo.sessions["proc"] = &model.Session{ID: "proc", Status: "PROCESSING"}
+	repo.sessions["paid"] = &model.Session{ID: "paid", Status: "PAID"}
+
+	for _, id := range []string{"proc", "paid"} {
+		if _, err := svc.UpdatePlate(context.Background(), id, "ABC1D23"); !errors.Is(err, service.ErrSessionNotEditable) {
+			t.Fatalf("%s: expected ErrSessionNotEditable, got %v", id, err)
+		}
+	}
+	if _, err := svc.UpdatePlate(context.Background(), "missing", "ABC1D23"); !errors.Is(err, service.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestDeleteSession_ParkedFreesTheSpotAndRemovesThePhoto(t *testing.T) {
+	svc, repo, spots, storage, _, audit := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "PARKED", S3PhotoKey: "photos/s1_car.jpg"}
+	before := spots.spots
+
+	deleted, err := svc.DeleteSession(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if deleted.ID != "s1" {
+		t.Fatalf("expected deleted session s1, got %s", deleted.ID)
+	}
+	if _, ok := repo.sessions["s1"]; ok {
+		t.Fatal("expected session removed from the repository")
+	}
+	if spots.spots != before+1 {
+		t.Fatalf("expected spots %d, got %d", before+1, spots.spots)
+	}
+	if len(storage.deleted) != 1 || storage.deleted[0] != "photos/s1_car.jpg" {
+		t.Fatalf("expected photo deleted, got %v", storage.deleted)
+	}
+	if !hasEvent(audit, "SESSION_DELETE") {
+		t.Fatal("expected SESSION_DELETE audit event")
+	}
+}
+
+func TestDeleteSession_NonParkedKeepsTheCounter(t *testing.T) {
+	for _, status := range []string{"PROCESSING", "FAILED", "PAID"} {
+		svc, repo, spots, _, _, _ := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: status}
+		before := spots.spots
+
+		if _, err := svc.DeleteSession(context.Background(), "s1"); err != nil {
+			t.Fatalf("%s: expected success, got %v", status, err)
+		}
+		if spots.spots != before {
+			t.Fatalf("%s: expected spots unchanged (%d), got %d", status, before, spots.spots)
+		}
+	}
+}
+
+func TestDeleteSession_NotFound(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(false, false)
+
+	if _, err := svc.DeleteSession(context.Background(), "missing"); !errors.Is(err, service.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestUpdatePlate_AcceptsMercosulCountries(t *testing.T) {
+	for plate, want := range map[string]string{
+		"abc-1d23": "ABC1D23", // Brasil (Mercosul)
+		"ABC 1234": "ABC1234", // Brasil (antiga) / Uruguai
+		"AA 562 AN": "AA562AN", // Argentina (Mercosul)
+		"MWV 724":   "MWV724",  // Argentina (antiga)
+		"ABCD 123":  "ABCD123", // Paraguai
+	} {
+		svc, repo, _, _, _, _ := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
+		got, err := svc.UpdatePlate(context.Background(), "s1", plate)
+		if err != nil || *got.LicensePlate != want {
+			t.Fatalf("%q: expected %s, got %v, %v", plate, want, got, err)
+		}
+	}
+}

@@ -1,0 +1,40 @@
+name: OpenTofu na AWS
+description: Assume a role de deploy via OIDC, instala o OpenTofu e inicializa infra/aws com o state remoto.
+
+inputs:
+  role-arn:
+    description: ARN da role criada por infra/bootstrap
+    required: true
+  aws-region:
+    description: Região AWS
+    default: us-east-1
+
+outputs:
+  account-id:
+    description: ID da conta AWS
+    value: ${{ steps.init.outputs.account-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Credenciais AWS (OIDC)
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: gha-${{ github.run_id }}
+
+    - name: OpenTofu
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+      with:
+        tofu_version: "~1.13.0"
+        tofu_wrapper: false
+
+    - name: tofu init
+      id: init
+      shell: bash
+      working-directory: infra/aws
+      run: |
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        echo "account-id=$ACCOUNT" >> "$GITHUB_OUTPUT"
+        tofu init -input=false -backend-config="bucket=estacionamento-tofu-state-$ACCOUNT"

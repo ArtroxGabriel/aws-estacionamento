@@ -67,6 +67,7 @@ _MIN_TILT_DEGREES = 5.0
 
 # Margin around the character row, as a fraction of the character height.
 _LINE_MARGIN = 0.15
+_LINE_X_MARGIN = 0.5
 
 # A plate is Mercosul when this share of the zone right above its characters
 # (this many character heights tall) is blue: the band sits there, while an
@@ -81,6 +82,11 @@ class PlateLine:
 
     image: Image.Image
     mercosul: bool  # the plate area above the characters is Mercosul blue
+    # Same row with half a character of slack on each side: a character that
+    # touches the plate frame is dropped from the row and the tight crop cuts
+    # it off ("PJC4903" -> "PJC490"). Read after the tight crop; the
+    # normalizer's vote keeps the tight read on a tie.
+    wide: Image.Image | None = None
 
 
 def find_mercosul_plates(image: Image.Image) -> list[Image.Image]:
@@ -178,10 +184,10 @@ def find_plate_lines(image: Image.Image) -> list[PlateLine]:
         x0, y0, x1, y1, count = row
         x0, y0, x1, y1 = left + x0, top + y0, left + x1, top + y1
         margin = round(_LINE_MARGIN * (y1 - y0))
-        line = upright[
-            max(0, y0 - margin) : min(height, y1 + margin),
-            max(0, x0 - margin) : min(width, x1 + margin),
-        ]
+        rows = slice(max(0, y0 - margin), min(height, y1 + margin))
+        line = upright[rows, max(0, x0 - margin) : min(width, x1 + margin)]
+        x_margin = round(_LINE_X_MARGIN * (y1 - y0))
+        wide = upright[rows, max(0, x0 - x_margin) : min(width, x1 + x_margin)]
         # Measured above the character row, not inside the contour: the
         # contour found may be the white area below the band, not the plate.
         zone_top = max(0, round(y0 - _BAND_ZONE * (y1 - y0)))
@@ -193,12 +199,16 @@ def find_plate_lines(image: Image.Image) -> list[PlateLine]:
         key = (round((x0 + x1) / 2 / unit), round((y0 + y1) / 2 / unit))
         area = plate_w * plate_h
         if key not in found or (count, area) > found[key][:2]:
-            found[key] = (count, area, mercosul, line)
+            found[key] = (count, area, mercosul, line, wide)
 
     ranked = sorted(found.values(), key=lambda item: (item[0], item[1]), reverse=True)
     return [
-        PlateLine(Image.fromarray(np.ascontiguousarray(line)), mercosul)
-        for _, _, mercosul, line in ranked[:_MAX_PLATES]
+        PlateLine(
+            Image.fromarray(np.ascontiguousarray(line)),
+            mercosul,
+            Image.fromarray(np.ascontiguousarray(wide)),
+        )
+        for _, _, mercosul, line, wide in ranked[:_MAX_PLATES]
     ]
 
 

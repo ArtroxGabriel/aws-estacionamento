@@ -38,6 +38,16 @@ func (r *RedisSpotsRepo) Increment(ctx context.Context) (int64, error) {
 	return incrIfExists.Run(ctx, r.client, []string{"spots:available"}).Int64()
 }
 
+// decrIfPositive never creates the key (same reason as incrIfExists) and never
+// goes below zero, like the worker's clamped DECR.
+var decrIfPositive = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if not v then return nil end
+if tonumber(v) <= 0 then return 0 end
+return redis.call('DECR', KEYS[1])
+`)
+
+// Decrement returns redis.Nil when the key is absent (nothing is written).
 func (r *RedisSpotsRepo) Decrement(ctx context.Context) (int64, error) {
-	return r.client.Decr(ctx, "spots:available").Result()
+	return decrIfPositive.Run(ctx, r.client, []string{"spots:available"}).Int64()
 }

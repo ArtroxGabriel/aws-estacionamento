@@ -122,13 +122,34 @@ def test_terminal_statuses_and_missing_session_are_deleted_without_effects():
     assert spots.decrements == 0
 
 
-def test_unreadable_plate_retains_and_keeps_processing():
+def test_unreadable_plate_fails_the_session_at_once():
+    """OCR is deterministic: retrying the same photo only delays the operator.
+    The session becomes FAILED on the first delivery (the cashier then types
+    the plate) and the message is deleted, without touching the counter."""
     poller, sessions, spots, audit, sqs = make_poller(plate=None)
 
-    assert poller._handle(make_message()) is Outcome.RETAIN
-    assert sessions.rows[SESSION_ID].status == "PROCESSING"
+    assert poller._handle(make_message(receive_count=1)) is Outcome.DELETE
+    assert sessions.rows[SESSION_ID].status == "FAILED"
     assert sessions.rows[SESSION_ID].license_plate is None
     assert spots.decrements == 0
+    assert len(audit.failed_entries) == 1
+    assert audit.failed_entries[0][0] == SESSION_ID
+    assert "unreadable" in audit.failed_entries[0][1]
+    assert audit.poison_entries == []
+
+
+def test_unreadable_plate_retains_when_rds_cannot_mark_failed():
+    class BrokenMarkFailed(FakeSessionRepository):
+        def mark_failed(self, session_id: str) -> bool:
+            raise RuntimeError("RDS unreachable")
+
+    poller, sessions, _, audit, _ = make_poller(
+        sessions=BrokenMarkFailed({SESSION_ID: processing_row()}), plate=None
+    )
+
+    assert poller._handle(make_message(receive_count=1)) is Outcome.RETAIN
+    assert sessions.rows[SESSION_ID].status == "PROCESSING"
+    assert audit.failed_entries == []
 
 
 def test_missing_counter_key_still_parks_without_touching_the_counter():

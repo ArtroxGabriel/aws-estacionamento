@@ -72,6 +72,13 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente, desde a 
      * Grava log de auditoria no **DynamoDB** com ação `EXIT_PAYMENT`.
   4. **Healthcheck (`GET /health`):**
      * Retorna `200 OK` (`{"status":"UP"}`) para o Target Group do Load Balancer monitorar a saúde da instância.
+  5. **Placa digitada no caixa (`PATCH /sessions/{id}`):**
+     * Quando o OCR não lê a placa (sessão `FAILED`) ou lê errado (`PARKED`), o operador digita a placa (qualquer formato dos 4 países do Mercosul; ver `docs/DECISOES.md`, D8).
+     * `FAILED` → `PARKED` com `DECR spots:available`, porque a sessão `FAILED` nunca ocupou vaga no contador. Em `PARKED`, só troca a placa.
+     * Grava auditoria `PLATE_CORRECTION` com a placa nova e a anterior.
+  6. **Exclusão (`DELETE /sessions/{id}`):**
+     * Remove a sessão do **RDS** e a foto do **S3**; se estava `PARKED`, `INCR spots:available`.
+     * Grava auditoria `SESSION_DELETE`. Completa o CRUD exigido pela especificação.
 
 ### 2.3. Worker de Visão Computacional (`worker/` — Python + OCR)
 * **Propósito no Mundo Real:** É o agente autônomo inteligente em segundo plano que processa as fotos dos carros para identificar quem entrou.
@@ -82,12 +89,15 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente, desde a 
 * **Responsabilidades:**
   1. **Consumo Desacoplado:** Faz polling contínuo (Long Polling 20s) na fila **Amazon SQS** (`ocr-processamento-fila`).
   2. **Tratamento de Imagem:** Baixa a foto original do **Amazon S3**, aplica pré-processamento (rescaling, escala de cinza, limiarização via Pillow/OpenCV) para evidenciar a área da placa.
-  3. **Extração de Placa (OCR):** Roda o Tesseract OCR na imagem tratada e normaliza os caracteres para padrão Mercosul (`ABC1D23`) ou antigo (`ABC-1234`).
+  3. **Extração de Placa (OCR):** Na AWS, usa o **Amazon Rekognition** (`DetectText`), escolhendo a placa mais alta na foto (o carro em primeiro plano); sem placa, tenta de novo com a foto numa moldura (close da placa). Localmente, ou se o Rekognition falhar ou não achar placa, roda o Tesseract na imagem tratada. Em ambos os casos normaliza para uma placa dos 4 países do Mercosul: Brasil `ABC1D23`/`ABC-1234` (também Uruguai), Argentina `AB123CD`/`ABC123` e Paraguai `ABCD123`. As regras de cada formato estão em `docs/DECISOES.md` (D8). Medido em 114 fotos reais: Tesseract 52%, Rekognition 96%.
   4. **Confirmação da Vaga:**
      * Atualiza a sessão no **RDS** (`UPDATE sessions SET license_plate = :plate, status = 'PARKED' WHERE id = :id`).
      * Decrementa atomicamente as vagas no **Redis** (`DECR spots:available`).
      * Grava log de auditoria no **DynamoDB** com ação `OCR_PROCESSING` e a placa identificada.
      * Remove a mensagem processada do **SQS** (`DeleteMessage`).
+  5. **Placa Ilegível (definitiva na 1ª entrega):**
+     * O OCR é determinístico: reprocessar a mesma foto não muda o resultado. A sessão vai para `FAILED`, grava `OCR_FAILED` com o motivo e a mensagem é removida, sem alterar o contador.
+     * O operador resolve no caixa (`PATCH /sessions/{id}`). Erros de infraestrutura (S3, RDS, Redis, DynamoDB) e de OCR (timeout) continuam com novas tentativas e DLQ.
 
 ### 2.4. Infraestrutura, Custos & Elasticidade (`infra/` — OpenTofu)
 * **Propósito no Mundo Real:** Provisiona toda a infraestrutura em nuvem de forma reproduzível e resiliente, garantindo que o sistema suporte picos de entrada no estacionamento dentro do budget de estudante ($50).
@@ -124,8 +134,8 @@ Qualquer PR que inventar nomes diferentes deve ser ajustada para seguir estes pa
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `VARCHAR(64)` (PK) | Hash hexadecimal de 32 caracteres da sessão |
-| `license_plate`| `VARCHAR(16)` (NULL) | Placa identificada pelo OCR (nula na entrada) |
-| `status` | `VARCHAR(20)` | `'PROCESSING'` -> `'PARKED'` -> `'PAID'` |
+| `license_plate`| `VARCHAR(16)` (NULL) | Placa identificada pelo OCR ou digitada no caixa (nula na entrada); 6 ou 7 caracteres, formatos do Mercosul |
+| `status` | `VARCHAR(20)` | `'PROCESSING'` -> `'PARKED'` -> `'PAID'`, ou `'PROCESSING'` -> `'FAILED'` (placa ilegível / falha ao publicar na fila) -> `'PARKED'` (placa digitada) ou `'PAID'` |
 | `s3_photo_key` | `TEXT` | Caminho no S3: `photos/{session_id}_{filename}` |
 | `entered_at` | `TIMESTAMP WITH TZ` | Horário de passagem pela cancela |
 | `exited_at` | `TIMESTAMP WITH TZ` (NULL) | Horário de pagamento e liberação da cancela |
@@ -135,6 +145,8 @@ Qualquer PR que inventar nomes diferentes deve ser ajustada para seguir estes pa
 * **Chave:** `spots:available`
 * **Entrada (Worker após OCR):** `DECR spots:available`
 * **Saída (API após pagar):** `INCR spots:available`
+* **Placa digitada em sessão `FAILED` (API):** `DECR spots:available`; **exclusão de sessão `PARKED` (API):** `INCR spots:available`
+* **Nunca criar a chave nem ir abaixo de 0:** API e Worker só alteram o contador se a chave existir (Lua); sem ela, a regra anti-overbooking reconstrói o valor a partir do RDS.
 * **Consulta (Totem/Web):** `GET spots:available`
 * **Regra Anti-Overbooking:** Se `GET spots:available` falhar ou a chave não existir, a API consulta o RDS (`totalSpots - count(sessions ativas)`), responde a contagem real e reidrata o Redis com `SET spots:available`. É terminantemente proibido assumir 50 cegamente em caso de falha de cache.
 
@@ -144,6 +156,11 @@ Qualquer PR que inventar nomes diferentes deve ser ajustada para seguir estes pa
   * `ENTRY`: Registrado pela API ao receber o carro na cancela.
   * `OCR_PROCESSING`: Registrado pelo Worker Python ao ler a placa.
   * `EXIT_PAYMENT`: Registrado pela API ao receber o pagamento.
+  * `OCR_FAILED`: Registrado pelo Worker quando a placa é ilegível (sessão vai para `FAILED` na 1ª entrega, sem novas tentativas).
+  * `POISON_MESSAGE`: Registrado pelo Worker quando uma mensagem falha na última entrega (vai para a DLQ).
+  * `ENTRY_FAILED`: Registrado pela API quando não consegue publicar a entrada no SQS.
+  * `PLATE_CORRECTION`: Registrado pela API quando o caixa digita ou corrige a placa.
+  * `SESSION_DELETE`: Registrado pela API quando uma sessão é excluída.
 
 ### 3.4. Mensageria SQS Direta
 * **Fila SQS:** `ocr-processamento-fila`

@@ -127,6 +127,45 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("UpdatePlate_FailedBecomesParked", func(t *testing.T) {
+		session := &model.Session{
+			ID:         "test-pg-failed",
+			Status:     "FAILED",
+			S3PhotoKey: "photos/failed.jpg",
+			EnteredAt:  time.Now().UTC(),
+		}
+		if err := repo.Create(ctx, session); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		updated, err := repo.UpdatePlate(ctx, "test-pg-failed", "ABC1D23")
+		if err != nil {
+			t.Fatalf("failed to update plate: %v", err)
+		}
+		if updated == nil || updated.Status != "PARKED" || *updated.LicensePlate != "ABC1D23" {
+			t.Fatalf("expected PARKED with ABC1D23, got %+v", updated)
+		}
+	})
+
+	t.Run("UpdatePlate_PaidIsNotEditable", func(t *testing.T) {
+		updated, err := repo.UpdatePlate(ctx, "test-pg-session-1", "ABC1D23")
+		if err != nil || updated != nil {
+			t.Fatalf("expected nil for a PAID session, got %+v, %v", updated, err)
+		}
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		deleted, err := repo.Delete(ctx, "test-pg-failed")
+		if err != nil || !deleted {
+			t.Fatalf("expected deleted, got %v, %v", deleted, err)
+		}
+		if fetched, _ := repo.GetByID(ctx, "test-pg-failed"); fetched != nil {
+			t.Fatalf("expected session gone, got %+v", fetched)
+		}
+		if deleted, _ := repo.Delete(ctx, "test-pg-failed"); deleted {
+			t.Fatal("expected second delete to report false")
+		}
+	})
+
 	t.Run("GetByID_NotFound", func(t *testing.T) {
 		fetched, err := repo.GetByID(ctx, "non-existent-id")
 		if err != nil {
@@ -201,6 +240,28 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 		}
 		if spots != 50 {
 			t.Fatalf("expected 50 spots after decrement, got %d", spots)
+		}
+	})
+
+	t.Run("Decrement_ClampsAtZero", func(t *testing.T) {
+		if err := repo.SetAvailable(ctx, 0); err != nil {
+			t.Fatalf("failed to set spots: %v", err)
+		}
+		spots, err := repo.Decrement(ctx)
+		if err != nil || spots != 0 {
+			t.Fatalf("expected 0, got %d, %v", spots, err)
+		}
+	})
+
+	t.Run("Decrement_MissingKeyIsNotCreated", func(t *testing.T) {
+		if err := rdb.Del(ctx, "spots:available").Err(); err != nil {
+			t.Fatalf("failed to delete key: %v", err)
+		}
+		if _, err := repo.Decrement(ctx); !errors.Is(err, redis.Nil) {
+			t.Fatalf("expected redis.Nil, got %v", err)
+		}
+		if n, _ := rdb.Exists(ctx, "spots:available").Result(); n != 0 {
+			t.Fatalf("expected key to stay absent, got exists=%d", n)
 		}
 	})
 

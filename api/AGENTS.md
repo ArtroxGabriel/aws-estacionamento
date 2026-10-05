@@ -6,6 +6,10 @@
   - `POST /entries`: Recebe foto, salva no S3, cria sessão no RDS com status `PROCESSING`, grava auditoria no DynamoDB e publica na fila SQS.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
   - `POST /exits/{id}/pay`: Registra saída com tarifa fixa, atualiza status para `PAID` no RDS, incrementa vagas no Redis e grava auditoria no DynamoDB.
+  - `GET /sessions?status=PARKED|FAILED|PROCESSING|PAID|ALL&plate=...`: Lista sessões (array cru, `null` se vazio).
+  - `PATCH /sessions/{id}`: Placa digitada/corrigida pelo caixa (`FAILED` → `PARKED`).
+  - `DELETE /sessions/{id}`: Exclui a sessão e a foto no S3.
+  - `GET /audit`: 50 eventos mais recentes do DynamoDB.
   - `GET /health`: Healthcheck simples da aplicação (`{"status":"UP"}`).
 
 ## Tech Stack
@@ -61,8 +65,16 @@ api/
 - **Status da Sessão**: `PROCESSING` (na entrada) -> `PARKED` (definido pelo worker após OCR) -> `PAID` (após cobrança na saída).
 - **Logs no DynamoDB**: Criar registros com chave única contendo timestamp, ação (`ENTRY`, `EXIT_PAYMENT`) e payload resumido.
 - **Redis & Anti-Overbooking**: Chave `spots:available` lida em alta frequência. Se o Redis falhar ou a chave sumir (reboot no meio do dia), **a API nunca assume o default 50**: consulta o banco relacional (`totalSpots - count(ativas)`), responde a contagem precisa e reidrata o Redis com `SET spots:available`.
+- **AWS real x Floci**: `AWS_ENDPOINT_URL` e as chaves `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` não têm default. Sem elas o SDK usa os endpoints reais e a cadeia padrão de credenciais (instance profile na EC2); localmente o `.env`/`task dev:api` apontam para o Floci. `AWS_SESSION_TOKEN` é aceito para credenciais temporárias. Path-style no S3 só com endpoint customizado.
+- **RDS exige SSL**: na AWS use `DATABASE_URL=...?sslmode=require` (o PostgreSQL 16 do RDS recusa `sslmode=disable`).
+- **Migrations no boot**: se o Postgres ainda não responder, a API sobe mesmo assim e tenta as migrations a cada 5 s em background (advisory lock do `golang-migrate` torna seguro com várias instâncias do ASG).
+- **Placa digitada no caixa (`PATCH /sessions/{id}`, body `{"license_plate": "ABC1D23"}`)**: aceita os formatos dos 4 países do Mercosul: `ABC1D23`, `ABC1234`, `AB123CD`, `ABC123`, `ABCD123` (hífen/espaços são removidos; 400 se inválida; `docs/DECISOES.md` D8). Só para `PARKED` (corrige leitura errada) ou `FAILED` (OCR não leu → vira `PARKED` e faz `DECR`, porque a sessão `FAILED` nunca ocupou vaga no contador). 409 em outros status. Auditoria `PLATE_CORRECTION` com `license_plate`, `previous_plate`, `previous_status`, `status`.
+- **Exclusão (`DELETE /sessions/{id}`)**: remove a sessão do RDS e a foto do S3 (best effort, com log se falhar), faz `INCR` só se estava `PARKED` e audita `SESSION_DELETE` (`status`, `license_plate`, `s3_photo_key`). Devolve a sessão excluída (200) ou 404.
+- **Contador nunca é criado nem fica negativo pela API**: `Increment`/`Decrement` rodam em Lua só se a chave existir; o `Decrement` para em 0.
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-10-03: `PATCH /sessions/{id}` (placa digitada/corrigida no caixa) e `DELETE /sessions/{id}` (CRUD completo, com remoção da foto no S3); `Decrement` seguro em Lua; CORS com PATCH/DELETE.
+- 2026-10-03: Config sem defaults do Floci para endpoint/credenciais (instance profile na AWS), `AWS_SESSION_TOKEN`, retry das migrations e build do Dockerfile no `$BUILDPLATFORM` (cross-compile para `linux/amd64`).
 - 2026-09-21: Reestruturação da API no padrão Go (`cmd/` e `internal/`), migrações via `golang-migrate`, TDD com 100% dos testes passando e endpoints padronizados em inglês.
 - 2026-09-15: Criação inicial do AGENTS.md da API.

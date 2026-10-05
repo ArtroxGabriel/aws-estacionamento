@@ -151,3 +151,33 @@ describe("describeEvent", () => {
     expect(describeEvent(payment, { plate: "ABC1D23" })).toMatch(/^Pago · R\$\s10,00$/);
   });
 });
+
+describe("describeEvent — placa manual e exclusão", () => {
+  const base = { id: "s1#1", entity_id: "s1", timestamp: "2026-10-03T10:00:00Z" };
+
+  it("PLATE_CORRECTION mostra a placa digitada e a anterior", () => {
+    const typed: AuditEvent = { ...base, action: "PLATE_CORRECTION", details: { license_plate: "ABC1D23" } };
+    const fixed: AuditEvent = {
+      ...base,
+      action: "PLATE_CORRECTION",
+      details: { license_plate: "LSN4I49", previous_plate: "LSN4149" },
+    };
+    expect(describeEvent(typed, undefined)).toBe("ABC1D23 (digitada no caixa)");
+    expect(describeEvent(fixed, undefined)).toBe("LSN4I49 (antes: LSN4149)");
+  });
+
+  it("SESSION_DELETE mostra o status que a sessão tinha", () => {
+    const event: AuditEvent = { ...base, action: "SESSION_DELETE", details: { status: "PARKED" } };
+    expect(describeEvent(event, undefined)).toMatch(/^Registro excluído · estava /);
+  });
+
+  it("PLATE_CORRECTION deixa a sessão como estacionada com a placa nova", () => {
+    const events: AuditEvent[] = [
+      { ...base, id: "s1#2", action: "PLATE_CORRECTION", details: { license_plate: "ABC1D23", status: "PARKED" } },
+      { ...base, id: "s1#1", action: "OCR_FAILED", details: { reason: "unreadable plate: no_match" } },
+    ];
+    const info = sessionInfo(events, []).get("s1");
+    expect(info?.plate).toBe("ABC1D23");
+    expect(info?.status).toBe("PARKED");
+  });
+});
