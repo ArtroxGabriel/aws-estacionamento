@@ -1,217 +1,186 @@
-# GOAL.md — Visão Geral do Sistema & Farol dos Módulos
+# GOAL.md — Visão Geral do Sistema & Farol dos Módulos (Trabalho Prático 2)
 
-> **Projeto:** Sistema Inteligente de Gestão de Estacionamento em Nuvem  
+> **Projeto:** Sistema Inteligente de Gestão de Estacionamento — Implantação com Docker, Docker Compose e Alternativas Open Source  
 >
 > **Disciplina:** Desenvolvimento de Software para Nuvem (UFC) — Profs. Dr. Paulo A. L. Rego e Dr. Fernando Antonio Mota Trinta  
 >
-> **Objetivo Deste Arquivo:** Servir como **fonte da verdade arquitetural** e **farol de revisão** para avaliar e alinhar as PRs de cada módulo desenvolvidas pela equipe.
+> **Objetivo Deste Arquivo:** Servir como **fonte da verdade arquitetural** e **farol de revisão** para o Trabalho Prático 2, consolidando a migração dos serviços da AWS para soluções open-source (RustFS, RabbitMQ, PostgreSQL gerenciado), o fluxo físico com duas cancelas (Entrada e Saída), o terminal de pagamento independente e a orquestração via Docker Compose e Kubernetes.
 
 ---
 
-## 1. Visão Geral do Sistema (A Jornada do Estacionamento)
+## 1. Visão Geral do Sistema (A Jornada do Estacionamento com Duas Cancelas)
 
-O sistema automatiza o ciclo completo de um estacionamento inteligente, desde a chegada do veículo na cancela até a sua saída e pagamento, integrando **6 serviços centrais da AWS** com desacoplamento assíncrono e elasticidade horizontal.
+O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo real. O fluxo físico divide-se claramente em:
+1. **Cancela de Entrada**: Identificação fotográfica, emissão de ticket provisório e abertura da cancela de entrada.
+2. **Processamento em Background (Worker OCR)**: Reconhecimento assíncrono da placa e reserva de vaga.
+3. **Terminal / Totem de Pagamento (Caixa)**: Pagamento do ticket antes de ir ao carro. O pagamento **habilita** o veículo a sair, mas **não libera a vaga de imediato** nem abre cancela alguma.
+4. **Cancela de Saída**: Leitura automática da placa na cancela de saída. Se a placa tiver pagamento confirmado, a cancela abre imediatamente. Se a câmera falhar ou a placa estiver ilegível/suja, o motorista insere o ID do ticket em papel para validação. Somente na abertura da cancela de saída a vaga é restituída e a sessão é encerrada (`EXITED`).
 
 ```text
-[Cancela / Totem] ──(1. Foto do Carro)──> [API Go]
-                                            ├── Salva foto no S3
-                                            ├── Cria sessão 'PROCESSING' no RDS
-                                            ├── Envia evento direto na Fila SQS
-                                            ├── Grava auditoria no DynamoDB
-                                            └── Retorna ticket provisório (Cancela abre)
+========================================================================================================
+1. ENTRADA (Cancela de Entrada)
+========================================================================================================
+[Cancela / Totem Entrada] ──(1. Foto do Carro)──> [API Go]
+                                                    ├── Salva foto no RustFS (S3-compatible)
+                                                    ├── Cria sessão 'PROCESSING' no PostgreSQL
+                                                    ├── Publica evento na fila RabbitMQ
+                                                    ├── Grava auditoria no DynamoDB (ação: 'ENTRY')
+                                                    └── Retorna ticket impresso (ID) e ABRE A CANCELA
 
-[Worker OCR Python] <──(2. Consome SQS)─────┘
-        ├── Baixa foto do S3 e redimensiona
-        ├── Extrai placa via Tesseract OCR
-        ├── Atualiza sessão no RDS ('PARKED' + Placa)
-        ├── Decrementa vagas no Redis (ElastiCache)
-        └── Grava auditoria no DynamoDB
+[Worker OCR Python] <──(2. Consome RabbitMQ)────────┘
+        ├── Baixa foto do RustFS e redimensiona
+        ├── Extrai placa via Tesseract OCR (Mercosul 4 países)
+        ├── Atualiza sessão no PostgreSQL ('PARKED' + Placa)
+        ├── Decrementa vagas no Redis ('spots:available')
+        └── Grava auditoria no DynamoDB (ação: 'OCR_PROCESSING')
 
-[Painel / Totem Web] ──(3. Consulta Vagas)──> [Redis ElastiCache] (Leitura ultrarrápida)
+========================================================================================================
+2. CONSULTA EM TEMPO REAL & CAIXA DE PAGAMENTO
+========================================================================================================
+[Painel / Totens] ────────(Consulta Vagas)──────> [Redis] (Leitura instantânea em memória < 2ms)
 
-[Checkout / Saída] ──(4. Pagar / Liberar)──> [API Go]
-                                            ├── Atualiza sessão no RDS ('PAID')
-                                            ├── Incrementa vagas no Redis
-                                            └── Grava auditoria no DynamoDB
+[Caixa / Totem Pagamento] ──(Paga Ticket/Placa)──> [API Go]
+                                                    ├── Valida valor no PostgreSQL
+                                                    ├── Registra pagamento: status 'PAID' (vaga segue retida!)
+                                                    └── Grava auditoria no DynamoDB (ação: 'PAYMENT_RECEIVED')
+
+========================================================================================================
+3. SAÍDA (Cancela de Saída com Dupla Validação)
+========================================================================================================
+[Cancela / Totem Saída] ──(Tentativa 1: Foto/Placa)──> [API Go]
+      │                                                  ├── Busca sessão ativa pela placa
+      │                                                  ├── Se status == 'PAID':
+      │                                                  │     ├── Marca status = 'EXITED' (exited_at = NOW)
+      │                                                  │     ├── Incrementa vagas no Redis (+1)
+      │                                                  │     ├── Grava auditoria ('EXIT_BARRIER_OPENED')
+      │                                                  │     └── ABRE A CANCELA DE SAÍDA!
+      │
+      └──(Tentativa 2: Falha na placa? Digita ID)────> [API Go]
+                                                         ├── Valida se ID do ticket consta como 'PAID'
+                                                         ├── Se sim: 'EXITED', incrementa Redis e ABRE CANCELA!
+                                                         └── Se não pago: cancela bloqueada + alerta ao motorista
 ```
 
 ---
 
 ## 2. Metas e Papéis de Cada Módulo
 
-### 2.1. Cancela & Frontend (`web/` — React + Vite + TypeScript)
-* **Propósito no Mundo Real:** É a interface do operador e o totem físico da cancela.
-* **Responsabilidades:**
-  1. **Totem de Entrada:** Simula a câmera da cancela. Permite capturar/submeter a foto frontal do veículo e enviar para a API via `POST /entries`. Exibe imediatamente o ticket preliminar gerado.
-  2. **Display de Vagas em Tempo Real:** Consulta `GET /spots/available` em alta frequência para exibir aos motoristas se o estacionamento está lotado ou quantas vagas restam (sem sobrecarregar o banco relacional).
-  3. **Terminal de Saída / Caixa:** Permite ao operador localizar a sessão (por ID ou placa) e processar o pagamento via `POST /exits/{id}/pay`, liberando a cancela de saída.
-  4. **Painel de Auditoria (Opcional/Bônus):** Exibição do histórico de eventos gravados.
+### 2.1. Frontend Web & Simulação dos Totens (`web/` — React + Vite + TypeScript)
+* **Totem da Cancela de Entrada (`/cancela-entrada`):** Simula a câmera de entrada. Envia foto via `POST /entries`, exibe a impressão do ticket preliminar (com ID único, QR code e horário) e sinaliza a abertura da cancela de entrada.
+* **Painel de Vagas em Tempo Real (`/`):** Exibe contagem de vagas em alta frequência via `GET /spots/available` sem onerar o banco relacional.
+* **Caixa / Terminal de Autoatendimento (`/pagamento`):** Permite buscar sessões por placa ou ID do ticket. Processa o pagamento via `POST /sessions/{id}/pay`, alterando o status para `PAID`. Informa claramente que o cliente agora possui permissão para se dirigir à cancela de saída.
+* **Totem da Cancela de Saída (`/cancela-saida`):** Simula o dispositivo na barreira de saída:
+  * **Modo Câmera (Placa):** Envia leitura/foto para `POST /barrier/exit/plate`. Se reconhecido e pago, aciona a animação de abertura da cancela.
+  * **Modo Contingência (Ticket em Papel):** Se a placa não for identificada ou estiver ilegível, motorista insere o ID do ticket em `POST /barrier/exit/ticket` para destravar a cancela.
+* **Painel de Auditoria (`/auditoria`):** Exibe o feed de logs imutáveis do DynamoDB.
 
 ### 2.2. API Backend (`api/` — Go + Uber Fx)
-* **Propósito no Mundo Real:** É o orquestrador transacional de alta performance e baixo overhead que recebe os eventos da cancela e do caixa.
-* **Diretriz de Segurança (KISS):** 
-  * Por ser um projeto acadêmico focado em computação em nuvem, **não há camadas de autenticação/autorização** (sem API Key, JWT ou validação de origem). 
-  * Os endpoints são públicos e abertos. PRs que tentem introduzir autenticação complexa devem ser recusadas (YAGNI).
-* **Responsabilidades:**
-  1. **Ingestão na Cancela (`POST /entries`):**
-     * Recebe a imagem binária da foto da frente do veículo.
-     * Faz upload no **Amazon S3** (`photos/{session_id}_{filename}`).
-     * Cria registro transacional preliminar no **Amazon RDS** (PostgreSQL) com `status = 'PROCESSING'` e placa nula.
-     * Publica mensagem diretamente na fila **Amazon SQS** (`ocr-processamento-fila`).
-     * Grava log de auditoria no **Amazon DynamoDB** com ação `ENTRY`.
-     * Retorna `201 Created` com o ticket preliminar para liberar a cancela sem esperar pelo OCR.
-  2. **Consulta Rápida de Vagas com Auto-Recuperação Anti-Overbooking (`GET /spots/available`):**
-     * **Caminho Feliz (Cache Hit):** Lê diretamente do **Amazon ElastiCache** (Redis) na chave `spots:available`. Resposta ultrarrápida em < 2ms, sem onerar o banco relacional.
-     * **Cenário de Queda/Reboot do Redis (Cache Miss / Falha):** Se o Redis cair e voltar no meio do dia, a chave terá sumido. **A API nunca assume o valor padrão de 50**, pois isso geraria sobrelotação (overbooking) se já existirem carros estacionados. Apenas quando o Redis falhar/retornar nulo, a API consulta o **Amazon RDS**:
-       $$\text{vagas\_disponiveis} = \max(0, \text{capacidade\_total} - \text{COUNT}(\text{sessions ativas}))$$
-       *(onde sessões ativas são as que possuem `status IN ('PROCESSING', 'PARKED')`)*.
-     * **Reidratação Automática:** A API salva o valor real recalculado no Redis (`SET spots:available`) para que as requisições seguintes voltem a ser atendidas instantaneamente da memória.
-  3. **Pagamento e Saída (`POST /exits/{id}/pay`):**
-     * Localiza a sessão no **RDS**, atualiza `status = 'PAID'`, calcula tarifa e preenche `exited_at`.
-     * Incrementa atomicamente o contador no **Redis** (`INCR spots:available`).
-     * Grava log de auditoria no **DynamoDB** com ação `EXIT_PAYMENT`.
-  4. **Healthcheck (`GET /health`):**
-     * Retorna `200 OK` (`{"status":"UP"}`) para o Target Group do Load Balancer monitorar a saúde da instância.
-  5. **Placa digitada no caixa (`PATCH /sessions/{id}`):**
-     * Quando o OCR não lê a placa (sessão `FAILED`) ou lê errado (`PARKED`), o operador digita a placa (qualquer formato dos 4 países do Mercosul; ver `docs/DECISOES.md`, D8).
-     * `FAILED` → `PARKED` com `DECR spots:available`, porque a sessão `FAILED` nunca ocupou vaga no contador. Em `PARKED`, só troca a placa.
-     * Grava auditoria `PLATE_CORRECTION` com a placa nova e a anterior.
-  6. **Exclusão (`DELETE /sessions/{id}`):**
-     * Remove a sessão do **RDS** e a foto do **S3**; se estava `PARKED`, `INCR spots:available`.
-     * Grava auditoria `SESSION_DELETE`. Completa o CRUD exigido pela especificação.
+* **Armazenamento de Objetos (RustFS):** Substitui o S3. Usa o cliente S3 oficial da AWS com `UsePathStyle: true` apontado para o endpoint do RustFS (`http://rustfs:9000`), armazenando fotos em `photos/{session_id}_{filename}`.
+* **Persistência Transacional (PostgreSQL):** Gerenciado pela equipe em container Docker. Mantém a tabela `sessions` e gerencia as transições de estado:
+  $$\text{PROCESSING} \longrightarrow \text{PARKED} \longrightarrow \text{PAID} \longrightarrow \text{EXITED}$$
+  *(ou $\text{PROCESSING} \rightarrow \text{FAILED} \rightarrow \text{PARKED}$ em contingência de placa ilegível)*.
+* **Mensageria Assíncrona (RabbitMQ):** Substitui o SNS/SQS. Publica mensagens persistentes em JSON na fila durável `ocr-processamento-fila`.
+* **Auditoria NoSQL (Amazon DynamoDB):** Conforme exigência 1.a da especificação, continua utilizando DynamoDB para log imutável de todas as ações. Suporta tanto a AWS real quanto o `dynamodb-local` para desenvolvimento e correção offline.
+* **Cache de Vagas Anti-Overbooking (Redis):** Mantém `spots:available`. A vaga é decrementada quando o carro é estacionado (`PARKED`), mantida durante o pagamento (`PAID`), e **apenas incrementada na cancela de saída** (`EXITED`). Em caso de reinicialização do Redis, recalcula a partir do PostgreSQL:
+  $$\text{vagas\_disponiveis} = \max(0, \text{capacidade\_total} - \text{COUNT}(\text{sessions ativas}))$$
+  *(onde ativas = `status IN ('PROCESSING', 'PARKED', 'PAID')`)*.
 
 ### 2.3. Worker de Visão Computacional (`worker/` — Python + OCR)
-* **Propósito no Mundo Real:** É o agente autônomo inteligente em segundo plano que processa as fotos dos carros para identificar quem entrou.
-* **Mecanismo de Fila: SQS Direto via Long Polling:**
-  * O AWS SQS opera por *pull*. Usamos `WaitTimeSeconds=20` no `receive_message`. A conexão fica aberta e recebe a mensagem no milissegundo em que a API publica, com **0% de consumo de CPU** quando ocioso.
-  * **Simplificação Máxima (Sem SNS):** A API publica direto na fila SQS (`ocr-processamento-fila`). O worker recebe o JSON diretamente no `Body` da mensagem SQS, **sem envelopes intermediários do SNS**.
-  * Atende com folga ao requisito da rubrica de desacoplamento assíncrono por mensageria (**Amazon SNS/SQS**).
-* **Responsabilidades:**
-  1. **Consumo Desacoplado:** Faz polling contínuo (Long Polling 20s) na fila **Amazon SQS** (`ocr-processamento-fila`).
-  2. **Tratamento de Imagem:** Baixa a foto original do **Amazon S3**, aplica pré-processamento (rescaling, escala de cinza, limiarização via Pillow/OpenCV) para evidenciar a área da placa.
-  3. **Extração de Placa (OCR):** Na AWS, usa o **Amazon Rekognition** (`DetectText`), escolhendo a placa mais alta na foto (o carro em primeiro plano); sem placa, tenta de novo com a foto numa moldura (close da placa). Localmente, ou se o Rekognition falhar ou não achar placa, roda o Tesseract na imagem tratada. Em ambos os casos normaliza para uma placa dos 4 países do Mercosul: Brasil `ABC1D23`/`ABC-1234` (também Uruguai), Argentina `AB123CD`/`ABC123` e Paraguai `ABCD123`. As regras de cada formato estão em `docs/DECISOES.md` (D8). Medido em 114 fotos reais: Tesseract 52%, Rekognition 96%.
-  4. **Confirmação da Vaga:**
-     * Atualiza a sessão no **RDS** (`UPDATE sessions SET license_plate = :plate, status = 'PARKED' WHERE id = :id`).
-     * Decrementa atomicamente as vagas no **Redis** (`DECR spots:available`).
-     * Grava log de auditoria no **DynamoDB** com ação `OCR_PROCESSING` e a placa identificada.
-     * Remove a mensagem processada do **SQS** (`DeleteMessage`).
-  5. **Placa Ilegível (definitiva na 1ª entrega):**
-     * O OCR é determinístico: reprocessar a mesma foto não muda o resultado. A sessão vai para `FAILED`, grava `OCR_FAILED` com o motivo e a mensagem é removida, sem alterar o contador.
-     * O operador resolve no caixa (`PATCH /sessions/{id}`). Erros de infraestrutura (S3, RDS, Redis, DynamoDB) e de OCR (timeout) continuam com novas tentativas e DLQ.
+* **Consumo via RabbitMQ:** Consome mensagens da fila `ocr-processamento-fila` via protocolo AMQP (`pika`), utilizando confirmação manual (`basic_ack`).
+* **Download de Imagens no RustFS:** Baixa a imagem do RustFS usando o cliente S3 (boto3) apontado para o RustFS.
+* **Extração de Placa (Tesseract OCR):** Motor open-source de OCR rodando com pré-processamento Pillow/OpenCV, normalizando para placas Mercosul (Brasil, Argentina, Uruguai e Paraguai).
+* **Tratamento de Falhas e Dead Letter:** Se a placa for ilegível na primeira tentativa, marca sessão como `FAILED` no Postgres, sem descartar o carro (o caixa poderá corrigir). Erros irrecuperáveis de infraestrutura são roteados para a fila de mensagens mortas (DLQ `ocr-processamento-fila-dlq`).
 
-### 2.4. Infraestrutura, Custos & Elasticidade (`infra/` — OpenTofu)
-* **Propósito no Mundo Real:** Provisiona toda a infraestrutura em nuvem de forma reproduzível e resiliente, garantindo que o sistema suporte picos de entrada no estacionamento dentro do budget de estudante ($50).
-* **Guarda-Corpo de Custos (Budget $50 AWS Academy):**
-  * **Tamanhos Estritamente Econômicos:** Instâncias EC2 `t2.micro` ou `t3.micro`, RDS `db.t3.micro` Single-AZ, ElastiCache `cache.t3.micro` nó único.
-  * **DynamoDB & SQS:** Modo sob demanda / Pay-Per-Request (custo fixo zero).
-  * **Sem Recursos Caros:** Proibido adicionar NAT Gateways, Multi-AZ, Load Balancers redundantes ou discos provisionados IOPS (usar gp2/gp3 padrão de 20GB).
-  * **Infraestrutura Efêmera:** Desenvolvimento é 100% no emulador local (Floci). Na AWS real, os recursos só sobem para testes e gravação do vídeo, devendo ser destruídos logo após (`task tf:destroy:aws`).
-* **Responsabilidades:**
-  1. **Provisionamento dos 6 Serviços AWS:**
-     * **S3:** Bucket de armazenamento de fotos dos veículos.
-     * **RDS:** PostgreSQL gerenciado para persistência transacional (`sessions`).
-     * **ElastiCache:** Cluster Redis para contagem de vagas em memória.
-     * **DynamoDB:** Tabela `AuditoriaEstacionamento` para rastreamento imutável de ações.
-     * **SQS:** Fila `ocr-processamento-fila` para desacoplamento direto.
-     * **EC2:** Hospedagem da aplicação sob Load Balancer.
-  2. **Dual-Mode de Execução:**
-     * `use_localstack = true`: Roda 100% local via Docker Compose com Floci (S3, SQS, DynamoDB, RDS e ElastiCache).
-     * `use_localstack = false`: Provisiona os recursos reais na AWS Academy (usando `LabRole`).
-  3. **Elasticidade Horizontal (Parte 2 do Trabalho):**
-     * **ALB (Application Load Balancer):** Distribui o tráfego de entrada entre as instâncias da API.
-     * **ASG (Auto Scaling Group):** Mantém entre 1 (mínimo) e 3 (máximo) instâncias EC2 (`t2.micro` ou `t3.micro`).
-     * **Alarmes CloudWatch:**
-       * CPU > 70% por > 1 minuto: dispara Scale-Out (+1 instância).
-       * CPU < 25% por > 1 minuto: dispara Scale-In (-1 instância).
+### 2.4. Orquestração & Contêineres (`docker-compose.yml`)
+* Inicialização completa com um único comando: `docker compose up -d`.
+* Serviços orquestrados:
+  1. `rustfs`: Servidor de objetos S3-compatible em Rust (portas 9000 API e 9001 console).
+  2. `postgres`: Banco de dados relacional oficial `postgres:16-alpine` (porta 5432).
+  3. `rabbitmq`: Broker de mensageria `rabbitmq:3-management-alpine` (portas 5672 AMQP e 15672 UI).
+  4. `redis`: Cache em memória `redis:7-alpine` (porta 6379).
+  5. `dynamodb-local`: Emulador local do DynamoDB (porta 8000), configurável para DynamoDB AWS.
+  6. `api`: Backend compilado em multi-stage build Go.
+  7. `worker`: Worker Python com dependências Tesseract/OpenCV instaladas.
+  8. `web`: Frontend React compilado servido via Nginx com proxy reverso.
+* `healthcheck` em todos os serviços de infraestrutura para subida ordenada (`depends_on: condition: service_healthy`).
+
+### 2.5. Bônus Kubernetes (`k8s/`)
+* Manifestos declarativos para execução em cluster Kubernetes (Minikube / Kind / K3s):
+  * `Deployments` para API, Worker, Web, Postgres, RustFS, RabbitMQ e Redis.
+  * `Services` com `ClusterIP` para comunicação interna e `NodePort` para acesso externo (Web e API).
+  * `ConfigMap` e `Secret` para injeção segura de credenciais e parâmetros.
 
 ---
 
-## 3. Contratos de Dados (Evitando Desalinhamento entre PRs)
+## 3. Contratos de Dados & Estados
 
-Qualquer PR que inventar nomes diferentes deve ser ajustada para seguir estes padrões:
+### 3.1. Máquina de Estados da Sessão (`sessions` no PostgreSQL)
 
-### 3.1. Tabela RDS (`sessions`)
-| Coluna | Tipo | Descrição |
-|---|---|---|
-| `id` | `VARCHAR(64)` (PK) | Hash hexadecimal de 32 caracteres da sessão |
-| `license_plate`| `VARCHAR(16)` (NULL) | Placa identificada pelo OCR ou digitada no caixa (nula na entrada); 6 ou 7 caracteres, formatos do Mercosul |
-| `status` | `VARCHAR(20)` | `'PROCESSING'` -> `'PARKED'` -> `'PAID'`, ou `'PROCESSING'` -> `'FAILED'` (placa ilegível / falha ao publicar na fila) -> `'PARKED'` (placa digitada) ou `'PAID'` |
-| `s3_photo_key` | `TEXT` | Caminho no S3: `photos/{session_id}_{filename}` |
-| `entered_at` | `TIMESTAMP WITH TZ` | Horário de passagem pela cancela |
-| `exited_at` | `TIMESTAMP WITH TZ` (NULL) | Horário de pagamento e liberação da cancela |
-| `amount_paid` | `NUMERIC(10,2)` (NULL) | Valor cobrado na saída |
+| Estado | Significado Físico | Vaga Ocupada? | Ações Permitidas |
+|---|---|---|---|
+| `PROCESSING` | Carro acabou de passar na Cancela de Entrada; OCR em andamento. | Sim (preliminar) | Aguarda Worker OCR. |
+| `PARKED` | Placa lida com sucesso; carro estacionado. | Sim (-1 no Redis) | Pagamento no Caixa, Correção de Placa (`PATCH`), Cancelamento (`DELETE`). |
+| `FAILED` | Placa ilegível na entrada; requer atenção do caixa. | Não | Caixa digita placa (`PATCH` $\rightarrow$ `PARKED`), ou cancelamento. |
+| `PAID` | Cliente efetuou o pagamento no Caixa. Habilitado a sair! | Sim (ainda ocupa vaga) | Aproximação na Cancela de Saída. |
+| `EXITED` | Carro cruzou a Cancela de Saída. Sessão concluída. | Liberada (+1 no Redis) | Consulta histórica/auditoria. |
 
-### 3.2. Chaves de Cache no Redis & Auto-Recuperação
+### 3.2. Chaves de Cache no Redis
 * **Chave:** `spots:available`
-* **Entrada (Worker após OCR):** `DECR spots:available`
-* **Saída (API após pagar):** `INCR spots:available`
-* **Placa digitada em sessão `FAILED` (API):** `DECR spots:available`; **exclusão de sessão `PARKED` (API):** `INCR spots:available`
-* **Nunca criar a chave nem ir abaixo de 0:** API e Worker só alteram o contador se a chave existir (Lua); sem ela, a regra anti-overbooking reconstrói o valor a partir do RDS.
-* **Consulta (Totem/Web):** `GET spots:available`
-* **Regra Anti-Overbooking:** Se `GET spots:available` falhar ou a chave não existir, a API consulta o RDS (`totalSpots - count(sessions ativas)`), responde a contagem real e reidrata o Redis com `SET spots:available`. É terminantemente proibido assumir 50 cegamente em caso de falha de cache.
+* **Entrada (Worker após ler placa):** `DECR spots:available`
+* **Pagamento no Caixa:** Contador inalterado (carro continua fisicamente na vaga).
+* **Cancela de Saída (Passagem do carro):** `INCR spots:available`
+* **Auto-Recuperação:** $\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PROCESSING'}, \text{'PARKED'}, \text{'PAID'}\}))$.
 
 ### 3.3. Tabela DynamoDB (`AuditoriaEstacionamento`)
-* **Chave:** `id` (`<session_id>#<timestamp_nano>`)
-* **Ações oficiais:**
-  * `ENTRY`: Registrado pela API ao receber o carro na cancela.
-  * `OCR_PROCESSING`: Registrado pelo Worker Python ao ler a placa.
-  * `EXIT_PAYMENT`: Registrado pela API ao receber o pagamento.
-  * `OCR_FAILED`: Registrado pelo Worker quando a placa é ilegível (sessão vai para `FAILED` na 1ª entrega, sem novas tentativas).
-  * `POISON_MESSAGE`: Registrado pelo Worker quando uma mensagem falha na última entrega (vai para a DLQ).
-  * `ENTRY_FAILED`: Registrado pela API quando não consegue publicar a entrada no SQS.
-  * `PLATE_CORRECTION`: Registrado pela API quando o caixa digita ou corrige a placa.
-  * `SESSION_DELETE`: Registrado pela API quando uma sessão é excluída.
+Ações registradas:
+* `ENTRY`: Cancela de entrada aberta, ticket impresso e foto salva no RustFS.
+* `OCR_PROCESSING`: Worker reconheceu a placa e confirmou status `PARKED`.
+* `OCR_FAILED`: Worker não identificou placa válida; marcada para intervenção no caixa.
+* `PLATE_CORRECTION`: Operador digitou ou corrigiu a placa no caixa.
+* `PAYMENT_RECEIVED`: Pagamento efetuado com sucesso no terminal/caixa.
+* `EXIT_BARRIER_OPENED`: Cancela de saída destravada (por placa ou por ticket) e vaga restituída.
+* `SESSION_DELETE`: Sessão cancelada/excluída administrativamente.
 
-### 3.4. Mensageria SQS Direta
-* **Fila SQS:** `ocr-processamento-fila`
-* **Payload da mensagem (direto no Body do SQS, sem envelope):**
+### 3.4. Fila RabbitMQ (`ocr-processamento-fila`)
+* **Exchange:** `estacionamento.direct` (ou default exchange)
+* **Routing Key:** `ocr.processamento`
+* **Queue:** `ocr-processamento-fila` (durable: true)
+* **DLQ:** `ocr-processamento-fila-dlq` (associada via `x-dead-letter-exchange`)
+* **Payload da Mensagem (JSON):**
   ```json
   {
-    "session_id": "hex_32_caracteres",
-    "s3_key": "photos/session_id_foto.jpg"
+    "session_id": "b1a7c4e5...",
+    "s3_key": "photos/b1a7c4e5_carro.jpg"
   }
   ```
 
 ---
 
-## 4. Tabela de Penalidades da Disciplina (Checklist Anti-Zero)
+## 4. Tabela de Pontuação da Disciplina (TP2)
 
-| Item da Especificação | Penalidade se Faltar na PR / Entrega |
-|---|---|
-| **Amazon RDS** | **-1,5 ponto** |
-| **Amazon S3** | **-1,5 ponto** |
-| **Amazon DynamoDB / DocumentDB** | **-1,5 ponto** |
-| **Amazon ElastiCache (Redis)** | **-1,5 ponto** |
-| **Amazon SNS / SQS** | **-1,5 ponto** |
-| **Amazon Auto Scaling + ALB** | **-1,5 ponto** |
-| **Interface Gráfica (Web)** | **-1,0 ponto** |
-| **Vídeo da Elasticidade (Parte 2)** | **Item Obrigatório de Entrega** |
-
----
-
-## 5. Roteiro do Vídeo de Comprovação (Parte 2)
-
-O vídeo é item mandatório de entrega (deadline: **10/10/2026 às 23h59**):
-1. **Mostrar Topologia Inicial:** Console da AWS com ALB ativo, ASG com 1 instância saudável e Target Group respondendo em `/health`.
-2. **Aplicar Carga de CPU:** Gerar tráfego contra o ALB (ex.: via `k6`, `hey`, `ab`, ou script de stress) até a média de CPU das instâncias ultrapassar **70%**.
-3. **Comprovar Scale-Out:**
-   * Exibir o alarme do CloudWatch mudando para estado `ALARM` após 1 minuto de CPU > 70%.
-   * Exibir o ASG iniciando novas instâncias até atingir 2 e 3 instâncias.
-   * Exibir as novas instâncias ficando saudáveis no Target Group do ALB.
-4. **Comprovar Scale-In:**
-   * Cessar a carga e aguardar a CPU média cair abaixo de **25%** por 1 minuto.
-   * Exibir o CloudWatch disparando o alarme de scale-in e o ASG terminando as instâncias extras até voltar para 1.
-5. **Gravação:** Vídeo de 3 a 5 minutos, áudio claro, hospedado no YouTube ou Google Drive com permissão pública de visualização.
+| Item da Especificação do Trabalho 2 | Peso | Implementação no Projeto |
+|---|---|---|
+| **Armazenamento de Arquivos com RustFS** (Substituindo MinIO/S3) | **1,5 ponto** | Container RustFS executando (0,5) + upload na entrada e download no worker funcionando (1,0). |
+| **Banco NoSQL para Auditoria** (DynamoDB / DocumentDB) | **1,0 ponto** | Tabela de auditoria gravando e consultando eventos (ENTRY, OCR, PAYMENT, EXIT). |
+| **Banco Relacional Gerenciado pela Equipe** (PostgreSQL) | **1,5 ponto** | Container Postgres executando (0,5) + persistência transacional de sessões pela aplicação (1,0). |
+| **Fila de Mensagens com RabbitMQ** (Substituindo SNS/SQS) | **1,5 ponto** | Container RabbitMQ executando (0,5) + produção pela API e consumo pelo Worker (1,0). |
+| **Dockerfiles para Backend, Worker e Frontend** | **1,5 ponto** | Imagens otimizadas multi-stage para Go API, Python Worker e React Frontend. |
+| **Docker Compose Integrando Todos os Serviços** | **1,5 ponto** | Todos os serviços sobem via único `docker compose up -d` (0,75) + redes e dependências com healthchecks (0,75). |
+| **Documentação no README e Evidências** | **1,5 ponto** | Passo a passo claro para execução (1,0) + evidências e prints de funcionamento (0,5). |
+| **Bônus Kubernetes (Extra)** | **+1,0 ponto** | Deployments, Services (NodePort e ClusterIP), ConfigMaps e Secrets no K8s. |
+| **Total Máximo Possível** | **11,0 pontos** | |
 
 ---
 
-## 6. Checklist de Revisão Rápida para PRs
+## 5. Checklist de Verificação Rápida
 
-Antes de aprovar qualquer PR dos colegas de equipe:
-
-- [ ] **1. Contrato Respeitado:** A PR usa `sessions` (com `status` `PROCESSING`/`PARKED`/`PAID`), a chave Redis `spots:available` e a tabela DynamoDB `AuditoriaEstacionamento`?
-- [ ] **2. Desacoplamento Preservado:** A API nunca executa OCR diretamente de forma síncrona? O upload dispara evento via SNS/SQS?
-- [ ] **3. Auditoria Registrada:** Toda alteração de estado no sistema gera um item correspondente no DynamoDB?
-- [ ] **4. Compatibilidade Local:** O comando `task bootstrap:local` continua funcionando perfeitamente com o Floci?
-- [ ] **5. Sem Segredos no Código:** Credenciais e endpoints são lidos exclusivamente via variáveis de ambiente?
-- [ ] **6. Testes Incluídos:** Foram adicionados testes unitários ou de integração cobrindo a funcionalidade alterada?
+- [ ] **Comando Único:** `docker compose up -d` inicia PostgreSQL, RustFS, RabbitMQ, Redis, DynamoDB Local, API, Worker e Web sem falhas.
+- [ ] **Fluxo da Cancela de Entrada:** Upload da foto no RustFS $\rightarrow$ sessão `PROCESSING` no Postgres $\rightarrow$ mensagem no RabbitMQ $\rightarrow$ ticket emitido $\rightarrow$ cancela de entrada abre.
+- [ ] **Worker Assíncrono:** Consome do RabbitMQ $\rightarrow$ baixa do RustFS $\rightarrow$ OCR Tesseract $\rightarrow$ atualiza para `PARKED` no Postgres $\rightarrow$ decrementa vaga no Redis.
+- [ ] **Fluxo do Caixa de Pagamento:** Consulta por ID ou placa $\rightarrow$ pagamento registrado (`PAID`) $\rightarrow$ vaga **continua** retida $\rightarrow$ ticket habilitado para saída.
+- [ ] **Fluxo da Cancela de Saída:**
+  - Tentativa 1 (Câmera/Placa): Detecta placa paga $\rightarrow$ atualiza para `EXITED` $\rightarrow$ incrementa vaga no Redis $\rightarrow$ cancela de saída abre.
+  - Tentativa 2 (Contingência Ticket Papel): Digita ID do ticket pago $\rightarrow$ cancela de saída abre e vaga é liberada.
+  - Tentativa 3 (Ticket Não Pago): Cancela permanece fechada e alerta o condutor.
+- [ ] **Auditoria Completa:** Todas as ações registradas no DynamoDB e visualizáveis na aba `/auditoria`.
+- [ ] **Manifestos Kubernetes:** Pasta `k8s/` testada e validada com kubectl.

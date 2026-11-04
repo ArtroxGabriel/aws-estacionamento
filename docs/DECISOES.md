@@ -1,251 +1,202 @@
-# Decisões de arquitetura
+# Decisões de Arquitetura (Trabalho Prático 2)
 
-Registro do que mudou no projeto, por quê, e o que cada decisão implica. Cada item segue a mesma ordem: contexto → decisão → por quê → consequências → onde está no código.
+Registro histórico e técnico das decisões tomadas no projeto, motivações, alternativas descartadas e impactos no código. Cada decisão segue o padrão estruturado: **Contexto → Decisão → Por quê → Alternativas Descartadas → Consequências → Onde está no código**.
 
-> Branch `feat/aws-deploy`, 2026-10-04. Visão geral e antes × depois em [ARQUITETURA.md](ARQUITETURA.md); estado atual em [CHECKLIST-AWS.md](CHECKLIST-AWS.md).
+---
 
-## Serviços AWS usados
+## Mapeamento de Serviços: Trabalho 1 (AWS) vs Trabalho 2 (Docker / Open Source)
 
-A especificação exige 6 serviços. Os demais entraram para resolver problemas concretos, cada um explicado abaixo.
-
-| Serviço | Obrigatório? | Para quê | Decisão |
+| Papel no Sistema | Trabalho 1 (AWS Cloud) | Trabalho 2 (Open Source & Docker Compose) | Decisão |
 |---|---|---|---|
-| EC2 + ALB + Auto Scaling | ✅ Sim | Rodar a aplicação, com elasticidade de 1 a 3 instâncias | — |
-| S3 | ✅ Sim | Fotos dos veículos | — |
-| RDS (PostgreSQL) | ✅ Sim | Sessões | — |
-| ElastiCache (Redis) | ✅ Sim | Contador de vagas | — |
-| DynamoDB | ✅ Sim | Auditoria | — |
-| SQS (+ DLQ) | ✅ Sim | Desacoplar entrada e OCR | — |
-| **Rekognition** | Não | Leitura da placa (OCR) na AWS | [D1](#d1-amazon-rekognition-para-ler-a-placa), [D10](#d10-política-de-leitura-moldura-e-reserva-segura) |
-| **CloudFront** | Não | HTTPS sem domínio próprio | [D2](#d2-cloudfront-para-ter-https) |
-| ECR | Não | Guardar as imagens Docker | [D3](#d3-deploy-por-imagens-no-ecr-e-github-actions-com-oidc) |
-| CloudWatch | Não (vem com o Auto Scaling) | Alarmes de CPU que disparam o scaling | [D7](#d7-alarmes-próprios-de-1-minuto-simple-scaling) |
-| IAM | Não | Permissões das instâncias e do deploy | [D3](#d3-deploy-por-imagens-no-ecr-e-github-actions-com-oidc) |
+| **Armazenamento de Fotos** | Amazon S3 | **RustFS** (S3-compatible em Rust) | [D11](#d11-rustfs-em-substituição-ao-s3-e-ao-minio) |
+| **Banco Transacional** | Amazon RDS (PostgreSQL) | **PostgreSQL 16** (Container gerenciado pela equipe) | [D12](#d12-postgresql-em-container-gerenciado-com-migrações-automáticas) |
+| **Fila de Mensagens** | Amazon SNS + SQS | **RabbitMQ** (AMQP 0-9-1 com DLX e UI de Gestão) | [D13](#d13-rabbitmq-para-mensageria-assíncrona-em-vez-de-kafka) |
+| **Banco NoSQL de Auditoria** | Amazon DynamoDB | **Amazon DynamoDB** (com suporte local via DynamoDB Local) | [D14](#d14-continuidade-do-dynamodb-nosql-com-suporte-dual-cloudlocal) |
+| **Controle Físico das Cancelas** | Pagamento liberava vaga | **Duas Cancelas (Entrada e Saída) + Pagamento Desacoplado** | [D15](#d15-duas-cancelas-físicas-e-desacoplamento-entre-pagamento-e-saída) |
+| **Cache de Vagas** | Amazon ElastiCache (Redis) | **Redis 7 Alpine** (Container local em memória) | [D16](#d16-manutenção-do-redis-para-contagem-de-vagas-e-anti-overbooking) |
+| **Orquestração e Empacotamento** | Terraform / OpenTofu + ECR | **Dockerfiles Multi-Stage + Docker Compose Único** | [D17](#d17-dockerfiles-multi-stage-e-orquestração-com-docker-compose) |
+| **Orquestração em Nuvem (Bônus)** | AWS ASG + ALB | **Kubernetes** (Deployments, Services NodePort/ClusterIP, Secrets) | [D18](#d18-preparação-do-bônus-kubernetes-k8s) |
+| **Motor de OCR** | Amazon Rekognition (AWS) | **Tesseract OCR + OpenCV (Modelo Python 100% Open Source)** | [D19](#d19-retorno-ao-modelo-open-source-em-python-opencv--tesseract-e-descarte-do-amazon-rekognition) |
 
 ---
 
-## D1. Amazon Rekognition para ler a placa
+## D11. RustFS em substituição ao S3 e ao MinIO
 
-**Contexto:** O worker lia a placa com Tesseract (OCR de código aberto) + OpenCV. Em 5 fotos de exemplo funcionava. Para testar de verdade, montamos um dataset de 114 fotos **reais** de carros em estacionamentos de Salvador ([examples/README.md](../examples/README.md)). Nele, o Tesseract leu só **52%** das placas. Na metade das vezes não encontrava a placa na foto, e em 10% leu a placa errada.
+**Contexto:** O Trabalho 1 usava o Amazon S3 para armazenar as fotos dos veículos. A especificação do Trabalho 2 sugere o uso do MinIO. No entanto, o MinIO alterou sua licença de Apache 2.0 para GNU AGPLv3, impondo restrições severas de licenciamento e telemetria, além de apresentar alto consumo de recursos.
 
-**Decisão:** Na AWS, o worker usa o **Amazon Rekognition** (`DetectText`) como motor principal, com o Tesseract como reserva.
-- Entre os textos que o Rekognition encontra, vence a **placa mais alta na foto**, que é a do carro em primeiro plano, não a dos carros ao fundo.
-- Se o Rekognition der erro ou não achar placa, o worker roda o Tesseract.
-- No emulador local (Floci), que não tem Rekognition, continua só o Tesseract.
-- Liga com `OCR_ENGINE=rekognition`.
+**Decisão:** Adotar o **RustFS** (`rustfs/rustfs:latest`) como serviço de armazenamento de arquivos de alta performance.
+- O RustFS é 100% compatível com a API REST do S3 (inclusive suporte a AWS Signature Version 4).
+- Licenciado sob **Apache 2.0** permissivo e escrito em Rust com foco em baixa latência e consumo mínimo de memória.
+- Tanto a API em Go (`aws-sdk-go-v2/service/s3`) quanto o Worker Python (`boto3`) continuam usando seus clientes S3 padrão, apenas configurando `endpoint_url = http://rustfs:9000` e `UsePathStyle = true`.
 
 **Por quê:**
-- **Precisão medida, não estimada.** Nas 114 fotos reais: Tesseract 52% → Rekognition **96%** (110/114). Nas 400 sintéticas dos 4 países: 73% → **98%**.
-  - Para não "decorar" o conjunto, a regra da placa mais alta foi ajustada olhando só metade das fotos reais. Na outra metade, que nunca foi usada para ajustar, também deu 96%.
-  - Conferido pelo sistema no ar (foto → API → SQS → worker): 110/114.
-- **Custo:** US$ 0,001 por foto, com 5 mil fotos por mês grátis no primeiro ano. Um estacionamento com 1.000 entradas por dia sairia por ~US$ 30/mês.
-- **Requisito de "manipular o arquivo" continua atendido:** o worker redimensiona a foto (máx. 1920 px, JPEG) antes de enviar ao Rekognition. Na reserva com Tesseract, aplica escala, tons de cinza e binarização.
-- **Alternativas descartadas:**
-  - Melhorar o Tesseract: tentamos (recorte mais largo da placa, outro localizador), mas o ganho foi de 1–3 pontos.
-  - Bedrock (modelo de linguagem com visão): mais caro por foto, mais lento e pode "inventar" caracteres. O Rekognition é o serviço feito para ler texto em imagem.
+- **Zero Lock-in & Licença Permissiva:** Apache 2.0 contra as restrições da AGPLv3 do MinIO.
+- **Eficiência e Velocidade:** Implementação moderna em Rust, ideal para rodar leve em contêineres Docker locais.
+- **Compatibilidade Transparente:** Não exige bibliotecas proprietárias; o mesmo código do SDK da AWS conecta sem modificação nas chamadas de `PutObject`, `GetObject` e `DeleteObject`.
+
+**Alternativas Descartadas:**
+- *MinIO:* Descartado pela licença restritiva AGPLv3 e peso de inicialização.
+- *LocalStack S3:* Overhead excessivo (pesado para subir apenas um bucket local).
+- *Armazenamento local em disco (bind mount simples):* Descumpriria a rubrica de "usar serviço de armazenamento de objetos compatível".
 
 **Consequências:**
-- O worker depende da AWS para a melhor precisão. Sem o Rekognition (Floci, ou permissão negada), ele continua funcionando com o Tesseract, só que com precisão menor.
-- A role das instâncias precisa de `rekognition:DetectText`. Na AWS Academy, a `LabRole` precisa permitir o Rekognition; se não permitir, o worker cai sozinho no Tesseract.
-- Mais um serviço para explicar no vídeo, como ponto positivo.
+- Porta 9000 exposta para a API REST S3 e porta 9001 para a interface Web de gerenciamento.
+- Um bucket `estacionamento-fotos-veiculos` deve ser assegurado na inicialização.
 
-**Onde:** `worker/ocr/rekognition.py`, `worker/config.py` (`OCR_ENGINE`), `infra/autoscaling.tf` (permissão), `infra/templates/user_data.sh.tftpl`.
+**Onde:** `docker-compose.yml`, `api/internal/config/config.go`, `worker/storage/s3_store.py`.
 
 ---
 
-## D2. CloudFront para ter HTTPS
+## D12. PostgreSQL em Container Gerenciado com Migrações Automáticas
 
-**Contexto:** O Load Balancer só atendia `http://`. Os navegadores atuais tentam `https://` primeiro, e o site dava *timeout* para quem o abria. Para o ALB ter HTTPS é preciso um certificado, e a AWS só emite certificado para um **domínio próprio**. O endereço `...elb.amazonaws.com` é da Amazon e não pode ter certificado.
+**Contexto:** No Trabalho 1, o PostgreSQL rodava como serviço gerenciado no Amazon RDS (ou emulado no Floci). O Trabalho 2 exige um banco de dados relacional gerenciado diretamente pela equipe em container Docker.
 
-**Decisão:** Colocar o **CloudFront** (a CDN da AWS) na frente do ALB, sem cache. Ele entrega `https://<id>.cloudfront.net` com o certificado da AWS e repassa tudo para o ALB.
-
-**Por quê:** HTTPS sem comprar domínio. Entra no nível gratuito (1 TB e 10 milhões de requisições por mês) e leva 3 minutos para criar.
-
-**Consequências:**
-- Há dois endereços: `app_url` (HTTPS, para acessar) e `alb_url` (HTTP, usado no teste de carga do vídeo, que vai direto ao ALB e não gasta requisições do CloudFront).
-- Sem cache, a cada deploy todos já recebem a versão nova.
-
-**Onde:** `infra/cdn.tf`.
-
----
-
-## D3. Deploy por imagens no ECR e GitHub Actions com OIDC
-
-**Contexto:** Cada instância nova do Auto Scaling precisa rodar a aplicação. Compilar Go, Node e Python dentro de uma `t3.micro` levaria vários minutos por instância e atrasaria o scale-out do vídeo. O deploy também precisava ser repetível pelo time, sem chaves AWS espalhadas.
-
-**Decisão:**
-- **Imagens prontas no ECR:** a instância só faz `docker pull` e sobe em ~2 min. Cada deploy usa a tag do commit (SHA). Isso muda o launch template e faz o ASG trocar as instâncias aos poucos, sem queda.
-- **GitHub Actions com OIDC** (workflow *Deploy AWS*: apply/plan/destroy). O GitHub prova sua identidade para a AWS a cada execução, sem chave de acesso salva no repositório. A role de deploy só pode ser assumida pelo environment `aws` deste repositório e não consegue alterar as próprias permissões (conferido no simulador do IAM).
-- **State do OpenTofu no S3** (`infra/aws`), compartilhado entre as tasks locais e o Actions. O Floci continua com state local em `infra/`.
+**Decisão:** Utilizar a imagem oficial `postgres:16-alpine` no Docker Compose:
+- Volume persistente nomeado (`postgres_data`) para garantir integridade dos dados entre reinicializações.
+- Automação de migração: A API em Go executa os scripts DDL (`api/internal/repository/migrations/`) automaticamente no momento de inicialização (Fail-Fast se o schema estiver defasado).
+- Variável `DATABASE_URL=postgres://app_user:app_password@postgres:5432/estacionamento?sslmode=disable`.
 
 **Por quê:**
-- Scale-out rápido.
-- Deploy reproduzível.
-- Segurança: nenhuma credencial de longa duração no GitHub.
-- Um único "estado da verdade" da infraestrutura.
+- Leveza e confiabilidade da distribuição Alpine Linux.
+- Eliminação de qualquer dependência externa ou configuração manual prévia para o avaliador.
 
 **Consequências:**
-- O bootstrap (`task aws:bootstrap`: bucket do state, OIDC e role) roda uma vez por conta, por alguém com acesso de admin.
-- Na AWS Academy não dá para criar IAM. Lá, usa-se só o deploy local com `LabInstanceProfile`.
+- Ordem de inicialização protegida por `healthcheck` (`pg_isready -U app_user -d estacionamento`) no compose para que a API só conecte quando o banco estiver pronto.
 
-**Onde:** `infra/bootstrap/`, `infra/aws/`, `.github/workflows/deploy-aws.yml`, `.github/actions/tofu-aws/`.
-
----
-
-## D4. Placa ilegível vira falha na hora; caixa digita a placa; exclusão
-
-**Contexto:**
-- Quando o OCR não lia a placa, o worker devolvia a mensagem à fila e tentava de novo, 3 vezes com 5 min de intervalo. Como o OCR dá sempre o mesmo resultado para a mesma foto, isso só atrasava ~15 min o aviso ao operador.
-- Um carro sem placa lida não tinha como receber a placa.
-- O CRUD exigido pela especificação não tinha o "D" (excluir).
-
-**Decisão:**
-- **Placa ilegível:** a sessão vai para `FAILED` na primeira tentativa, com auditoria `OCR_FAILED`. Erros que podem passar sozinhos (S3 fora do ar, timeout) continuam com novas tentativas.
-- **`PATCH /sessions/{id}`:** o caixa digita a placa (sessão `FAILED` → `PARKED`, descontando a vaga) ou corrige uma leitura errada. Auditoria `PLATE_CORRECTION`.
-- **`DELETE /sessions/{id}`:** exclui a sessão e a foto do S3 e devolve a vaga se o carro estava estacionado. Auditoria `SESSION_DELETE`.
-
-**Por quê:** É o fluxo de um estacionamento real (a leitura falha e o operador resolve). Completa o CRUD e deixa tudo registrado na auditoria.
-
-**Consequências:** Enquanto uma sessão está `FAILED`, ela não ocupa vaga no contador. O painel mostra uma vaga livre a mais até o caixa digitar a placa.
-
-**Onde:** `worker/worker.py`, `api/internal/service/parking.go`, `api/internal/handler/handler.go`, `web/src/pages/PaymentPage.tsx`.
+**Onde:** `docker-compose.yml`, `api/internal/repository/migrate.go`.
 
 ---
 
-## D5. Ajustes de rede nas instâncias (conntrack e keepalive)
+## D13. RabbitMQ para Mensageria Assíncrona (em vez de Kafka)
 
-**Contexto:** No teste de carga, a ~150 requisições/s, 75% das respostas eram erro 502/503. O ASG trocava a instância achando que ela estava quebrada. A causa era a tabela de conexões do kernel da `t3.micro`, limitada a 7.680 entradas. Ela enchia porque cada requisição abria uma conexão nova entre o nginx e a API.
+**Contexto:** O Trabalho 1 utilizava Amazon SNS/SQS para desacoplar a requisição da cancela de entrada do processamento pesado de visão computacional. O Trabalho 2 exige a substituição por RabbitMQ ou Kafka.
 
-**Decisão:**
-- O nginx reaproveita conexões com a API (keepalive).
-- O `user_data` aumenta a tabela para 131.072 entradas e encurta o tempo que conexões fechadas ficam nela.
+**Decisão:** Adotar o **RabbitMQ** (`rabbitmq:3-management-alpine`):
+- Fila de trabalho durável: `ocr-processamento-fila`.
+- DLQ (Dead Letter Queue): `ocr-processamento-fila-dlq` configurada via `x-dead-letter-exchange` para mensagens venenosas após esgotamento de retentativas.
+- Publicação pela API em Go via driver AMQP 0-9-1 (`github.com/rabbitmq/amqp091-go`).
+- Consumo pelo Worker Python via `pika` com confirmação manual (`basic_ack` / `basic_nack`).
 
-**Por quê:** Sem isso, o vídeo de elasticidade mostraria instâncias caindo em vez de escalando.
+**Por quê RabbitMQ e não Kafka:**
+- **Modelo de Mensageria Alinhado ao Problema:** O estacionamento precisa de uma *Fila de Trabalho* (Task Queue / Competing Consumers), onde cada carro é processado exatamente uma vez pelo worker disponível. O RabbitMQ foi concebido especificamente para esse padrão. O Kafka é um log de eventos distribuído particionado (Streaming Log), que introduz complexidade desnecessária de gerenciamento de offsets, partições e rebalanceamento de grupos de consumidores.
+- **Consumo de Recursos:** O RabbitMQ em Alpine consome ~80-120 MB de RAM. O Kafka (mesmo com KRaft sem Zookeeper) exige a JVM rodando com consumo acima de 1 GB de RAM, tornando o `docker compose` pesado para máquinas modestas.
+- **Interface Visual de Gestão Embutida:** O RabbitMQ Management na porta `15672` permite ao professor/avaliador acompanhar em tempo real a taxa de mensagens por segundo, mensagens enfileiradas e a DLQ diretamente no navegador.
 
-**Consequências:** 100% de respostas OK a ~4.200 requisições/s; a CPU passa de 70% e o scaling dispara como esperado.
+**Consequências:**
+- Dependência `github.com/rabbitmq/amqp091-go` na API Go e `pika` no Worker Python.
+- Configuração de `RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/`.
 
-**Onde:** `web/nginx.conf.template`, `web/nginx-api-upstream.envsh`, `infra/templates/user_data.sh.tftpl`.
+**Onde:** `api/internal/repository/rabbitmq.go`, `worker/worker.py`, `docker-compose.yml`.
 
 ---
 
-## D6. Rede e custos
+## D14. Continuidade do DynamoDB NoSQL com Suporte Dual (Cloud/Local)
+
+**Contexto:** O item 1.a da especificação oficial estabelece: *"A aplicação deve continuar usando o serviço de banco de dados não-relacional da AWS (o DynamoDB ou Amazon DocumentDB) para armazenar e consultar as informações necessárias para a sua aplicação"*. Ao mesmo tempo, para que o comando `docker compose up -d` funcione em qualquer máquina offline sem exigir chaves reais da AWS, o sistema precisa de autonomia.
+
+**Decisão:** Manter a tabela `AuditoriaEstacionamento` no DynamoDB com estratégia dual:
+- Se variáveis de credenciais AWS estiverem preenchidas (`AWS_ACCESS_KEY_ID`, etc.), conecta ao Amazon DynamoDB na nuvem.
+- Se nenhuma credencial for informada ou `AWS_ENDPOINT_URL` apontar para `http://dynamodb-local:8000`, conecta ao contêiner oficial `amazon/dynamodb-local:latest`.
+
+**Por quê:** Atende simultaneamente à imposição formal 1.a da especificação acadêmica e ao critério de reprodutibilidade local sem dependências externas.
+
+**Onde:** `api/internal/repository/dynamodb.go`, `worker/storage/audit.py`, `docker-compose.yml`.
+
+---
+
+## D15. Duas Cancelas Físicas e Desacoplamento entre Pagamento e Saída
+
+**Contexto:** Na versão anterior, o pagamento da sessão via `POST /exits/{id}/pay` encerrava o ticket e liberava a vaga no Redis de forma síncrona. No mundo real de um estacionamento automatizado:
+1. O cliente paga o ticket no totem de autoatendimento ou no caixa, e em seguida caminha até o seu carro.
+2. Durante esse tempo, a vaga **continua ocupada**. Liberar a vaga no momento do pagamento causaria *overbooking* imediato na cancela de entrada.
+3. Ao chegar à barreira de saída, existe uma **Cancela de Saída** física com câmera LPR. Ela tenta ler a placa do carro; se identificar que o ticket daquela placa está pago, abre a cancela automaticamente.
+4. Caso a placa esteja suja, danificada ou o OCR falhe na saída, o motorista insere o ticket impresso em papel (cujo ID foi fornecido na cancela de entrada) para validar o pagamento e abrir a cancela.
 
 **Decisão:**
-- VPC default, sem NAT Gateway.
-- Só 2 zonas de disponibilidade.
-- RDS sem backup automático e com disco gp3.
-- O ECR apaga imagens antigas.
-- Tags `Project=aws-estacionamento` em tudo.
-- Instâncias `t3.micro`.
+1. **Cancela de Entrada (`POST /entries`):** Registra foto, emite ticket com ID único e abre a cancela de entrada. Status: `PROCESSING` $\rightarrow$ `PARKED`.
+2. **Terminal de Pagamento / Caixa (`POST /sessions/{id}/pay`):** Registra o pagamento e altera o status para `PAID`. **A vaga continua ocupada no Redis!** O ticket/placa passa a estar autorizado a sair.
+3. **Cancela de Saída com Dupla Validação:**
+   - **Fluxo Principal (Câmera / Placa — `POST /barrier/exit/plate`):** Lê a placa na cancela de saída. Se existir sessão ativa com status `PAID`, a cancela abre!
+   - **Fluxo de Contingência (Ticket em Papel — `POST /barrier/exit/ticket`):** Se a placa não for lida, o motorista informa o ID do ticket em papel. Se estiver `PAID`, a cancela abre!
+   - **Efeito Físico de Saída:** Somente na validação da cancela de saída o status passa para `EXITED`, a vaga é incrementada no Redis (`INCR spots:available`) e o evento `EXIT_BARRIER_OPENED` é auditado no DynamoDB.
+   - **Bloqueio de Inadimplência:** Se o ticket ou placa constar como `PARKED` (não pago), a cancela de saída recusa a abertura e instrui o motorista a realizar o pagamento no caixa.
+
+**Por quê:** Reflete com fidelidade máxima a arquitetura de engenharia de tráfego e automação predial de estacionamentos reais, prevenindo o problema de overbooking entre o pagamento e a efetiva desocupação da vaga.
+
+**Onde:** `api/internal/service/parking.go`, `api/internal/handler/handler.go`, `web/src/pages/EntryBarrierPage.tsx`, `web/src/pages/ExitBarrierPage.tsx`, `web/src/pages/PaymentPage.tsx`.
+
+---
+
+## D16. Manutenção do Redis para Contagem de Vagas e Anti-Overbooking
+
+**Contexto:** O ElastiCache era usado no Trabalho 1 para leitura de altíssima frequência da quantidade de vagas sem sobrecarregar o banco relacional.
+
+**Decisão:** Manter o **Redis** (`redis:7-alpine`) no Docker Compose gerenciando a chave `spots:available`:
+- Leitura instantânea (< 2ms) para os displays e totens.
+- A vaga é decrementada quando o Worker conclui o OCR e confirma o veículo como `PARKED`.
+- A vaga é incrementada apenas quando o veículo cruza a Cancela de Saída (`EXITED`).
+- Em caso de falha ou reinicialização do Redis, a API reconcilia o valor consultando as sessões ativas no PostgreSQL:
+  $$\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PROCESSING'}, \text{'PARKED'}, \text{'PAID'}\}))$$
+
+**Por quê:** Garante que o painel de vagas suporte milhares de consultas simultâneas sem degradar o PostgreSQL, mantendo a consistência transacional com reconciliação automática.
+
+**Onde:** `api/internal/repository/redis.go`, `docker-compose.yml`.
+
+---
+
+## D17. Dockerfiles Multi-Stage e Orquestração com Docker Compose
+
+**Decisão:**
+- **`api/Dockerfile`:** Build multi-stage: `golang:1.24-alpine` para compilação estática em binário único, copiado para imagem final enxuta baseada em Alpine Linux (< 25 MB).
+- **`web/Dockerfile`:** Multi-stage: compilação dos assets Vite/React com `node:22-alpine` e execução sob `nginx:alpine` (< 30 MB) configurado com reverse proxy `/api/` para o container do backend.
+- **`worker/Dockerfile`:** Python com instalação dos pacotes de sistema necessários (`tesseract-ocr`, `tesseract-ocr-por`, `libgl1`, `libglib2.0-0`), isolado com `uv` ou requirements e executado com usuário não-root.
+- **`docker-compose.yml`:** Arquivo na raiz do repositório contendo as 8 definições de serviço, volumes persistentes e rede bridge dedicada `estacionamento_net`, com `healthcheck` em todos os serviços de banco e mensageria para inicialização determinística via `condition: service_healthy`.
+
+**Por quê:** Atende integralmente aos itens 2, 3, 4, 5, 6 e 7 da especificação, garantindo nota máxima nos critérios de Docker e Docker Compose.
+
+**Onde:** `api/Dockerfile`, `web/Dockerfile`, `worker/Dockerfile`, `docker-compose.yml`.
+
+---
+
+## D18. Preparação do Bônus Kubernetes (`k8s/`)
+
+**Contexto:** A especificação prevê 1 ponto extra para a implantação no Kubernetes utilizando Deployments, Services (NodePort e ClusterIP), ConfigMaps e Secrets.
+
+**Decisão:** Criar a pasta `k8s/` contendo manifestos YAML declarativos e limpos:
+- `k8s/namespace.yaml`: Namespace dedicado `estacionamento`.
+- `k8s/secrets.yaml` & `k8s/configmap.yaml`: Configurações de ambiente e credenciais desacopladas.
+- `k8s/postgres.yaml`, `k8s/rustfs.yaml`, `k8s/rabbitmq.yaml`, `k8s/redis.yaml`: Deployments e Services internos do tipo `ClusterIP`.
+- `k8s/api.yaml` & `k8s/worker.yaml`: Deployment do backend e do consumidor assíncrono.
+- `k8s/web.yaml`: Deployment do frontend com Service do tipo `NodePort` (porta 30080) para acesso externo facilitado em ambientes Minikube/Kind.
+
+**Por quê:** Garante a pontuação extra de 1,0 ponto sem interferir na simplicidade da execução padrão com Docker Compose.
+
+**Onde:** `k8s/`.
+
+---
+
+## D19. Retorno ao Modelo Open-Source em Python (OpenCV + Tesseract) e Descarte do Amazon Rekognition
+
+**Contexto:** No Trabalho 1, para atingir 96% de acurácia no deploy em nuvem na AWS, foi adicionada a integração com o serviço proprietário Amazon Rekognition (`DetectText`) via AWS SDK (`worker/ocr/rekognition.py`), mantendo o Tesseract como fallback. Para o Trabalho 2, a premissa fundamental da disciplina é eliminar dependências de serviços pagos ou proprietários de nuvem, priorizando soluções de código aberto executando em contêineres Docker.
+
+**Decisão:** Descartar completamente a chamada ao Amazon Rekognition no Worker e restabelecer o **pipeline de visão computacional 100% open-source em Python**:
+1. **Localização de Placas via OpenCV (`locate.py`):**
+   - Detecção cromática da faixa azul Mercosul (`find_mercosul_plates`) em espaço de cores HSV.
+   - Detecção geométrica de bordas retangulares (`find_plate_lines`) via Canny e contornos morfológicos (para placas antigas cinzas e placas sobre carros azuis).
+2. **Pré-processamento com Pillow/OpenCV (`processor.py`):**
+   - Redimensionamento adaptativo, conversão para escala de cinza e binarização/limiarização (Otsu/Adaptive Thresholding) para isolar os caracteres.
+3. **Extração de Caracteres com Tesseract OCR (`processor.py`):**
+   - Execução do Tesseract local (`pytesseract`) com whitelisting de caracteres alfanuméricos e múltiplos modos de segmentação de página (PSM 7, 8, 13).
+4. **Normalização Sintática Mercosul (`clean.py`):**
+   - Validação e correção de confusões de caracteres comuns (`1` $\leftrightarrow$ `I`, `0` $\leftrightarrow$ `O`) cobrindo os 4 formatos do Mercosul (Brasil, Argentina, Uruguai e Paraguai).
 
 **Por quê:**
-- O NAT Gateway custaria ~US$ 32/mês.
-- Cada IPv4 público custa US$ 0,005/h, e menos zonas significam menos IPs.
-- A infra é efêmera: sobe para testar e gravar e depois é destruída.
+- **Zero Lock-in & Independência de Nuvem:** Elimina chamadas de rede externas e a necessidade de permissões/credenciais IAM na AWS para o processamento de imagens.
+- **Auto-contido no Container:** O container do worker inclui o binário do Tesseract (`tesseract-ocr` e `tesseract-ocr-por`) e as bibliotecas OpenCV headless pré-instaladas, operando com latência ultrabaixa e determinismo em qualquer máquina host.
 
 **Consequências:**
-- As instâncias têm IP público, mas só aceitam tráfego vindo do ALB (security groups).
-- RDS e Redis só aceitam conexão das instâncias.
-- Com tudo no ar, o custo é de ~US$ 0,10/h.
+- O worker roda com `OCR_ENGINE=tesseract` por padrão, sem tocar em nenhuma API da AWS.
+- O código de `worker/ocr/rekognition.py` é removido/desativado do fluxo principal.
+- Casos em que o OCR não atinja certeza imediata resultam em status `FAILED`, permitindo que o operador no caixa digite ou corrija a placa no fluxo de contingência já modelado.
 
-**Onde:** `infra/network.tf`, `infra/main.tf`, `infra/provider.tf`.
-
----
-
-## D7. Alarmes próprios de 1 minuto (Simple Scaling)
-
-**Contexto:** A especificação pede: CPU acima de 70% por mais de 1 minuto → +1 instância; abaixo de 25% por 1 minuto → −1.
-
-**Decisão:**
-- Dois alarmes do CloudWatch (média da CPU do grupo, período de 60 s, 1 medição) ligados a políticas *Simple Scaling* de +1/−1, com 60 s de espera.
-- *Detailed monitoring* nas instâncias.
-
-**Por quê:**
-- A política automática da AWS (*target tracking*) cria alarmes que esperam 3 minutos para subir e 15 para descer, o que não atende a especificação.
-- Sem detailed monitoring, a CPU só é medida de 5 em 5 minutos.
-
-**Onde:** `infra/autoscaling.tf`.
-
----
-
-## D8. Placas dos 4 países do Mercosul
-
-**Contexto:** A especificação do professor **não fala em placas**. A regra inicial do time aceitava só os formatos **brasileiros**. Ela está no `Requirement 5` de `.kiro/specs/python-ocr-worker/requirements.md` (29/09) e no contrato do worker em `docs/GOAL.md`. Um carro argentino ou paraguaio virava "falha no OCR" e não podia nem ter a placa digitada no caixa. Como o padrão Mercosul é regional e estacionamentos do Sul e de fronteira recebem carros desses países, o time decidiu em 03/10 aceitar os 4 países.
-
-**Decisão:**
-
-| País | Formato | Exemplo | Quando a leitura automática aceita |
-|---|---|---|---|
-| Brasil (Mercosul) | LLL N L NN | `ABC1D23` | Sempre |
-| Brasil (antiga) / Uruguai (Mercosul) | LLL NNNN | `ABC1234` | Sempre. Com faixa azul brasileira detectada, só se aparecer `URUGUAY` |
-| Argentina (Mercosul) | LL NNN LL | `AB123CD` | Sempre: nenhuma placa brasileira começa com 2 letras e 3 dígitos |
-| Argentina (antiga, preta) | LLL NNN | `ABC123` | Só com `ARGENTINA` lido na placa, e só como linha inteira |
-| Paraguai (Mercosul) | LLLL NNN | `ABCD123` | Só com `PARAGUAY` lido na placa |
-
-O caixa aceita os mesmos formatos na placa digitada.
-
-**Por quê das condições:** os carros brasileiros são a maioria, e as condições evitam que leituras brasileiras com erro virem placas estrangeiras.
-- O OCR às vezes perde o último caractere: `PJC4903` vira `PJC490`, que tem o formato argentino antigo.
-- O `1` às vezes é lido como `I`: `ABC1234` vira `ABCI234`, que tem o formato paraguaio.
-- As placas desses países trazem o nome do país impresso, então exigir o nome é seguro.
-- As correções de caracteres confundidos (`1`→`I`, `0`→`O`) continuam só para o Brasil, porque foram calibradas na fonte da placa brasileira. Placas estrangeiras só são aceitas com leitura exata.
-
-**Consequências:**
-- Mudaram o normalizador do worker, a validação da API e a do caixa.
-- O caminho do Rekognition repassa as linhas com o nome do país como contexto para cada candidata a placa.
-- O dataset sintético agora tem os 4 países. Resultados em [examples/README.md](../examples/README.md).
-- Para o teste de "placa ilegível", as fotos de carros argentinos deram lugar a `examples/fotos/carro-placa-coberta.jpg` (placa borrada).
-
-**Onde:** `worker/ocr/clean.py`, `worker/ocr/rekognition.py`, `api/internal/service/parking.go`, `web/src/utils/format.ts`, `scripts/gerar_sinteticas.py`.
-
----
-
-## D10. Política de leitura: moldura e reserva segura
-
-**Contexto:** Com 1.000 recortes reais de placas do Roboflow, apareceram dois problemas.
-1. **Close da placa:** quando o texto ocupa a imagem inteira, o Rekognition muitas vezes não lê nada. Em 100 recortes: 13 lidos com a proporção certa, **83** com a placa centralizada numa moldura.
-2. **Reserva com Tesseract criando placas falsas:** onde o Rekognition não achava placa, o Tesseract lia ruído, e a correção de caracteres transformava esse ruído numa placa válida, porém errada (`THH8H18` → `PII7A11`). Nas 1.520 fotos de teste, a reserva recuperava 7 placas e criava 14 leituras erradas.
-
-**Decisão:**
-1. Se o Rekognition não achar placa, faz **uma 2ª chamada com a foto centralizada numa moldura** (o dobro do tamanho).
-2. A reserva com Tesseract só aceita **leitura exata**, ou 1 correção quando a faixa Mercosul foi detectada. Esse é o caso típico `I`/`1` da fonte Mercosul, como a `LSN4I49`, cujo holograma também engana o Rekognition.
-
-**Por quê** (medido com as respostas guardadas, simulando cada alternativa nas 1.520 fotos):
-
-| Política | Acertos | Lidas erradas |
-|---|---|---|
-| Só Rekognition | 921 | 120 |
-| + reserva Tesseract com correções (anterior) | 928 | 134 |
-| + reserva só exata / 1 correção com faixa | 928 | 125 |
-| **+ 2ª chamada com moldura (atual)** | **1.268** | **214** |
-
-- **Limite de confiança do Rekognition, testado e descartado:** com 70%, os acertos nas fotos reais caem de 96% para 80%, e os erros quase não diminuem.
-- **Evidência `BRASIL` da mesma placa, testada e descartada:** ficou igual ou pior.
-
-**Consequências:**
-- A moldura recupera placas em closes. Nas fotos de câmera ela quase nunca é acionada (2 de 114, ganhando 1 placa).
-- Ela também traz leituras erradas: no Roboflow, ~1 errada para cada 4 recuperadas. **77% dessas erram 1 caractere** (`V`/`Y`, `W`/`N`), e o operador corrige com "Corrigir placa" no caixa. O pagamento é pelo ticket, então uma placa errada não cobra o carro de outra pessoa.
-- Uma 2ª chamada custa mais US$ 0,001, só nas fotos em que a primeira falhou.
-- Se o Rekognition respondeu e nenhuma placa segura foi encontrada, o resultado é **placa ilegível**: sessão `FAILED` na hora (D4), não "erro de OCR", que o worker tentaria de novo por ~15 min. Um bug nisso foi pego pelo `task smoke:aws` na AWS e corrigido, com teste.
-
-**Onde:** `worker/ocr/rekognition.py` (`framed`, `_detect`, `_exact_fallback`).
-
----
-
-## D9. Datasets de teste e licenças
-
-**Contexto:** Para medir a leitura com fotos reais, usamos dois datasets públicos:
-- as 114 fotos brasileiras do benchmark do OpenALPR (AGPL-3.0);
-- recortes de placas do projeto `cafuringa/placas` do Roboflow Universe (CC BY 4.0).
-
-**Decisão:**
-- **OpenALPR (AGPL):** as fotos não são versionadas; `task dataset:baixar` baixa e gera o gabarito.
-- **Roboflow (CC BY 4.0, que permite redistribuir com crédito) e sintéticas (nossas):** versionadas em `examples/dataset/`, com gabarito, as respostas dos motores e um `ORIGEM.md` com fonte, licença e alterações. O export bruto do Roboflow (~700 MB) fica fora.
-- A chave do Roboflow vem da variável de ambiente `ROBOFLOW_API_KEY`, nunca de arquivo do repositório.
-
-**Por quê:**
-- Copiar material AGPL para o repositório poderia impor essa licença ao projeto.
-- São dezenas de MB.
-- O export do Roboflow veio com os nomes das classes corrompidos. O mapeamento classe → caractere foi deduzido comparando as caixas com as fotos e conferido em amostras (`KNOWN_MAPS` em `scripts/baixar_roboflow.py`).
-
-**Onde:** `scripts/baixar_dataset.py`, `scripts/gerar_sinteticas.py`, `examples/README.md`.
+**Onde:** `worker/ocr/locate.py`, `worker/ocr/processor.py`, `worker/ocr/clean.py`, `worker/worker.py`, `worker/config.py`.
