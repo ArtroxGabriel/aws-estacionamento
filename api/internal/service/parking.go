@@ -22,7 +22,9 @@ var (
 	ErrInvalidPhoto         = errors.New("photo is required")
 	ErrInvalidSessionStatus = errors.New("session is not in PARKED status")
 	ErrInvalidPlate         = errors.New("invalid license plate")
-	ErrSessionNotEditable   = errors.New("session plate can only be set while PARKED or FAILED")
+	ErrSessionNotEditable   = errors.New("session plate can only be set while PARKED")
+	ErrParkingFull          = errors.New("parking lot is full")
+	ErrPhotoNotFound        = errors.New("session photo not found")
 )
 
 // Plates of the Mercosul countries typed by the cashier, after removing
@@ -92,50 +94,90 @@ func (s *ParkingService) GetAvailableSpots(ctx context.Context) (int64, error) {
 	return calculated, nil
 }
 
+// reserveSpot takes a spot for a car at the entry gate. Redis is the fast
+// path; when the counter is missing or Redis is down, PostgreSQL decides (the
+// sessions table is the truth) and the counter is rebuilt already counting
+// this car.
+func (s *ParkingService) reserveSpot(ctx context.Context) error {
+	reserved, err := s.spotsRepo.Reserve(ctx)
+	if err == nil {
+		if !reserved {
+			return ErrParkingFull
+		}
+		return nil
+	}
+
+	activeCount, dbErr := s.sessionRepo.CountActive(ctx)
+	if dbErr != nil {
+		return fmt.Errorf("failed to check free spots: %w", dbErr)
+	}
+	free := int64(s.totalSpots) - activeCount
+	if free <= 0 {
+		return ErrParkingFull
+	}
+	_ = s.spotsRepo.SetAvailable(ctx, free-1)
+	return nil
+}
+
+// CreateEntry opens a session for a car at the entry gate. The ticket (session
+// ID) is what identifies the car from here on: the session is PARKED and holds
+// a spot at once, whatever happens to the photo. Reading the plate is left to
+// the worker and only fills license_plate/plate_status later.
 func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, photoBody io.Reader, contentType string) (*model.Session, error) {
 	if photoBody == nil {
 		return nil, ErrInvalidPhoto
+	}
+
+	if err := s.reserveSpot(ctx); err != nil {
+		return nil, err
 	}
 
 	sessionID := generateID()
 	s3Key := fmt.Sprintf("photos/%s_%s", sessionID, safeFileName(photoFileName))
 
 	if err := s.storage.Upload(ctx, s3Key, photoBody, contentType); err != nil {
+		_, _ = s.spotsRepo.Increment(ctx)
 		return nil, fmt.Errorf("failed to upload photo: %w", err)
 	}
 
 	session := &model.Session{
-		ID:         sessionID,
-		Status:     "PROCESSING",
-		S3PhotoKey: s3Key,
-		EnteredAt:  time.Now().UTC(),
+		ID:          sessionID,
+		Status:      model.StatusParked,
+		PlateStatus: model.PlatePending,
+		S3PhotoKey:  s3Key,
+		EnteredAt:   time.Now().UTC(),
 	}
 
 	if err := s.sessionRepo.Create(ctx, session); err != nil {
+		_, _ = s.spotsRepo.Increment(ctx)
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
+	details := map[string]any{
+		"s3_photo_key": s3Key,
+		"status":       session.Status,
+		"ocr_queued":   true,
+	}
 	if err := s.publisher.Publish(ctx, map[string]string{
 		"session_id": sessionID,
 		"s3_key":     s3Key,
 	}); err != nil {
-		_ = s.sessionRepo.MarkAsFailed(ctx, sessionID)
-		_ = s.audit.LogEvent(ctx, "ENTRY_FAILED", sessionID, map[string]any{
-			"s3_photo_key": s3Key,
-			"status":       "FAILED",
-			"error":        err.Error(),
-		})
-		return nil, fmt.Errorf("failed to publish entry event: %w", err)
+		// The car is in and the ticket is valid; only the plate reading is
+		// lost. Nothing is left waiting for a worker that will never come.
+		log.Printf("[WARN] session %s: photo not queued for OCR: %v", sessionID, err)
+		_ = s.sessionRepo.MarkPlateUnreadable(ctx, sessionID)
+		session.PlateStatus = model.PlateUnreadable
+		details["ocr_queued"] = false
+		details["queue_error"] = err.Error()
 	}
 
-	_ = s.audit.LogEvent(ctx, "ENTRY", sessionID, map[string]any{
-		"s3_photo_key": s3Key,
-		"status":       session.Status,
-	})
+	_ = s.audit.LogEvent(ctx, "ENTRY", sessionID, details)
 
 	return session, nil
 }
 
+// PayExit charges a PARKED session by its ticket ID, with or without a plate,
+// and gives the spot back.
 func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.Session, error) {
 	session, err := s.sessionRepo.GetByID(ctx, sessionID)
 	if err != nil {
@@ -144,11 +186,10 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	if session == nil {
 		return nil, ErrSessionNotFound
 	}
-	if session.Status != "PARKED" && session.Status != "FAILED" {
+	if session.Status != model.StatusParked {
 		return nil, ErrInvalidSessionStatus
 	}
 
-	previousStatus := session.Status
 	paidSession, err := s.sessionRepo.MarkAsPaid(ctx, sessionID, time.Now().UTC(), s.fixedRate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update session: %w", err)
@@ -157,9 +198,7 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 		return nil, ErrInvalidSessionStatus
 	}
 
-	if previousStatus == "PARKED" {
-		_, _ = s.spotsRepo.Increment(ctx)
-	}
+	_, _ = s.spotsRepo.Increment(ctx)
 
 	_ = s.audit.LogEvent(ctx, "EXIT_PAYMENT", sessionID, map[string]any{
 		"amount_paid": s.fixedRate,
@@ -169,8 +208,9 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	return paidSession, nil
 }
 
-// UpdatePlate lets the cashier type the plate when OCR failed (FAILED ->
-// PARKED, which now takes a spot) or fix a misread one (PARKED stays PARKED).
+// UpdatePlate lets the cashier type a plate the OCR did not read or fix a
+// misread one. It is a convenience (search by plate), never a requirement:
+// the session already holds its spot, so the counter is not touched.
 func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate string) (*model.Session, error) {
 	plate, err := normalizePlate(rawPlate)
 	if err != nil {
@@ -183,11 +223,11 @@ func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate st
 	if session == nil {
 		return nil, ErrSessionNotFound
 	}
-	if session.Status != "PARKED" && session.Status != "FAILED" {
+	if session.Status != model.StatusParked {
 		return nil, ErrSessionNotEditable
 	}
 
-	previousStatus := session.Status
+	previousPlateStatus := session.PlateStatus
 	var previousPlate any
 	if session.LicensePlate != nil {
 		previousPlate = *session.LicensePlate
@@ -201,24 +241,18 @@ func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate st
 		return nil, ErrSessionNotEditable
 	}
 
-	// A FAILED session never took a spot (the worker only decrements on a
-	// readable plate); now that it is PARKED it must.
-	if previousStatus == "FAILED" {
-		_, _ = s.spotsRepo.Decrement(ctx)
-	}
-
 	_ = s.audit.LogEvent(ctx, "PLATE_CORRECTION", sessionID, map[string]any{
-		"license_plate":   plate,
-		"previous_plate":  previousPlate,
-		"previous_status": previousStatus,
-		"status":          updated.Status,
+		"license_plate":         plate,
+		"previous_plate":        previousPlate,
+		"previous_plate_status": previousPlateStatus,
+		"status":                updated.Status,
 	})
 
 	return updated, nil
 }
 
 // DeleteSession removes a session and its photo (the D of the CRUD). A PARKED
-// session gives its spot back; the others never held one in the counter.
+// session gives its spot back; a PAID one already did at the payment.
 func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*model.Session, error) {
 	session, err := s.sessionRepo.GetByID(ctx, sessionID)
 	if err != nil {
@@ -236,7 +270,7 @@ func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*
 		return nil, ErrSessionNotFound
 	}
 
-	if session.Status == "PARKED" {
+	if session.Status == model.StatusParked {
 		_, _ = s.spotsRepo.Increment(ctx)
 	}
 	// Best effort: an orphan photo costs cents, a failed delete must not
@@ -260,6 +294,43 @@ func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*
 	return session, nil
 }
 
+// servablePhotoTypes are the content types the API sends back as they were
+// stored. The type comes from the client that uploaded the photo, so anything
+// else (HTML, SVG) is downgraded to a download instead of being rendered.
+var servablePhotoTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/webp": true,
+	"image/gif":  true,
+}
+
+// GetSessionPhoto opens the entry photo of a session: the evidence the cashier
+// and the audit trail show next to a ticket. The caller closes the reader.
+func (s *ParkingService) GetSessionPhoto(ctx context.Context, sessionID string) (io.ReadCloser, string, error) {
+	session, err := s.sessionRepo.GetByID(ctx, sessionID)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to retrieve session: %w", err)
+	}
+	if session == nil {
+		return nil, "", ErrSessionNotFound
+	}
+	if session.S3PhotoKey == "" {
+		return nil, "", ErrPhotoNotFound
+	}
+
+	body, contentType, err := s.storage.Download(ctx, session.S3PhotoKey)
+	if errors.Is(err, repository.ErrBlobNotFound) {
+		return nil, "", ErrPhotoNotFound
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to download photo: %w", err)
+	}
+	if !servablePhotoTypes[contentType] {
+		contentType = "application/octet-stream"
+	}
+	return body, contentType, nil
+}
+
 var unsafeNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
 // safeFileName drops any directory part and replaces characters outside
@@ -278,8 +349,8 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
-func (s *ParkingService) FindSessions(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
-	return s.sessionRepo.FindAll(ctx, status, plate)
+func (s *ParkingService) FindSessions(ctx context.Context, filter repository.SessionFilter) ([]*model.Session, error) {
+	return s.sessionRepo.FindAll(ctx, filter)
 }
 
 func (s *ParkingService) GetAuditLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {

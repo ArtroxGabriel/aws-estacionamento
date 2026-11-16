@@ -10,6 +10,7 @@ import (
 
 	"api/internal/config"
 	"api/internal/model"
+	"api/internal/repository"
 	"api/internal/service"
 )
 
@@ -17,10 +18,11 @@ import (
 type FakeSessionRepo struct {
 	sessions  map[string]*model.Session
 	shouldErr bool
+	createErr bool
 }
 
 func (f *FakeSessionRepo) Create(ctx context.Context, s *model.Session) error {
-	if f.shouldErr {
+	if f.shouldErr || f.createErr {
 		return errors.New("db error")
 	}
 	f.sessions[s.ID] = s
@@ -43,40 +45,38 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 		return nil, errors.New("db error")
 	}
 	s, ok := f.sessions[id]
-	if !ok {
+	if !ok || s.Status != model.StatusParked {
 		return nil, nil
 	}
-	if s.Status != "PARKED" && s.Status != "FAILED" {
-		return nil, nil
-	}
-	s.Status = "PAID"
+	s.Status = model.StatusPaid
 	s.ExitedAt = &exitedAt
 	s.AmountPaid = &amount
 	return s, nil
 }
 
-func (f *FakeSessionRepo) MarkAsFailed(ctx context.Context, id string) error {
+func (f *FakeSessionRepo) MarkPlateUnreadable(ctx context.Context, id string) error {
 	if f.shouldErr {
 		return errors.New("db error")
 	}
-	s, ok := f.sessions[id]
-	if !ok {
-		return nil
+	if s, ok := f.sessions[id]; ok && s.PlateStatus == model.PlatePending {
+		s.PlateStatus = model.PlateUnreadable
 	}
-	s.Status = "FAILED"
 	return nil
 }
 
-func (f *FakeSessionRepo) FindAll(ctx context.Context, status *string, plate *string) ([]*model.Session, error) {
+func (f *FakeSessionRepo) FindAll(ctx context.Context, filter repository.SessionFilter) ([]*model.Session, error) {
 	if f.shouldErr {
 		return nil, errors.New("db error")
 	}
 	var res []*model.Session
 	for _, s := range f.sessions {
-		if status != nil && *status != "" && s.Status != *status {
+		if filter.Status != "" && s.Status != filter.Status {
 			continue
 		}
-		if plate != nil && *plate != "" && (s.LicensePlate == nil || *s.LicensePlate != *plate) {
+		if filter.Plate != "" && (s.LicensePlate == nil || *s.LicensePlate != filter.Plate) {
+			continue
+		}
+		if filter.PlateStatus != "" && s.PlateStatus != filter.PlateStatus {
 			continue
 		}
 		res = append(res, s)
@@ -89,11 +89,11 @@ func (f *FakeSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*m
 		return nil, errors.New("db error")
 	}
 	s, ok := f.sessions[id]
-	if !ok || (s.Status != "PARKED" && s.Status != "FAILED") {
+	if !ok || s.Status != model.StatusParked {
 		return nil, nil
 	}
 	s.LicensePlate = &plate
-	s.Status = "PARKED"
+	s.PlateStatus = model.PlateManual
 	return s, nil
 }
 
@@ -114,25 +114,35 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	}
 	var count int64
 	for _, s := range f.sessions {
-		if s.Status == "PROCESSING" || s.Status == "PARKED" {
+		if s.Status == model.StatusParked {
 			count++
 		}
 	}
 	return count, nil
 }
 
-// FakeSpotsRepo implements repository.SpotsRepository
+// FakeSpotsRepo implements repository.SpotsRepository. Like the Redis one, it
+// never creates the counter by itself: with missing=true only SetAvailable
+// brings it back.
 type FakeSpotsRepo struct {
 	spots     int64
+	missing   bool
 	shouldErr bool
 }
 
-func (f *FakeSpotsRepo) GetAvailable(ctx context.Context) (int64, error) {
+func (f *FakeSpotsRepo) unavailable() error {
 	if f.shouldErr {
-		return 0, errors.New("redis error")
+		return errors.New("redis error")
 	}
-	if f.spots == 0 {
-		return 0, errors.New("key missing in redis")
+	if f.missing {
+		return errors.New("key missing in redis")
+	}
+	return nil
+}
+
+func (f *FakeSpotsRepo) GetAvailable(ctx context.Context) (int64, error) {
+	if err := f.unavailable(); err != nil {
+		return 0, err
 	}
 	return f.spots, nil
 }
@@ -142,30 +152,45 @@ func (f *FakeSpotsRepo) SetAvailable(ctx context.Context, count int64) error {
 		return errors.New("redis error")
 	}
 	f.spots = count
+	f.missing = false
 	return nil
 }
 
 func (f *FakeSpotsRepo) Increment(ctx context.Context) (int64, error) {
-	if f.shouldErr {
-		return 0, errors.New("redis error")
+	if err := f.unavailable(); err != nil {
+		return 0, err
 	}
 	f.spots++
 	return f.spots, nil
 }
 
 func (f *FakeSpotsRepo) Decrement(ctx context.Context) (int64, error) {
-	if f.shouldErr {
-		return 0, errors.New("redis error")
+	if err := f.unavailable(); err != nil {
+		return 0, err
+	}
+	if f.spots > 0 {
+		f.spots--
+	}
+	return f.spots, nil
+}
+
+func (f *FakeSpotsRepo) Reserve(ctx context.Context) (bool, error) {
+	if err := f.unavailable(); err != nil {
+		return false, err
+	}
+	if f.spots <= 0 {
+		return false, nil
 	}
 	f.spots--
-	return f.spots, nil
+	return true, nil
 }
 
 // FakeStorage implements repository.BlobStorage
 type FakeStorage struct {
-	uploaded  map[string][]byte
-	deleted   []string
-	shouldErr bool
+	uploaded     map[string][]byte
+	contentTypes map[string]string
+	deleted      []string
+	shouldErr    bool
 }
 
 func (f *FakeStorage) Upload(ctx context.Context, key string, body io.Reader, contentType string) error {
@@ -175,8 +200,10 @@ func (f *FakeStorage) Upload(ctx context.Context, key string, body io.Reader, co
 	data, _ := io.ReadAll(body)
 	if f.uploaded == nil {
 		f.uploaded = make(map[string][]byte)
+		f.contentTypes = make(map[string]string)
 	}
 	f.uploaded[key] = data
+	f.contentTypes[key] = contentType
 	return nil
 }
 
@@ -186,9 +213,9 @@ func (f *FakeStorage) Download(ctx context.Context, key string) (io.ReadCloser, 
 	}
 	data, ok := f.uploaded[key]
 	if !ok {
-		return nil, "", io.EOF
+		return nil, "", repository.ErrBlobNotFound
 	}
-	return io.NopCloser(bytes.NewReader(data)), "image/jpeg", nil
+	return io.NopCloser(bytes.NewReader(data)), f.contentTypes[key], nil
 }
 
 func (f *FakeStorage) Delete(ctx context.Context, key string) error {
@@ -208,7 +235,7 @@ type FakePublisher struct {
 
 func (f *FakePublisher) Publish(ctx context.Context, payload any) error {
 	if f.shouldErr {
-		return errors.New("sqs publish error")
+		return errors.New("queue publish error")
 	}
 	f.published = append(f.published, payload)
 	return nil
@@ -216,11 +243,13 @@ func (f *FakePublisher) Publish(ctx context.Context, payload any) error {
 
 // FakeAuditLogger implements repository.AuditLogger
 type FakeAuditLogger struct {
-	events []string
+	events  []string
+	details []map[string]any
 }
 
 func (f *FakeAuditLogger) LogEvent(ctx context.Context, action, entityID string, details map[string]any) error {
 	f.events = append(f.events, action)
+	f.details = append(f.details, details)
 	return nil
 }
 
@@ -232,6 +261,19 @@ func (f *FakeAuditLogger) GetRecentLogs(ctx context.Context, limit int) ([]*mode
 		})
 	}
 	return logs, nil
+}
+
+func (f *FakeAuditLogger) detailsOf(action string) map[string]any {
+	for i, a := range f.events {
+		if a == action {
+			return f.details[i]
+		}
+	}
+	return nil
+}
+
+func hasEvent(audit *FakeAuditLogger, action string) bool {
+	return audit.detailsOf(action) != nil
 }
 
 func setupService(shouldErrDB, shouldErrStorage bool) (*service.ParkingService, *FakeSessionRepo, *FakeSpotsRepo, *FakeStorage, *FakePublisher, *FakeAuditLogger) {
@@ -246,8 +288,16 @@ func setupService(shouldErrDB, shouldErrStorage bool) (*service.ParkingService, 
 	return svc, repo, spots, storage, publisher, audit
 }
 
+func photo() io.Reader {
+	return bytes.NewReader([]byte("test-photo-data"))
+}
+
+// ---------------------------------------------------------------------------
+// Available spots
+// ---------------------------------------------------------------------------
+
 func TestGetAvailableSpots_Success(t *testing.T) {
-	svc, _, spots, _, _, _ := setupService(false, false)
+	svc, _, _, _, _, _ := setupService(false, false)
 
 	available, err := svc.GetAvailableSpots(context.Background())
 	if err != nil {
@@ -256,7 +306,16 @@ func TestGetAvailableSpots_Success(t *testing.T) {
 	if available != 30 {
 		t.Fatalf("expected 30 spots, got %d", available)
 	}
-	_ = spots
+}
+
+func TestGetAvailableSpots_FullLotIsZeroNotAnError(t *testing.T) {
+	svc, _, spots, _, _, _ := setupService(false, false)
+	spots.spots = 0
+
+	available, err := svc.GetAvailableSpots(context.Background())
+	if err != nil || available != 0 {
+		t.Fatalf("expected 0 spots and no error, got %d, %v", available, err)
+	}
 }
 
 func TestGetAvailableSpots_Error(t *testing.T) {
@@ -273,21 +332,20 @@ func TestGetAvailableSpots_Error(t *testing.T) {
 
 func TestGetAvailableSpots_RedisRecovery(t *testing.T) {
 	repo := &FakeSessionRepo{sessions: make(map[string]*model.Session)}
-	// 12 active cars in parking lot
-	for i := 0; i < 10; i++ {
+	// 12 cars inside: every PARKED session holds a spot, whatever happened
+	// to its plate.
+	plateStatuses := []string{model.PlateRead, model.PlatePending, model.PlateUnreadable, model.PlateManual}
+	for i := 0; i < 12; i++ {
 		id := string(rune('a' + i))
-		repo.sessions[id] = &model.Session{ID: id, Status: "PARKED"}
+		repo.sessions[id] = &model.Session{ID: id, Status: model.StatusParked, PlateStatus: plateStatuses[i%len(plateStatuses)]}
 	}
-	repo.sessions["proc1"] = &model.Session{ID: "proc1", Status: "PROCESSING"}
-	repo.sessions["proc2"] = &model.Session{ID: "proc2", Status: "PROCESSING"}
-	repo.sessions["paid1"] = &model.Session{ID: "paid1", Status: "PAID"} // should not count
+	repo.sessions["paid1"] = &model.Session{ID: "paid1", Status: model.StatusPaid} // already left
 
-	// Redis fell/rebooted (empty/missing key)
-	spots := &FakeSpotsRepo{spots: 0}
+	// Redis rebooted: the counter key is gone.
+	spots := &FakeSpotsRepo{missing: true}
 	cfg := config.Config{TotalParkingSpots: 50}
 	svc := service.NewParkingService(repo, spots, nil, nil, nil, cfg)
 
-	// Redis returns error -> Service verifies DB -> 50 - 12 = 38 -> Updates Redis with 38
 	available, err := svc.GetAvailableSpots(context.Background())
 	if err != nil {
 		t.Fatalf("expected successful recovery from DB, got %v", err)
@@ -295,25 +353,36 @@ func TestGetAvailableSpots_RedisRecovery(t *testing.T) {
 	if available != 38 {
 		t.Fatalf("expected 38 recovered spots, got %d", available)
 	}
-	if spots.spots != 38 {
-		t.Fatalf("expected redis to be updated with 38, got %d", spots.spots)
+	if spots.missing || spots.spots != 38 {
+		t.Fatalf("expected redis to be rebuilt with 38, got %d (missing=%v)", spots.spots, spots.missing)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Entry: the ticket is valid and the spot is taken at once
+// ---------------------------------------------------------------------------
+
 func TestCreateEntry_Success(t *testing.T) {
-	svc, repo, _, storage, publisher, audit := setupService(false, false)
+	svc, repo, spots, storage, publisher, audit := setupService(false, false)
 
-	body := bytes.NewReader([]byte("test-photo-data"))
-	session, err := svc.CreateEntry(context.Background(), "car.jpg", body, "image/jpeg")
-
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if session.ID == "" {
 		t.Fatal("expected session ID to be populated")
 	}
-	if session.Status != "PROCESSING" {
-		t.Fatalf("expected status PROCESSING, got %s", session.Status)
+	if session.Status != model.StatusParked {
+		t.Fatalf("expected status PARKED right at the entry, got %s", session.Status)
+	}
+	if session.PlateStatus != model.PlatePending {
+		t.Fatalf("expected plate_status PENDING, got %s", session.PlateStatus)
+	}
+	if session.LicensePlate != nil {
+		t.Fatalf("expected no plate yet, got %s", *session.LicensePlate)
+	}
+	if spots.spots != 29 {
+		t.Fatalf("expected the spot reserved at the entry (29), got %d", spots.spots)
 	}
 	if len(repo.sessions) != 1 {
 		t.Fatalf("expected 1 session saved, got %d", len(repo.sessions))
@@ -327,53 +396,194 @@ func TestCreateEntry_Success(t *testing.T) {
 	if len(audit.events) != 1 || audit.events[0] != "ENTRY" {
 		t.Fatalf("expected 1 ENTRY audit event, got %v", audit.events)
 	}
+	if queued := audit.details[0]["ocr_queued"]; queued != true {
+		t.Fatalf("expected ocr_queued=true in the audit, got %v", queued)
+	}
 }
 
 func TestCreateEntry_NilPhoto(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(false, false)
+	svc, _, spots, _, _, _ := setupService(false, false)
 
 	_, err := svc.CreateEntry(context.Background(), "car.jpg", nil, "image/jpeg")
 	if !errors.Is(err, service.ErrInvalidPhoto) {
 		t.Fatalf("expected ErrInvalidPhoto, got %v", err)
 	}
+	if spots.spots != 30 {
+		t.Fatalf("expected no spot taken without a photo, got %d", spots.spots)
+	}
 }
 
-func TestCreateEntry_StorageFailure(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(false, true)
+func TestCreateEntry_TakesTheLastSpot(t *testing.T) {
+	svc, _, spots, _, _, _ := setupService(false, false)
+	spots.spots = 1
 
-	body := bytes.NewReader([]byte("photo"))
-	_, err := svc.CreateEntry(context.Background(), "car.jpg", body, "image/jpeg")
+	if _, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg"); err != nil {
+		t.Fatalf("expected the last spot to be granted, got %v", err)
+	}
+	if spots.spots != 0 {
+		t.Fatalf("expected 0 spots left, got %d", spots.spots)
+	}
+}
+
+func TestCreateEntry_FullLotIsRefused(t *testing.T) {
+	svc, repo, spots, storage, publisher, audit := setupService(false, false)
+	spots.spots = 0
+
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if !errors.Is(err, service.ErrParkingFull) {
+		t.Fatalf("expected ErrParkingFull, got %v", err)
+	}
+	if session != nil {
+		t.Fatalf("expected no session, got %+v", session)
+	}
+	if spots.spots != 0 {
+		t.Fatalf("expected the counter to stay at 0, got %d", spots.spots)
+	}
+	if len(repo.sessions) != 0 || len(storage.uploaded) != 0 || len(publisher.published) != 0 || len(audit.events) != 0 {
+		t.Fatal("expected nothing stored, published or audited for a refused entry")
+	}
+}
+
+func TestCreateEntry_MissingCounterFallsBackToDatabase(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	spots.missing = true
+	for _, id := range []string{"a", "b", "c"} {
+		repo.sessions[id] = &model.Session{ID: id, Status: model.StatusParked}
+	}
+
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if err != nil {
+		t.Fatalf("expected the entry to go through with the database count, got %v", err)
+	}
+	if session.Status != model.StatusParked {
+		t.Fatalf("expected PARKED, got %s", session.Status)
+	}
+	// 50 total - 3 already inside - this car.
+	if spots.missing || spots.spots != 46 {
+		t.Fatalf("expected the counter rebuilt with 46, got %d (missing=%v)", spots.spots, spots.missing)
+	}
+}
+
+func TestCreateEntry_MissingCounterAndFullDatabaseIsRefused(t *testing.T) {
+	repo := &FakeSessionRepo{sessions: make(map[string]*model.Session)}
+	repo.sessions["a"] = &model.Session{ID: "a", Status: model.StatusParked}
+	repo.sessions["b"] = &model.Session{ID: "b", Status: model.StatusParked}
+	spots := &FakeSpotsRepo{missing: true}
+	svc := service.NewParkingService(repo, spots, &FakeStorage{}, &FakePublisher{}, &FakeAuditLogger{}, config.Config{TotalParkingSpots: 2})
+
+	_, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if !errors.Is(err, service.ErrParkingFull) {
+		t.Fatalf("expected ErrParkingFull, got %v", err)
+	}
+	if len(repo.sessions) != 2 {
+		t.Fatalf("expected no new session, got %d", len(repo.sessions))
+	}
+}
+
+func TestCreateEntry_RedisDownStillAdmitsByDatabase(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	spots.shouldErr = true
+
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if err != nil {
+		t.Fatalf("expected the entry to survive a Redis outage, got %v", err)
+	}
+	if _, ok := repo.sessions[session.ID]; !ok {
+		t.Fatal("expected the session saved")
+	}
+}
+
+func TestCreateEntry_StorageFailureGivesTheSpotBack(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, true)
+
+	_, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
 	if err == nil {
 		t.Fatal("expected storage failure error, got nil")
 	}
+	if spots.spots != 30 {
+		t.Fatalf("expected the reserved spot released (30), got %d", spots.spots)
+	}
+	if len(repo.sessions) != 0 {
+		t.Fatalf("expected no session, got %d", len(repo.sessions))
+	}
 }
 
-func TestCreateEntry_DatabaseFailure(t *testing.T) {
-	svc, _, _, _, _, _ := setupService(true, false)
+func TestCreateEntry_DatabaseFailureGivesTheSpotBack(t *testing.T) {
+	svc, repo, spots, _, publisher, _ := setupService(false, false)
+	repo.createErr = true
 
-	body := bytes.NewReader([]byte("photo"))
-	_, err := svc.CreateEntry(context.Background(), "car.jpg", body, "image/jpeg")
+	_, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
 	if err == nil {
 		t.Fatal("expected database failure error, got nil")
 	}
+	if spots.spots != 30 {
+		t.Fatalf("expected the reserved spot released (30), got %d", spots.spots)
+	}
+	if len(publisher.published) != 0 {
+		t.Fatal("expected nothing published for a session that was not saved")
+	}
 }
+
+// The queue being down costs only the plate reading: the car is in, the ticket
+// works and nothing is left waiting for a worker that will never get the photo.
+func TestCreateEntry_PublishFailureKeepsTheEntry(t *testing.T) {
+	svc, repo, spots, _, pub, audit := setupService(false, false)
+	pub.shouldErr = true
+
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if err != nil {
+		t.Fatalf("expected the entry to succeed without the queue, got %v", err)
+	}
+	if session.Status != model.StatusParked || session.PlateStatus != model.PlateUnreadable {
+		t.Fatalf("expected PARKED/UNREADABLE, got %s/%s", session.Status, session.PlateStatus)
+	}
+	stored := repo.sessions[session.ID]
+	if stored == nil || stored.Status != model.StatusParked || stored.PlateStatus != model.PlateUnreadable {
+		t.Fatalf("expected stored session PARKED/UNREADABLE, got %+v", stored)
+	}
+	if spots.spots != 29 {
+		t.Fatalf("expected the spot to stay taken (29), got %d", spots.spots)
+	}
+	if hasEvent(audit, "ENTRY_FAILED") {
+		t.Fatal("ENTRY_FAILED must not be emitted anymore")
+	}
+	details := audit.detailsOf("ENTRY")
+	if details == nil {
+		t.Fatalf("expected ENTRY audit event, got %v", audit.events)
+	}
+	if details["ocr_queued"] != false || details["queue_error"] == nil {
+		t.Fatalf("expected ocr_queued=false with queue_error, got %v", details)
+	}
+
+	// And the ticket pays normally.
+	paid, err := svc.PayExit(context.Background(), session.ID)
+	if err != nil || paid.Status != model.StatusPaid {
+		t.Fatalf("expected the ticket to pay, got %+v, %v", paid, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Payment: by ticket, with or without a plate
+// ---------------------------------------------------------------------------
 
 func TestPayExit_Success(t *testing.T) {
 	svc, repo, spots, _, _, audit := setupService(false, false)
 
-	sessionID := "session-to-pay"
-	repo.sessions[sessionID] = &model.Session{
-		ID:         sessionID,
-		Status:     "PARKED",
-		S3PhotoKey: "photos/session-to-pay.jpg",
-		EnteredAt:  time.Now().Add(-2 * time.Hour),
+	plate := "ABC1D23"
+	repo.sessions["s1"] = &model.Session{
+		ID:           "s1",
+		LicensePlate: &plate,
+		Status:       model.StatusParked,
+		PlateStatus:  model.PlateRead,
+		S3PhotoKey:   "photos/s1.jpg",
+		EnteredAt:    time.Now().Add(-2 * time.Hour),
 	}
 
-	paid, err := svc.PayExit(context.Background(), sessionID)
+	paid, err := svc.PayExit(context.Background(), "s1")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if paid.Status != "PAID" {
+	if paid.Status != model.StatusPaid {
 		t.Fatalf("expected status PAID, got %s", paid.Status)
 	}
 	if paid.AmountPaid == nil || *paid.AmountPaid != 15.0 {
@@ -384,6 +594,38 @@ func TestPayExit_Success(t *testing.T) {
 	}
 	if len(audit.events) != 1 || audit.events[0] != "EXIT_PAYMENT" {
 		t.Fatalf("expected EXIT_PAYMENT audit event, got %v", audit.events)
+	}
+}
+
+// The heart of the feature: a car whose photo was never read (or is still in
+// the queue) leaves with its ticket, no manual validation, and frees its spot.
+func TestPayExit_WithoutPlate(t *testing.T) {
+	for _, plateStatus := range []string{model.PlatePending, model.PlateUnreadable} {
+		svc, repo, spots, _, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{
+			ID:          "s1",
+			Status:      model.StatusParked,
+			PlateStatus: plateStatus,
+			S3PhotoKey:  "photos/blurry.jpg",
+			EnteredAt:   time.Now().Add(-1 * time.Hour),
+		}
+
+		paid, err := svc.PayExit(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("%s: expected the ticket to pay without a plate, got %v", plateStatus, err)
+		}
+		if paid.Status != model.StatusPaid || paid.LicensePlate != nil {
+			t.Fatalf("%s: expected PAID with no plate, got %s %v", plateStatus, paid.Status, paid.LicensePlate)
+		}
+		if paid.PlateStatus != plateStatus {
+			t.Fatalf("%s: expected plate_status kept, got %s", plateStatus, paid.PlateStatus)
+		}
+		if spots.spots != 31 {
+			t.Fatalf("%s: expected the spot given back (31), got %d", plateStatus, spots.spots)
+		}
+		if !hasEvent(audit, "EXIT_PAYMENT") {
+			t.Fatalf("%s: expected EXIT_PAYMENT audit event", plateStatus)
+		}
 	}
 }
 
@@ -405,200 +647,73 @@ func TestPayExit_DatabaseError(t *testing.T) {
 	}
 }
 
-func TestCreateEntry_PublishFailure(t *testing.T) {
-	svc, repo, _, _, pub, audit := setupService(false, false)
-	pub.shouldErr = true
-
-	photoBody := bytes.NewReader([]byte("fake-photo"))
-	session, err := svc.CreateEntry(context.Background(), "car.jpg", photoBody, "image/jpeg")
-	if err == nil {
-		t.Fatal("expected error on publish failure, got nil")
-	}
-	if session != nil {
-		t.Fatalf("expected nil session on failure, got %+v", session)
-	}
-
-	if len(repo.sessions) != 1 {
-		t.Fatalf("expected 1 session in repo, got %d", len(repo.sessions))
-	}
-	for _, s := range repo.sessions {
-		if s.Status != "FAILED" {
-			t.Fatalf("expected session status to be FAILED, got %s", s.Status)
-		}
-	}
-
-	foundAudit := false
-	for _, a := range audit.events {
-		if a == "ENTRY_FAILED" {
-			foundAudit = true
-			break
-		}
-	}
-	if !foundAudit {
-		t.Fatal("expected ENTRY_FAILED audit event")
-	}
-}
-
-func TestPayExit_FailedStatus_Success(t *testing.T) {
-	svc, repo, spots, _, _, audit := setupService(false, false)
-
-	sessionID := "failed-ocr-session"
-	repo.sessions[sessionID] = &model.Session{
-		ID:         sessionID,
-		Status:     "FAILED",
-		S3PhotoKey: "photos/blurry.jpg",
-		EnteredAt:  time.Now().Add(-1 * time.Hour),
-	}
-
-	initialSpots := spots.spots
-	paid, err := svc.PayExit(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("expected success paying FAILED session, got %v", err)
-	}
-	if paid.Status != "PAID" {
-		t.Fatalf("expected status PAID, got %s", paid.Status)
-	}
-	// For FAILED sessions, spots counter must NOT increment because it was never decremented
-	if spots.spots != initialSpots {
-		t.Fatalf("expected spots counter unchanged (%d), got %d", initialSpots, spots.spots)
-	}
-
-	foundAudit := false
-	for _, a := range audit.events {
-		if a == "EXIT_PAYMENT" {
-			foundAudit = true
-			break
-		}
-	}
-	if !foundAudit {
-		t.Fatal("expected EXIT_PAYMENT audit event")
-	}
-}
-
-func TestPayExit_ParkedStatus_Success(t *testing.T) {
-	svc, repo, spots, _, _, audit := setupService(false, false)
-
-	sessionID := "parked-session"
-	plate := "ABC1D23"
-	repo.sessions[sessionID] = &model.Session{
-		ID:           sessionID,
-		LicensePlate: &plate,
-		Status:       "PARKED",
-		S3PhotoKey:   "photos/valid.jpg",
-		EnteredAt:    time.Now().Add(-1 * time.Hour),
-	}
-
-	initialSpots := spots.spots
-	paid, err := svc.PayExit(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("expected success paying PARKED session, got %v", err)
-	}
-	if paid.Status != "PAID" {
-		t.Fatalf("expected status PAID, got %s", paid.Status)
-	}
-	// For PARKED sessions, spots counter must increment
-	if spots.spots != initialSpots+1 {
-		t.Fatalf("expected spots counter incremented to %d, got %d", initialSpots+1, spots.spots)
-	}
-
-	foundAudit := false
-	for _, a := range audit.events {
-		if a == "EXIT_PAYMENT" {
-			foundAudit = true
-			break
-		}
-	}
-	if !foundAudit {
-		t.Fatal("expected EXIT_PAYMENT audit event")
-	}
-}
-
-func TestPayExit_InvalidStatus(t *testing.T) {
-	svc, repo, _, _, _, _ := setupService(false, false)
-
-	sessionID := "processing-session"
-	repo.sessions[sessionID] = &model.Session{
-		ID:         sessionID,
-		Status:     "PROCESSING",
-		S3PhotoKey: "photos/processing.jpg",
-		EnteredAt:  time.Now().Add(-1 * time.Hour),
-	}
-
-	_, err := svc.PayExit(context.Background(), sessionID)
-	if err == nil {
-		t.Fatal("expected error when paying session in PROCESSING status, got nil")
-	}
-	if !errors.Is(err, service.ErrInvalidSessionStatus) {
-		t.Fatalf("expected ErrInvalidSessionStatus, got %v", err)
-	}
-
-	// Test with already PAID session
-	paidID := "paid-session"
-	repo.sessions[paidID] = &model.Session{
-		ID:         paidID,
-		Status:     "PAID",
-		S3PhotoKey: "photos/paid.jpg",
-		EnteredAt:  time.Now().Add(-2 * time.Hour),
-	}
-
-	_, err = svc.PayExit(context.Background(), paidID)
-	if err == nil {
-		t.Fatal("expected error when paying session already in PAID status, got nil")
-	}
-	if !errors.Is(err, service.ErrInvalidSessionStatus) {
-		t.Fatalf("expected ErrInvalidSessionStatus, got %v", err)
-	}
-}
-
-
-func hasEvent(audit *FakeAuditLogger, action string) bool {
-	for _, a := range audit.events {
-		if a == action {
-			return true
-		}
-	}
-	return false
-}
-
-func TestUpdatePlate_FailedSessionBecomesParkedAndTakesASpot(t *testing.T) {
-	svc, repo, spots, _, _, audit := setupService(false, false)
-	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED", EnteredAt: time.Now()}
-	before := spots.spots
-
-	got, err := svc.UpdatePlate(context.Background(), "s1", " abc-1d23 ")
-	if err != nil {
-		t.Fatalf("expected success, got %v", err)
-	}
-	if got.Status != "PARKED" || got.LicensePlate == nil || *got.LicensePlate != "ABC1D23" {
-		t.Fatalf("expected PARKED with ABC1D23, got %s %v", got.Status, got.LicensePlate)
-	}
-	// The FAILED session never took a spot; now that it is PARKED it does.
-	if spots.spots != before-1 {
-		t.Fatalf("expected spots %d, got %d", before-1, spots.spots)
-	}
-	if !hasEvent(audit, "PLATE_CORRECTION") {
-		t.Fatal("expected PLATE_CORRECTION audit event")
-	}
-}
-
-func TestUpdatePlate_ParkedSessionKeepsTheCounter(t *testing.T) {
+func TestPayExit_AlreadyPaid(t *testing.T) {
 	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["paid"] = &model.Session{ID: "paid", Status: model.StatusPaid, PlateStatus: model.PlateRead}
+
+	_, err := svc.PayExit(context.Background(), "paid")
+	if !errors.Is(err, service.ErrInvalidSessionStatus) {
+		t.Fatalf("expected ErrInvalidSessionStatus, got %v", err)
+	}
+	if spots.spots != 30 {
+		t.Fatalf("expected the counter untouched by a double payment, got %d", spots.spots)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plate typed by the cashier: a convenience, never a requirement
+// ---------------------------------------------------------------------------
+
+func TestUpdatePlate_FillsAnUnreadPlateWithoutTouchingTheCounter(t *testing.T) {
+	for _, plateStatus := range []string{model.PlatePending, model.PlateUnreadable} {
+		svc, repo, spots, _, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: plateStatus, EnteredAt: time.Now()}
+
+		got, err := svc.UpdatePlate(context.Background(), "s1", " abc-1d23 ")
+		if err != nil {
+			t.Fatalf("%s: expected success, got %v", plateStatus, err)
+		}
+		if got.Status != model.StatusParked || got.LicensePlate == nil || *got.LicensePlate != "ABC1D23" {
+			t.Fatalf("%s: expected PARKED with ABC1D23, got %s %v", plateStatus, got.Status, got.LicensePlate)
+		}
+		if got.PlateStatus != model.PlateManual {
+			t.Fatalf("%s: expected plate_status MANUAL, got %s", plateStatus, got.PlateStatus)
+		}
+		// The spot was taken at the entry; typing the plate must not take another.
+		if spots.spots != 30 {
+			t.Fatalf("%s: expected spots unchanged (30), got %d", plateStatus, spots.spots)
+		}
+		details := audit.detailsOf("PLATE_CORRECTION")
+		if details == nil {
+			t.Fatalf("%s: expected PLATE_CORRECTION audit event", plateStatus)
+		}
+		if details["previous_plate_status"] != plateStatus || details["previous_plate"] != nil {
+			t.Fatalf("%s: unexpected audit details %v", plateStatus, details)
+		}
+	}
+}
+
+func TestUpdatePlate_CorrectsAMisreadPlate(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
 	old := "ABC1234"
-	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "PARKED", LicensePlate: &old}
-	before := spots.spots
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: model.PlateRead, LicensePlate: &old}
 
 	got, err := svc.UpdatePlate(context.Background(), "s1", "LSN4I49")
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	if *got.LicensePlate != "LSN4I49" || spots.spots != before {
-		t.Fatalf("expected LSN4I49 and spots %d, got %s and %d", before, *got.LicensePlate, spots.spots)
+	if *got.LicensePlate != "LSN4I49" || got.PlateStatus != model.PlateManual || spots.spots != 30 {
+		t.Fatalf("expected LSN4I49/MANUAL and 30 spots, got %s/%s and %d", *got.LicensePlate, got.PlateStatus, spots.spots)
+	}
+	details := audit.detailsOf("PLATE_CORRECTION")
+	if details["previous_plate"] != "ABC1234" || details["previous_plate_status"] != model.PlateRead {
+		t.Fatalf("unexpected audit details %v", details)
 	}
 }
 
 func TestUpdatePlate_RejectsInvalidPlate(t *testing.T) {
 	svc, repo, _, _, _, _ := setupService(false, false)
-	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: model.PlateUnreadable}
 
 	for _, plate := range []string{"", "AB12345", "1234567", "ABC12345", "AB1234", "ABCDE12"} {
 		if _, err := svc.UpdatePlate(context.Background(), "s1", plate); !errors.Is(err, service.ErrInvalidPlate) {
@@ -607,59 +722,77 @@ func TestUpdatePlate_RejectsInvalidPlate(t *testing.T) {
 	}
 }
 
-func TestUpdatePlate_OnlyParkedOrFailed(t *testing.T) {
+func TestUpdatePlate_OnlyWhileParked(t *testing.T) {
 	svc, repo, _, _, _, _ := setupService(false, false)
-	repo.sessions["proc"] = &model.Session{ID: "proc", Status: "PROCESSING"}
-	repo.sessions["paid"] = &model.Session{ID: "paid", Status: "PAID"}
+	repo.sessions["paid"] = &model.Session{ID: "paid", Status: model.StatusPaid, PlateStatus: model.PlateUnreadable}
 
-	for _, id := range []string{"proc", "paid"} {
-		if _, err := svc.UpdatePlate(context.Background(), id, "ABC1D23"); !errors.Is(err, service.ErrSessionNotEditable) {
-			t.Fatalf("%s: expected ErrSessionNotEditable, got %v", id, err)
-		}
+	if _, err := svc.UpdatePlate(context.Background(), "paid", "ABC1D23"); !errors.Is(err, service.ErrSessionNotEditable) {
+		t.Fatalf("expected ErrSessionNotEditable, got %v", err)
 	}
 	if _, err := svc.UpdatePlate(context.Background(), "missing", "ABC1D23"); !errors.Is(err, service.ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
 
-func TestDeleteSession_ParkedFreesTheSpotAndRemovesThePhoto(t *testing.T) {
-	svc, repo, spots, storage, _, audit := setupService(false, false)
-	repo.sessions["s1"] = &model.Session{ID: "s1", Status: "PARKED", S3PhotoKey: "photos/s1_car.jpg"}
-	before := spots.spots
-
-	deleted, err := svc.DeleteSession(context.Background(), "s1")
-	if err != nil {
-		t.Fatalf("expected success, got %v", err)
-	}
-	if deleted.ID != "s1" {
-		t.Fatalf("expected deleted session s1, got %s", deleted.ID)
-	}
-	if _, ok := repo.sessions["s1"]; ok {
-		t.Fatal("expected session removed from the repository")
-	}
-	if spots.spots != before+1 {
-		t.Fatalf("expected spots %d, got %d", before+1, spots.spots)
-	}
-	if len(storage.deleted) != 1 || storage.deleted[0] != "photos/s1_car.jpg" {
-		t.Fatalf("expected photo deleted, got %v", storage.deleted)
-	}
-	if !hasEvent(audit, "SESSION_DELETE") {
-		t.Fatal("expected SESSION_DELETE audit event")
+func TestUpdatePlate_AcceptsMercosulCountries(t *testing.T) {
+	for plate, want := range map[string]string{
+		"abc-1d23":  "ABC1D23", // Brasil (Mercosul)
+		"ABC 1234":  "ABC1234", // Brasil (antiga) / Uruguai
+		"AA 562 AN": "AA562AN", // Argentina (Mercosul)
+		"MWV 724":   "MWV724",  // Argentina (antiga)
+		"ABCD 123":  "ABCD123", // Paraguai
+	} {
+		svc, repo, _, _, _, _ := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: model.PlateUnreadable}
+		got, err := svc.UpdatePlate(context.Background(), "s1", plate)
+		if err != nil || *got.LicensePlate != want {
+			t.Fatalf("%q: expected %s, got %v, %v", plate, want, got, err)
+		}
 	}
 }
 
-func TestDeleteSession_NonParkedKeepsTheCounter(t *testing.T) {
-	for _, status := range []string{"PROCESSING", "FAILED", "PAID"} {
-		svc, repo, spots, _, _, _ := setupService(false, false)
-		repo.sessions["s1"] = &model.Session{ID: "s1", Status: status}
-		before := spots.spots
+// ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
 
-		if _, err := svc.DeleteSession(context.Background(), "s1"); err != nil {
-			t.Fatalf("%s: expected success, got %v", status, err)
+func TestDeleteSession_ParkedFreesTheSpotAndRemovesThePhoto(t *testing.T) {
+	// Any PARKED session holds a spot, plate read or not.
+	for _, plateStatus := range []string{model.PlateRead, model.PlatePending, model.PlateUnreadable} {
+		svc, repo, spots, storage, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: plateStatus, S3PhotoKey: "photos/s1_car.jpg"}
+
+		deleted, err := svc.DeleteSession(context.Background(), "s1")
+		if err != nil {
+			t.Fatalf("%s: expected success, got %v", plateStatus, err)
 		}
-		if spots.spots != before {
-			t.Fatalf("%s: expected spots unchanged (%d), got %d", status, before, spots.spots)
+		if deleted.ID != "s1" {
+			t.Fatalf("%s: expected deleted session s1, got %s", plateStatus, deleted.ID)
 		}
+		if _, ok := repo.sessions["s1"]; ok {
+			t.Fatalf("%s: expected session removed from the repository", plateStatus)
+		}
+		if spots.spots != 31 {
+			t.Fatalf("%s: expected spots 31, got %d", plateStatus, spots.spots)
+		}
+		if len(storage.deleted) != 1 || storage.deleted[0] != "photos/s1_car.jpg" {
+			t.Fatalf("%s: expected photo deleted, got %v", plateStatus, storage.deleted)
+		}
+		if !hasEvent(audit, "SESSION_DELETE") {
+			t.Fatalf("%s: expected SESSION_DELETE audit event", plateStatus)
+		}
+	}
+}
+
+func TestDeleteSession_PaidKeepsTheCounter(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusPaid, PlateStatus: model.PlateRead}
+
+	if _, err := svc.DeleteSession(context.Background(), "s1"); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	// The spot was already given back at the payment.
+	if spots.spots != 30 {
+		t.Fatalf("expected spots unchanged (30), got %d", spots.spots)
 	}
 }
 
@@ -671,19 +804,92 @@ func TestDeleteSession_NotFound(t *testing.T) {
 	}
 }
 
-func TestUpdatePlate_AcceptsMercosulCountries(t *testing.T) {
-	for plate, want := range map[string]string{
-		"abc-1d23": "ABC1D23", // Brasil (Mercosul)
-		"ABC 1234": "ABC1234", // Brasil (antiga) / Uruguai
-		"AA 562 AN": "AA562AN", // Argentina (Mercosul)
-		"MWV 724":   "MWV724",  // Argentina (antiga)
-		"ABCD 123":  "ABCD123", // Paraguai
-	} {
-		svc, repo, _, _, _, _ := setupService(false, false)
-		repo.sessions["s1"] = &model.Session{ID: "s1", Status: "FAILED"}
-		got, err := svc.UpdatePlate(context.Background(), "s1", plate)
-		if err != nil || *got.LicensePlate != want {
-			t.Fatalf("%q: expected %s, got %v, %v", plate, want, got, err)
+// ---------------------------------------------------------------------------
+// Entry photo as evidence
+// ---------------------------------------------------------------------------
+
+func TestGetSessionPhoto_ReturnsTheStoredPhoto(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(false, false)
+	session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+	if err != nil {
+		t.Fatalf("failed to create entry: %v", err)
+	}
+
+	body, contentType, err := svc.GetSessionPhoto(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("expected the photo, got %v", err)
+	}
+	defer body.Close()
+	data, _ := io.ReadAll(body)
+	if string(data) != "test-photo-data" || contentType != "image/jpeg" {
+		t.Fatalf("unexpected photo: %q (%s)", data, contentType)
+	}
+}
+
+// The content type is whatever the uploader said; anything a browser could run
+// is served as a plain download.
+func TestGetSessionPhoto_DowngradesUnsafeContentTypes(t *testing.T) {
+	for _, uploaded := range []string{"text/html", "image/svg+xml", ""} {
+		svc, _, _, _, _, _ := setupService(false, false)
+		session, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), uploaded)
+		if err != nil {
+			t.Fatalf("failed to create entry: %v", err)
 		}
+		body, contentType, err := svc.GetSessionPhoto(context.Background(), session.ID)
+		if err != nil {
+			t.Fatalf("%q: expected the photo, got %v", uploaded, err)
+		}
+		body.Close()
+		if contentType != "application/octet-stream" {
+			t.Fatalf("%q: expected application/octet-stream, got %s", uploaded, contentType)
+		}
+	}
+}
+
+func TestGetSessionPhoto_Errors(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	repo.sessions["gone"] = &model.Session{ID: "gone", Status: model.StatusParked, S3PhotoKey: "photos/gone.jpg"}
+	repo.sessions["nokey"] = &model.Session{ID: "nokey", Status: model.StatusParked}
+
+	if _, _, err := svc.GetSessionPhoto(context.Background(), "missing"); !errors.Is(err, service.ErrSessionNotFound) {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+	for _, id := range []string{"gone", "nokey"} {
+		if _, _, err := svc.GetSessionPhoto(context.Background(), id); !errors.Is(err, service.ErrPhotoNotFound) {
+			t.Fatalf("%s: expected ErrPhotoNotFound, got %v", id, err)
+		}
+	}
+}
+
+func TestGetSessionPhoto_StorageError(t *testing.T) {
+	svc, repo, _, storage, _, _ := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, S3PhotoKey: "photos/s1.jpg"}
+	storage.shouldErr = true
+
+	_, _, err := svc.GetSessionPhoto(context.Background(), "s1")
+	if err == nil || errors.Is(err, service.ErrPhotoNotFound) {
+		t.Fatalf("expected a storage error, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+func TestFindSessions_FiltersByPlateStatus(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	plate := "ABC1D23"
+	repo.sessions["read"] = &model.Session{ID: "read", Status: model.StatusParked, PlateStatus: model.PlateRead, LicensePlate: &plate}
+	repo.sessions["unread"] = &model.Session{ID: "unread", Status: model.StatusParked, PlateStatus: model.PlateUnreadable}
+	repo.sessions["paid"] = &model.Session{ID: "paid", Status: model.StatusPaid, PlateStatus: model.PlateUnreadable}
+
+	got, err := svc.FindSessions(context.Background(), repository.SessionFilter{Status: model.StatusParked, PlateStatus: model.PlateUnreadable})
+	if err != nil || len(got) != 1 || got[0].ID != "unread" {
+		t.Fatalf("expected only the unread PARKED session, got %v, %v", got, err)
+	}
+
+	got, err = svc.FindSessions(context.Background(), repository.SessionFilter{Plate: "ABC1D23"})
+	if err != nil || len(got) != 1 || got[0].ID != "read" {
+		t.Fatalf("expected the session found by plate, got %v, %v", got, err)
 	}
 }

@@ -15,9 +15,14 @@ describe("describeDetails", () => {
   });
 
   it("traduz o status de ENTRY", () => {
-    expect(describeDetails({ status: "PROCESSING", s3_photo_key: "photos/x.jpg" })).toBe(
-      "Processando",
+    expect(describeDetails({ status: "PARKED", s3_photo_key: "photos/x.jpg" })).toBe(
+      "Estacionado",
     );
+  });
+
+  it("eventos antigos com status que não existem mais continuam legíveis", () => {
+    expect(describeDetails({ status: "PROCESSING" })).toBe("Processando");
+    expect(describeDetails({ status: "FAILED" })).toBe("Falha no OCR");
   });
 
   it("exibe o motivo de POISON_MESSAGE traduzido", () => {
@@ -60,25 +65,26 @@ describe("sortByNewest", () => {
 });
 
 describe("sessionInfo", () => {
-  it("combina placa/status das sessões com os eventos de OCR e de falha", () => {
+  it("combina placa/status das sessões com os eventos de leitura e de falha", () => {
     const info = sessionInfo(
       [
         { id: "a#1", action: "OCR_PROCESSING", entity_id: "a", timestamp: "", details: { license_plate: "AAA1A11" } },
-        { id: "d#2", action: "OCR_FAILED", entity_id: "d", timestamp: "", details: { status: "FAILED", reason: "unreadable plate: empty" } },
+        { id: "d#2", action: "OCR_FAILED", entity_id: "d", timestamp: "", details: { plate_status: "UNREADABLE", reason: "unreadable plate: empty" } },
         { id: "d#1", action: "POISON_MESSAGE", entity_id: "d", timestamp: "", details: { reason: "unreadable plate: no_match" } },
         { id: "e#1", action: "POISON_MESSAGE", entity_id: "e", timestamp: "", details: { reason: "S3 download failed: unavailable" } },
       ],
       [
-        { id: "b", license_plate: "BBB2B22", status: "PAID", s3_photo_key: "", entered_at: "" },
-        { id: "c", status: "FAILED", s3_photo_key: "", entered_at: "" },
+        { id: "b", license_plate: "BBB2B22", status: "PAID", plate_status: "READ", s3_photo_key: "", entered_at: "" },
+        { id: "c", status: "PARKED", plate_status: "UNREADABLE", s3_photo_key: "", entered_at: "" },
       ],
     );
-    expect(info.get("a")).toEqual({ plate: "AAA1A11" });
-    expect(info.get("b")).toEqual({ plate: "BBB2B22", status: "PAID" });
-    expect(info.get("c")).toEqual({ plate: undefined, status: "FAILED" });
+    // Sessão já excluída: só os eventos falam dela, e não há foto para abrir.
+    expect(info.get("a")).toEqual({ plate: "AAA1A11", plateStatus: "READ" });
+    expect(info.get("b")).toEqual({ plate: "BBB2B22", status: "PAID", plateStatus: "READ", hasPhoto: true });
+    // Sem placa, mas estacionada: nada de "falha" no status da sessão.
+    expect(info.get("c")).toEqual({ plate: undefined, status: "PARKED", plateStatus: "UNREADABLE", hasPhoto: true });
     // Motivo do evento mais recente (a lista vem do mais novo para o mais antigo).
-    expect(info.get("d")).toEqual({ status: "FAILED", failure: "Placa ilegível (nenhum texto reconhecido)" });
-    // POISON_MESSAGE sozinho não encerra a sessão.
+    expect(info.get("d")).toEqual({ plateStatus: "UNREADABLE", failure: "Placa ilegível (nenhum texto reconhecido)" });
     expect(info.get("e")).toEqual({ failure: "Falha ao baixar a foto (S3 indisponível)" });
   });
 });
@@ -107,40 +113,56 @@ describe("describeEvent", () => {
     action: "ENTRY",
     entity_id: "a",
     timestamp: "",
-    details: { status: "PROCESSING", s3_photo_key: "x" },
+    details: { status: "PARKED", s3_photo_key: "x", ocr_queued: true },
   };
 
-  it("entrada exibe Processando enquanto o OCR não terminou", () => {
-    expect(describeEvent(entry, undefined)).toBe("Processando");
-    expect(describeEvent(entry, { status: "PROCESSING" })).toBe("Processando");
-  });
-
-  it("entrada exibe Estacionado quando a placa foi identificada", () => {
-    expect(describeEvent(entry, { plate: "ABC1D23", status: "PARKED" })).toBe("Estacionado");
-    expect(describeEvent(entry, { plate: "ABC1D23" })).toBe("Estacionado");
-    // Mostra o estado ao qual a entrada levou, não o atual: já pago continua Estacionado.
+  it("entrada é sempre Estacionado: o ticket vale desde a emissão", () => {
+    expect(describeEvent(entry, undefined)).toBe("Estacionado");
+    expect(describeEvent(entry, { plate: "ABC1D23", status: "PARKED", plateStatus: "READ" })).toBe(
+      "Estacionado",
+    );
+    // Mostra o que a entrada produziu, não o estado atual: já pago continua Estacionado.
     expect(describeEvent(entry, { plate: "ABC1D23", status: "PAID" })).toBe("Estacionado");
   });
 
-  it("entrada exibe Falha no OCR quando a sessão terminou sem placa", () => {
-    expect(describeEvent(entry, { status: "FAILED" })).toBe("Falha no OCR");
-    expect(describeEvent(entry, { status: "PAID" })).toBe("Falha no OCR");
-  });
-
-  it("entrada com falha exibe o motivo", () => {
-    expect(describeEvent(entry, { status: "FAILED", failure: "Placa ilegível" })).toBe(
-      "Falha no OCR · Placa ilegível",
+  it("entrada com a placa ainda em leitura avisa, sem tratar como erro", () => {
+    expect(describeEvent(entry, { status: "PARKED", plateStatus: "PENDING" })).toBe(
+      "Estacionado · lendo placa",
     );
   });
 
-  it("entrada ainda PROCESSING com falha de infraestrutura exibe Erro no processamento", () => {
-    expect(describeEvent(entry, { status: "PROCESSING", failure: "Falha ao baixar a foto" })).toBe(
-      "Erro no processamento · Falha ao baixar a foto",
+  it("entrada cuja foto não deu placa continua Estacionado, com o motivo ao lado", () => {
+    expect(describeEvent(entry, { status: "PARKED", plateStatus: "UNREADABLE" })).toBe(
+      "Estacionado · sem placa",
     );
+    expect(
+      describeEvent(entry, { status: "PAID", plateStatus: "UNREADABLE", failure: "Placa ilegível" }),
+    ).toBe("Estacionado · sem placa: Placa ilegível");
+    expect(describeEvent(entry, { failure: "Falha ao baixar a foto" })).toBe(
+      "Estacionado · sem placa: Falha ao baixar a foto",
+    );
+  });
+
+  it("placa digitada no caixa depois de uma leitura falha não aparece como sem placa", () => {
+    expect(
+      describeEvent(entry, { plate: "ABC1D23", plateStatus: "MANUAL", failure: "Placa ilegível" }),
+    ).toBe("Estacionado");
+  });
+
+  it("entrada com a fila fora do ar diz que a foto não foi enviada para leitura", () => {
+    const unqueued = { ...entry, details: { status: "PARKED", ocr_queued: false, queue_error: "down" } };
+    expect(describeEvent(unqueued, { status: "PARKED", plateStatus: "UNREADABLE" })).toBe(
+      "Estacionado · foto não enviada para leitura (fila indisponível)",
+    );
+  });
+
+  it("entrada antiga (gravada como PROCESSING) é lida pelo mesmo critério", () => {
+    const legacy = { ...entry, details: { status: "PROCESSING", s3_photo_key: "x" } };
+    expect(describeEvent(legacy, { plate: "ABC1D23" })).toBe("Estacionado");
   });
 
   it("eventos de falha exibem só o motivo traduzido", () => {
-    const failed = { ...entry, action: "OCR_FAILED", details: { status: "FAILED", reason: "unreadable plate: no_match" } };
+    const failed = { ...entry, action: "OCR_FAILED", details: { plate_status: "UNREADABLE", reason: "unreadable plate: no_match" } };
     expect(describeEvent(failed, undefined)).toBe("Placa ilegível (texto fora do padrão de placa)");
     const entryFailed = { ...entry, action: "ENTRY_FAILED", details: { status: "FAILED", error: "queue down" } };
     expect(describeEvent(entryFailed, undefined)).toBe("queue down");
@@ -171,13 +193,18 @@ describe("describeEvent — placa manual e exclusão", () => {
     expect(describeEvent(event, undefined)).toMatch(/^Registro excluído · estava /);
   });
 
-  it("PLATE_CORRECTION deixa a sessão como estacionada com a placa nova", () => {
+  it("SESSION_DELETE de evento antigo traduz o status que não existe mais", () => {
+    const event: AuditEvent = { ...base, action: "SESSION_DELETE", details: { status: "FAILED" } };
+    expect(describeEvent(event, undefined)).toBe("Registro excluído · estava Falha no OCR");
+  });
+
+  it("PLATE_CORRECTION vence a leitura que falhou: placa nova, digitada no caixa", () => {
     const events: AuditEvent[] = [
       { ...base, id: "s1#2", action: "PLATE_CORRECTION", details: { license_plate: "ABC1D23", status: "PARKED" } },
       { ...base, id: "s1#1", action: "OCR_FAILED", details: { reason: "unreadable plate: no_match" } },
     ];
     const info = sessionInfo(events, []).get("s1");
     expect(info?.plate).toBe("ABC1D23");
-    expect(info?.status).toBe("PARKED");
+    expect(info?.plateStatus).toBe("MANUAL");
   });
 });

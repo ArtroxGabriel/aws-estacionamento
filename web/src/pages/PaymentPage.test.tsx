@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, deleteSession, listSessions, payExit, updatePlate } from "../services/api";
@@ -24,6 +24,7 @@ const older: Session = {
   id: "aaaa1111bbbb2222",
   license_plate: "ABC1D23",
   status: "PARKED",
+  plate_status: "READ",
   s3_photo_key: "photos/a.jpg",
   entered_at: minutesAgo(125),
 };
@@ -31,21 +32,31 @@ const newer: Session = {
   id: "cccc3333dddd4444",
   license_plate: "XYZ9876",
   status: "PARKED",
+  plate_status: "MANUAL",
   s3_photo_key: "photos/c.jpg",
   entered_at: minutesAgo(12),
 };
-const failed: Session = {
+// Carros estacionados cuja foto não deu placa: pagam pelo ticket como qualquer outro.
+const unread: Session = {
   id: "eeee5555ffff6666",
-  status: "FAILED",
+  status: "PARKED",
+  plate_status: "UNREADABLE",
   s3_photo_key: "photos/e.jpg",
   entered_at: minutesAgo(30),
+};
+const pending: Session = {
+  id: "9999aaaa8888bbbb",
+  status: "PARKED",
+  plate_status: "PENDING",
+  s3_photo_key: "photos/p.jpg",
+  entered_at: minutesAgo(1),
 };
 
 afterEach(() => {
   vi.resetAllMocks();
 });
 
-// A página consulta PARKED e FAILED; o mock responde por status.
+// A página consulta só PARKED; o mock responde por status.
 function mockSessions(sessions: Session[]) {
   mockedListSessions.mockImplementation(async (status?: SessionStatusFilter) =>
     sessions.filter((s) => s.status === status),
@@ -76,19 +87,76 @@ describe("PaymentPage", () => {
     expect(within(second).getByText("12min")).toBeInTheDocument();
   });
 
-  it("lista também as sessões com falha no OCR", async () => {
-    await renderWith([older, failed]);
+  it("consulta uma única lista: todo carro no pátio está PARKED", async () => {
+    await renderWith([older]);
 
+    expect(mockedListSessions).toHaveBeenCalledTimes(1);
     expect(mockedListSessions).toHaveBeenCalledWith("PARKED");
-    expect(mockedListSessions).toHaveBeenCalledWith("FAILED");
-    expect(rows()).toHaveLength(2);
-    expect(within(rows()[1]).getByText("Falha no OCR")).toBeInTheDocument();
-    expect(within(rows()[1]).getByText("eeee5555")).toBeInTheDocument();
+  });
+
+  it("lista os carros sem placa lida como qualquer outro, sem marca de falha", async () => {
+    await renderWith([older, unread, pending]);
+
+    expect(rows()).toHaveLength(3);
+    const [, unreadRow, pendingRow] = rows();
+    expect(within(unreadRow).getByText("Sem placa")).toBeInTheDocument();
+    expect(within(unreadRow).getByText("eeee5555")).toBeInTheDocument();
+    expect(within(unreadRow).getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(within(pendingRow).getByText("Lendo placa...")).toBeInTheDocument();
+    expect(within(pendingRow).getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(screen.queryByText(/falha/i)).not.toBeInTheDocument();
+  });
+
+  it("paga pelo ticket um carro sem placa, sem pedir a placa antes", async () => {
+    mockedPayExit.mockResolvedValue({
+      ...unread,
+      status: "PAID",
+      amount_paid: 10,
+      exited_at: "2026-10-03T16:10:00Z",
+    });
+    const { user } = await renderWith([unread]);
+
+    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
+
+    expect(mockedPayExit).toHaveBeenCalledWith(unread.id);
+    expect(mockedUpdatePlate).not.toHaveBeenCalled();
+    const receipt = await screen.findByRole("status");
+    expect(receipt).toHaveTextContent("Cancela de saída liberada");
+    expect(receipt).toHaveTextContent("eeee5555");
+    expect(receipt).toHaveTextContent("sem placa");
+  });
+
+  it("mostra a foto de entrada de cada ticket, com link para o tamanho real", async () => {
+    await renderWith([older, unread]);
+
+    const photo = screen.getByAltText("Foto de entrada do ticket eeee5555");
+    expect(photo).toHaveAttribute("src", "/api/sessions/eeee5555ffff6666/photo");
+    expect(photo.closest("a")).toHaveAttribute("href", "/api/sessions/eeee5555ffff6666/photo");
+    expect(screen.getByAltText("Foto de entrada do ticket aaaa1111")).toBeInTheDocument();
+  });
+
+  it("foto que não carrega vira um aviso discreto e não atrapalha o pagamento", async () => {
+    await renderWith([unread]);
+
+    fireEvent.error(screen.getByAltText("Foto de entrada do ticket eeee5555"));
+
+    expect(screen.getByText("Foto indisponível")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+  });
+
+  it("busca pelo ticket encontra o carro mesmo sem placa", async () => {
+    const { user } = await renderWith([older, unread]);
+
+    await user.type(screen.getByLabelText("Buscar por ticket ou placa"), "eeee55");
+
+    expect(rows()).toHaveLength(1);
+    expect(within(rows()[0]).getByText("Sem placa")).toBeInTheDocument();
   });
 
   it("busca por placa normalizada e por prefixo de ID", async () => {
     const { user } = await renderWith([older, newer]);
-    const search = screen.getByLabelText("Buscar por placa ou ID");
+    const search = screen.getByLabelText("Buscar por ticket ou placa");
 
     await user.type(search, "abc-1d23");
     expect(rows()).toHaveLength(1);
@@ -146,7 +214,7 @@ describe("PaymentPage", () => {
     expect(receipt).toHaveTextContent(/R\$\s10,00/);
     expect(rows()).toHaveLength(1);
     expect(within(screen.getByRole("table")).queryByText("ABC1D23")).not.toBeInTheDocument();
-    expect(mockedListSessions).toHaveBeenCalledTimes(4); // carga inicial + refresh (PARKED e FAILED)
+    expect(mockedListSessions).toHaveBeenCalledTimes(2); // carga inicial + refresh
   });
 
   it("erro 404 exibe Sessão não encontrada e a linha volta ao normal", async () => {
@@ -160,16 +228,14 @@ describe("PaymentPage", () => {
     expect(screen.getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
   });
 
-  it("erro 409 exibe que a sessão não está pronta para pagamento", async () => {
+  it("erro 409 exibe que o ticket já foi pago", async () => {
     mockedPayExit.mockRejectedValue(new ApiError(409, "session is not in a payable status"));
     const { user } = await renderWith([older]);
 
     await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
     await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "A sessão não está pronta para pagamento.",
-    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Este ticket já foi pago.");
   });
 
   it("lista vazia exibe Nenhum veículo estacionado", async () => {
@@ -190,20 +256,20 @@ describe("PaymentPage", () => {
 });
 
 describe("PaymentPage — placa manual e exclusão", () => {
-  it("Informar placa numa sessão FAILED envia a placa normalizada", async () => {
-    const { user } = await renderWith([failed]);
-    mockedUpdatePlate.mockResolvedValue({ ...failed, status: "PARKED", license_plate: "LSN4I49" });
+  it("Informar placa (opcional) num carro sem placa envia a placa normalizada", async () => {
+    const { user } = await renderWith([unread]);
+    mockedUpdatePlate.mockResolvedValue({ ...unread, plate_status: "MANUAL", license_plate: "LSN4I49" });
 
     await user.click(screen.getByRole("button", { name: "Informar placa" }));
     await user.type(screen.getByLabelText("Placa do veículo"), "lsn-4i49");
     await user.click(screen.getByRole("button", { name: "Salvar placa" }));
 
-    expect(mockedUpdatePlate).toHaveBeenCalledWith(failed.id, "LSN4I49");
+    expect(mockedUpdatePlate).toHaveBeenCalledWith(unread.id, "LSN4I49");
     expect(await screen.findByText(/Placa LSN4I49 registrada/)).toBeInTheDocument();
   });
 
   it("placa inválida mostra o formato esperado sem chamar a API", async () => {
-    const { user } = await renderWith([failed]);
+    const { user } = await renderWith([unread]);
 
     await user.click(screen.getByRole("button", { name: "Informar placa" }));
     await user.type(screen.getByLabelText("Placa do veículo"), "12AB");

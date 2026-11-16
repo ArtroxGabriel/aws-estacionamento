@@ -1,4 +1,4 @@
-import type { SessionStatus } from "../types/api";
+import type { PlateStatus, SessionStatus } from "../types/api";
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 
@@ -49,14 +49,23 @@ export function isValidPlate(value: string): boolean {
 }
 
 const statusLabels: Record<SessionStatus, string> = {
-  PROCESSING: "Processando",
   PARKED: "Estacionado",
   PAID: "Pago",
-  FAILED: "Falha no OCR",
 };
 
 export function statusLabel(status: SessionStatus): string {
   return statusLabels[status];
+}
+
+const plateStatusLabels: Record<PlateStatus, string> = {
+  PENDING: "Lendo placa...",
+  READ: "Lida pela foto",
+  UNREADABLE: "Sem placa",
+  MANUAL: "Digitada no caixa",
+};
+
+export function plateStatusLabel(status: PlateStatus): string {
+  return plateStatusLabels[status];
 }
 
 const actionLabels: Record<string, string> = {
@@ -64,7 +73,7 @@ const actionLabels: Record<string, string> = {
   OCR_PROCESSING: "Leitura de placa",
   EXIT_PAYMENT: "Pagamento/Saída",
   POISON_MESSAGE: "Falha no processamento",
-  OCR_FAILED: "Falha no OCR",
+  OCR_FAILED: "Placa não lida",
   ENTRY_FAILED: "Falha na entrada",
   PLATE_CORRECTION: "Placa informada",
   SESSION_DELETE: "Exclusão",

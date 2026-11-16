@@ -14,7 +14,7 @@ def test_stop_during_long_poll_lets_it_finish_and_releases_what_it_got():
     open on the SQS side; a message that arrived next was handed to that dead
     request and stayed invisible for the 300 s visibility timeout (observed on
     Floci). The poll must run to its end and its messages be released."""
-    poller, sessions, spots, _, sqs = make_poller()
+    poller, sessions, audit, sqs = make_poller()
     sqs.batches = [[make_message(handle="rh-1"), make_message(handle="rh-2")]]
     sqs.on_receive = lambda: poller.request_stop(15, None)  # signal mid-poll
 
@@ -23,12 +23,12 @@ def test_stop_during_long_poll_lets_it_finish_and_releases_what_it_got():
     assert sqs.receives == 1
     assert sqs.released == ["rh-1", "rh-2"]
     assert sqs.deleted == []
-    assert sessions.rows[SESSION_ID].status == "PROCESSING"
-    assert spots.decrements == 0
+    assert sessions.rows[SESSION_ID].plate_status == "PENDING"
+    assert audit.ocr_entries == []
 
 
 def test_stop_during_receive_backoff_ends_the_wait_at_once():
-    poller, _, _, _, sqs = make_poller()
+    poller, _, _, sqs = make_poller()
 
     def failing_receive():
         raise ConnectionError("SQS unreachable")
@@ -48,7 +48,7 @@ def test_stop_during_receive_backoff_ends_the_wait_at_once():
 def test_stop_mid_batch_finishes_current_message_and_releases_the_rest():
     """Regression: after SIGTERM the loop kept processing the rest of a batch
     of up to 10 messages."""
-    poller, sessions, spots, audit, sqs = make_poller()
+    poller, sessions, audit, sqs = make_poller()
     sqs.batches = [
         [
             make_message(handle="rh-1"),
@@ -67,15 +67,15 @@ def test_stop_mid_batch_finishes_current_message_and_releases_the_rest():
     assert poller.run() == 0
 
     # The in-flight message was not interrupted: fully processed and deleted.
-    assert sessions.rows[SESSION_ID].status == "PARKED"
-    assert spots.decrements == 1 and len(audit.ocr_entries) == 1
+    assert sessions.rows[SESSION_ID].plate_status == "READ"
+    assert len(audit.ocr_entries) == 1
     assert sqs.deleted == ["rh-1"]
     # The others go straight back to the queue instead of waiting 300 s.
     assert sqs.released == ["rh-2", "rh-3"]
 
 
 def test_stop_before_receive_does_not_poll():
-    poller, _, _, _, sqs = make_poller()
+    poller, _, _, sqs = make_poller()
     poller.request_stop(15, None)
 
     assert poller.run() == 0

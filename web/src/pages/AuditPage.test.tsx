@@ -21,7 +21,7 @@ const events: AuditEvent[] = [
     action: "ENTRY",
     entity_id: sessionId,
     timestamp: "2026-10-03T14:05:09.1Z",
-    details: { status: "PROCESSING", s3_photo_key: "photos/x.jpg" },
+    details: { status: "PARKED", s3_photo_key: "photos/x.jpg", ocr_queued: true },
   },
   {
     id: `${sessionId}#3`,
@@ -105,27 +105,38 @@ describe("AuditPage", () => {
     expect(plateCell(entry)).toHaveTextContent("ABC1D23");
     expect(plateCell(other)).toHaveTextContent("—");
     expect(within(exit).getAllByRole("cell")[4]).toHaveTextContent(/^Pago · R\$\s10,00$/);
-    expect(within(entry).getAllByRole("cell")[2]).toHaveAttribute("title", sessionId);
+    expect(within(entry).getByTitle(sessionId)).toHaveTextContent("9f2c4e1a");
   });
 
-  it("entrada exibe o resultado do OCR da sessão em Detalhes", async () => {
+  it("entrada exibe Estacionado em Detalhes", async () => {
     await renderPage();
     const entry = rows()[2];
-    expect(within(entry).getAllByRole("cell")[4]).toHaveTextContent("Estacionado");
+    expect(within(entry).getAllByRole("cell")[4]).toHaveTextContent(/^Estacionado$/);
   });
 
-  it("entrada ainda sem leitura de placa exibe Processando", async () => {
+  it("entrada ainda sem leitura de placa já é Estacionado, com a leitura em andamento", async () => {
     await renderPage([events[0]], [
-      { id: sessionId, status: "PROCESSING", s3_photo_key: "x", entered_at: "" },
+      { id: sessionId, status: "PARKED", plate_status: "PENDING", s3_photo_key: "x", entered_at: "" },
     ]);
-    expect(within(rows()[0]).getAllByRole("cell")[4]).toHaveTextContent("Processando");
+    expect(within(rows()[0]).getAllByRole("cell")[4]).toHaveTextContent("Estacionado · lendo placa");
+  });
+
+  it("oferece a foto de entrada das sessões que ainda existem", async () => {
+    await renderPage(events, [
+      { id: sessionId, license_plate: "ABC1D23", status: "PAID", plate_status: "READ", s3_photo_key: "x", entered_at: "" },
+    ]);
+    const links = screen.getAllByRole("link", { name: "Foto de entrada do ticket 9f2c4e1a" });
+    expect(links).toHaveLength(3); // entrada, leitura e pagamento
+    expect(links[0]).toHaveAttribute("href", `/api/sessions/${sessionId}/photo`);
+    // A sessão do outro evento não está no banco (excluída): sem link morto.
+    expect(within(rows()[3]).queryByRole("link")).not.toBeInTheDocument();
   });
 
   it("usa a placa das sessões quando o evento de OCR não está na lista", async () => {
     const payment = events[1];
     await renderPage(
       [payment],
-      [{ id: sessionId, license_plate: "BRA2E19", status: "PAID", s3_photo_key: "x", entered_at: "" }],
+      [{ id: sessionId, license_plate: "BRA2E19", status: "PAID", plate_status: "READ", s3_photo_key: "x", entered_at: "" }],
     );
     expect(mockedListSessions).toHaveBeenCalledWith("ALL");
     expect(within(rows()[0]).getAllByRole("cell")[3]).toHaveTextContent("BRA2E19");
@@ -169,74 +180,101 @@ describe("AuditPage", () => {
     expect(mockedListAuditEvents).toHaveBeenCalledTimes(2);
   });
 
-  describe("falhas do worker", () => {
-    const failedId = "deadbeef00112233";
+  describe("leituras de placa que falharam", () => {
+    const unreadId = "deadbeef00112233";
     const failureEvents: AuditEvent[] = [
       {
-        id: `${failedId}#1`,
+        id: `${unreadId}#1`,
         action: "ENTRY",
-        entity_id: failedId,
+        entity_id: unreadId,
         timestamp: "2026-10-03T15:00:00Z",
-        details: { status: "PROCESSING", s3_photo_key: "photos/y.jpg" },
+        details: { status: "PARKED", s3_photo_key: "photos/y.jpg", ocr_queued: true },
       },
       {
-        id: `${failedId}#2`,
+        id: `${unreadId}#2`,
         action: "POISON_MESSAGE",
-        entity_id: failedId,
+        entity_id: unreadId,
         timestamp: "2026-10-03T15:10:00Z",
-        details: { session_id: failedId, reason: "unreadable plate: no_match" },
+        details: { session_id: unreadId, reason: "unreadable plate: no_match" },
       },
       {
-        id: `${failedId}#3`,
+        id: `${unreadId}#3`,
         action: "OCR_FAILED",
-        entity_id: failedId,
+        entity_id: unreadId,
         timestamp: "2026-10-03T15:10:01Z",
-        details: { session_id: failedId, status: "FAILED", reason: "unreadable plate: no_match" },
+        details: { session_id: unreadId, plate_status: "UNREADABLE", reason: "unreadable plate: no_match" },
       },
     ];
-    const failedSession: Session = {
-      id: failedId,
-      status: "FAILED",
+    const unreadSession: Session = {
+      id: unreadId,
+      status: "PARKED",
+      plate_status: "UNREADABLE",
       s3_photo_key: "photos/y.jpg",
       entered_at: "2026-10-03T15:00:00Z",
     };
 
-    it("exibe as falhas com rótulo, motivo traduzido e sem placa", async () => {
-      await renderPage(failureEvents, [failedSession]);
+    it("exibe a leitura que falhou com motivo traduzido; a entrada continua Estacionado", async () => {
+      await renderPage(failureEvents, [unreadSession]);
       const [ocrFailed, poison, entry] = rows();
       const cells = (row: HTMLElement) => within(row).getAllByRole("cell");
 
-      expect(cells(ocrFailed)[1]).toHaveTextContent("Falha no OCR");
+      expect(cells(ocrFailed)[1]).toHaveTextContent("Placa não lida");
       expect(cells(ocrFailed)[3]).toHaveTextContent("—");
       expect(cells(ocrFailed)[4]).toHaveTextContent("Placa ilegível (texto fora do padrão de placa)");
       expect(cells(poison)[1]).toHaveTextContent("Falha no processamento");
       expect(cells(entry)[4]).toHaveTextContent(
-        "Falha no OCR · Placa ilegível (texto fora do padrão de placa)",
+        "Estacionado · sem placa: Placa ilegível (texto fora do padrão de placa)",
       );
       expect(ocrFailed).toHaveClass("bg-red-50");
       expect(entry).not.toHaveClass("bg-red-50");
     });
 
     it("filtro Somente falhas mostra só os eventos de falha", async () => {
-      const { user } = await renderPage([...events, ...failureEvents], [failedSession]);
+      const { user } = await renderPage([...events, ...failureEvents], [unreadSession]);
       await user.selectOptions(screen.getByLabelText("Ação"), "Somente falhas");
       expect(rows().map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
-        "Falha no OCR",
+        "Placa não lida",
         "Falha no processamento",
       ]);
     });
 
-    it("falha de infraestrutura com sessão ainda PROCESSING aparece como erro na entrada", async () => {
+    it("entrada com a fila fora do ar aparece como Estacionado, com a foto não enviada", async () => {
       await renderPage(
         [
-          failureEvents[0],
-          { ...failureEvents[1], details: { session_id: failedId, reason: "S3 download failed: unavailable" } },
+          {
+            ...failureEvents[0],
+            details: { status: "PARKED", s3_photo_key: "photos/y.jpg", ocr_queued: false, queue_error: "down" },
+          },
         ],
-        [{ ...failedSession, status: "PROCESSING" }],
+        [unreadSession],
       );
-      expect(within(rows()[1]).getAllByRole("cell")[4]).toHaveTextContent(
-        "Erro no processamento · Falha ao baixar a foto (S3 indisponível)",
+      expect(within(rows()[0]).getAllByRole("cell")[4]).toHaveTextContent(
+        "Estacionado · foto não enviada para leitura (fila indisponível)",
       );
+      expect(rows()[0]).not.toHaveClass("bg-red-50");
+    });
+
+    it("eventos antigos (PROCESSING/FAILED/ENTRY_FAILED) continuam sendo exibidos", async () => {
+      await renderPage([
+        {
+          id: "old#2",
+          action: "ENTRY_FAILED",
+          entity_id: "0ld0ld0ld0ld",
+          timestamp: "2026-09-01T10:00:01Z",
+          details: { status: "FAILED", error: "queue down" },
+        },
+        {
+          id: "old#1",
+          action: "SESSION_DELETE",
+          entity_id: "0ld0ld0ld0ld",
+          timestamp: "2026-09-01T10:00:00Z",
+          details: { status: "PROCESSING" },
+        },
+      ]);
+      const cells = (row: HTMLElement) => within(row).getAllByRole("cell");
+      expect(cells(rows()[0])[1]).toHaveTextContent("Falha na entrada");
+      expect(cells(rows()[0])[4]).toHaveTextContent("queue down");
+      expect(cells(rows()[1])[4]).toHaveTextContent("Registro excluído · estava Processando");
     });
   });
 });

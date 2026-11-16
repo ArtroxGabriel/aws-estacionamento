@@ -4,6 +4,12 @@ Holds the pure ``Session_Message`` parsing/validation layer, the Poller (SQS
 long-polling loop, idempotency branch, transactional side effects, poison
 classification, graceful shutdown) and the ``main`` startup wiring.
 
+The Worker only *enriches* a session: the car is already in, holding its spot,
+and its ticket is valid from the moment the API created the session. All the
+Worker does is read the plate from the entry photo and record it
+(``plate_status`` ``PENDING`` -> ``READ`` | ``UNREADABLE``). It never changes
+the session ``status`` nor the spots counter.
+
 Shared contract (from the Go API, see design.md "SQS Session_Message"):
 the SQS message body is a bare JSON object ``{"session_id", "s3_key"}`` with
 no SNS envelope.
@@ -30,12 +36,7 @@ from parser import (
 from storage.audit import AuditError, AuditLogger
 from storage.clients import dynamodb_client, rekognition_client, s3_client, sqs_client
 from storage.s3_store import RetrievalError, S3Connector
-from storage.session_repo import SessionRepository
-from storage.spots import (
-    SpotsCounter,
-    SpotsError,
-    SpotsUnderflowError,
-)
+from storage.session_repo import PLATE_PENDING, SessionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,6 @@ __all__ = [
     "MAX_RECEIVE_COUNT",
     "Outcome",
     "Poller",
-    "STATUS_FAILED",
-    "STATUS_PARKED",
-    "STATUS_PROCESSING",
-    "STATUS_PAID",
     "SessionMessage",
     "main",
     "parse_session_message",
@@ -92,30 +89,25 @@ class _Interrupted(BaseException):
 # branch, the ordered side effects, message deletion, poison classification,
 # and graceful shutdown.
 #
-# Session status strings — the shared contract with the Go API. The Worker
-# only ever advances ``PROCESSING`` -> ``PARKED``; ``PAID`` is a terminal
-# state owned by the API's exit/payment flow.
-STATUS_PROCESSING = "PROCESSING"
-STATUS_PARKED = "PARKED"
-STATUS_PAID = "PAID"
-STATUS_FAILED = "FAILED"
-
-# Statuses that make a message terminal/idempotent: the session already
-# advanced past PROCESSING, so no side effects re-run and the message is
-# deleted (Req 11.1, 11.2).
-_TERMINAL_STATUSES = frozenset({STATUS_PARKED, STATUS_PAID, STATUS_FAILED})
+# The Worker's whole state machine is ``plate_status``: it only ever moves a
+# session from ``PENDING`` to ``READ`` or ``UNREADABLE``. Anything else
+# (``READ``/``UNREADABLE`` already recorded, ``MANUAL`` typed by the cashier)
+# makes the message terminal/idempotent. The session ``status``
+# (``PARKED``/``PAID``) belongs to the API and is never read as a gate here: a
+# car that already paid still gets its plate recorded as evidence.
 
 
 class Outcome(enum.Enum):
     """How the Poller should treat a message after ``_handle`` returns.
 
     The mapping to the actual SQS operation is applied by the loop (task 15.1):
-      - ``DELETE`` — success, or a terminal/idempotent state (already
-        ``PARKED``/``PAID``, or the session does not exist): ``DeleteMessage``
-        (Req 1.4, 9.1, 11.1, 11.2, 11.3).
-      - ``RETAIN`` — a transient failure, a downstream connection error, or an
-        unreadable plate: leave the message for redelivery, never delete
-        (Req 9.2, 10.1, 10.3, 11.4, 13.1, 13.3). This is the fail-safe default.
+      - ``DELETE`` — the plate was recorded, the photo was recorded as
+        unreadable, or the message is terminal/idempotent (``plate_status`` is
+        no longer ``PENDING``, or the session does not exist):
+        ``DeleteMessage`` (Req 1.4, 9.1, 11.1, 11.2, 11.3).
+      - ``RETAIN`` — a transient failure or a downstream connection error:
+        leave the message for redelivery, never delete (Req 9.2, 10.1, 11.4,
+        13.1, 13.3). This is the fail-safe default.
       - ``POISON`` — the message exceeded the configured receive count or is
         malformed: rely on the SQS redrive policy to move it (task 14.1).
     """
@@ -125,44 +117,23 @@ class Outcome(enum.Enum):
     POISON = "poison"
 
 
-def _is_permanent_failure(reason: str | None) -> bool:
-    """True if reason represents an unrecoverable payload or OCR failure.
-
-    Transient infrastructure failures (S3 download, RDS unreachable, Redis/DynamoDB)
-    must leave the session in PROCESSING so redrive from DLQ can succeed once the
-    dependency recovers.
-    """
-    if not reason:
-        return False
-    if reason.startswith("OCR failed") or reason.startswith("unreadable plate"):
-        return True
-    validation_markers = (
-        "JSON",
-        "invalid message",
-        "missing session_id",
-        "session_id",
-        "missing s3_key",
-        "s3_key",
-    )
-    return any(marker in reason for marker in validation_markers)
-
-
 class Poller:
-    """Consumes ``Session_Message`` events and advances parking sessions.
+    """Consumes ``Session_Message`` events and records the plate of each photo.
 
     Wires together the pure OCR layer (``ocr/``) and the I/O connectors
     (``storage/``) supplied at construction. All collaborators are injected so
     the orchestration logic can be exercised with in-memory fakes.
 
     The ``_handle`` method drives one message end-to-end through the fixed
-    pipeline from design.md "Processing Pipeline": parse/validate -> session
-    lookup -> idempotency branch -> S3 download -> OCR -> normalize -> ordered
-    side effects (RDS conditional UPDATE -> Redis DECR -> DynamoDB PutItem)
-    -> report ``DELETE`` so the loop performs the SQS ``DeleteMessage`` last.
+    pipeline: parse/validate -> session lookup -> idempotency branch -> S3
+    download -> OCR -> normalize -> side effects (RDS conditional UPDATE ->
+    DynamoDB PutItem) -> report ``DELETE`` so the loop performs the SQS
+    ``DeleteMessage`` last.
 
-    The guiding rule is **fail safe toward RETAIN**: any pipeline error,
-    lookup failure, unreadable plate, or downstream connection error leaves the
-    message in the queue for redelivery and never deletes it.
+    The guiding rule is **fail safe toward RETAIN**: any pipeline error, lookup
+    failure or downstream connection error leaves the message in the queue for
+    redelivery. Nothing here can block a car: whatever happens to the photo,
+    the session is already ``PARKED`` and its ticket pays.
     """
 
     def __init__(
@@ -171,7 +142,6 @@ class Poller:
         sqs: Any,
         s3: S3Connector,
         sessions: SessionRepository,
-        spots: SpotsCounter,
         audit: AuditLogger,
         ocr: Any = None,
         normalizer: Any = None,
@@ -179,19 +149,16 @@ class Poller:
         """Store configuration and the injected connectors/pure functions.
 
         ``sqs`` is the low-level boto3 SQS client (the loop uses it for
-        ``ReceiveMessage``/``DeleteMessage``); ``s3``/``sessions``/``spots``/
-        ``audit`` are the ``storage/`` connectors. ``ocr`` and ``normalizer``
-        default to the pure ``ocr/`` functions (``extract_text`` and
-        ``normalize``) but may be overridden with fakes in tests. Matches the
-        design's constructor signature
-        ``__init__(self, cfg, sqs, s3, sessions, spots, audit, ocr, normalizer)``.
+        ``ReceiveMessage``/``DeleteMessage``); ``s3``/``sessions``/``audit``
+        are the ``storage/`` connectors. ``ocr`` and ``normalizer`` default to
+        the pure ``ocr/`` functions (``extract_text`` and ``normalize``) but
+        may be overridden with fakes in tests.
         """
 
         self._cfg = cfg
         self._sqs = sqs
         self._s3 = s3
         self._sessions = sessions
-        self._spots = spots
         self._audit = audit
         # Default to the pure OCR-layer functions; tests may inject fakes.
         self._ocr = ocr if ocr is not None else extract_text
@@ -225,6 +192,11 @@ class Poller:
         failure reason is audited once. A message seen *beyond* the threshold
         means the redrive is missing or lagging: it was already audited, so it
         is neither reprocessed nor re-audited.
+
+        Giving up on a message also closes the plate reading: the session goes
+        ``PENDING`` -> ``UNREADABLE`` whatever the reason was (bad photo or an
+        outage), so nothing shows "reading the plate" forever. The cashier can
+        still type the plate, and the ticket works either way.
         """
 
         body = msg.get("Body", "")
@@ -251,8 +223,8 @@ class Poller:
                 reason,
             )
             self._log_poison_best_effort(session_id, reason or "processing failed")
-            if parsed.message is not None and _is_permanent_failure(reason):
-                self._mark_session_failed_best_effort(session_id, reason or "processing failed")
+            if parsed.message is not None:
+                self._mark_unreadable_best_effort(session_id, reason or "processing failed")
             return Outcome.POISON
 
         return outcome
@@ -287,28 +259,20 @@ class Poller:
             )
             return Outcome.RETAIN, "session lookup failed (RDS)"
 
-        # 3. Idempotency branch (Req 11.1, 11.2, 11.3). A missing session or a
-        # session already past PROCESSING is terminal: delete without side
-        # effects.
+        # 3. Idempotency branch (Req 11.1, 11.2, 11.3). A missing session (the
+        # cashier deleted it) or a plate that is no longer PENDING (already
+        # read, already given up on, or typed by the cashier) is terminal:
+        # delete without side effects. The session status is not looked at.
         if row is None:
             logger.info("session %s not found; deleting message", session_id)
             return Outcome.DELETE, None
-        if row.status in _TERMINAL_STATUSES:
+        if row.plate_status != PLATE_PENDING:
             logger.info(
-                "session %s already %s; deleting message (idempotent)",
+                "session %s plate already %s; deleting message (idempotent)",
                 session_id,
-                row.status,
+                row.plate_status,
             )
             return Outcome.DELETE, None
-        if row.status != STATUS_PROCESSING:
-            # Any other unexpected status is treated conservatively: leave the
-            # message for redelivery rather than deleting a state we do not own.
-            logger.warning(
-                "session %s in unexpected status %s; retaining message",
-                session_id,
-                row.status,
-            )
-            return Outcome.RETAIN, f"unexpected session status {row.status}"
 
         # 4. Download the photo from S3 (Req 3.x). Any retrieval error retains
         # the message (fail safe toward redelivery).
@@ -344,25 +308,31 @@ class Poller:
 
         # 6. Normalize the raw text into a canonical plate (Req 5.x). OCR is
         # deterministic, so an unreadable plate would fail again on every
-        # redelivery: the session becomes FAILED at once (the cashier types the
-        # plate) and the message is deleted. Only a failed RDS update retains.
+        # redelivery: the photo is recorded as UNREADABLE at once and the
+        # message is deleted. The session is untouched (still PARKED, ticket
+        # valid); the cashier may type the plate if they want to. Only a failed
+        # RDS update retains.
         plate_result: PlateResult = self._normalizer(
             ocr_result.raw_text, mercosul=ocr_result.mercosul
         )
         if not plate_result.ok or plate_result.plate is None:
             reason = f"unreadable plate: {plate_result.reason}"
-            logger.warning("%s for %s; marking session FAILED", reason, session_id)
+            logger.warning("%s for %s; recording plate as UNREADABLE", reason, session_id)
             try:
-                failed = self._sessions.mark_failed(session_id)
+                marked = self._sessions.mark_unreadable(session_id)
             except Exception as exc:  # noqa: BLE001 - keep the message for a retry
-                logger.error("failed to mark %s as FAILED: dependency=RDS: %s", session_id, exc)
+                logger.error(
+                    "failed to mark the plate of %s as UNREADABLE: dependency=RDS: %s",
+                    session_id,
+                    exc,
+                )
                 return Outcome.RETAIN, "session update failed (RDS)"
-            if failed:
+            if marked:
                 self._log_failed_best_effort(session_id, reason)
             return Outcome.DELETE, None
 
-        # 7. Ordered side effects. The plate is readable and the session is
-        # PROCESSING, so apply the durable transition and its follow-on effects.
+        # 7. Side effects. The plate is readable and still PENDING, so record
+        # it and audit the reading.
         return self._apply_side_effects(session_id, plate_result.plate)
 
     def _receive_count(self, msg: dict[str, Any]) -> int:
@@ -388,52 +358,39 @@ class Poller:
         return count if count >= 1 else 1
 
     def _apply_side_effects(self, session_id: str, plate: str) -> tuple[Outcome, str | None]:
-        """Apply RDS -> Redis -> DynamoDB atomically; the loop deletes SQS last.
+        """Apply RDS -> DynamoDB atomically; the loop deletes SQS last.
 
         The RDS conditional ``UPDATE`` is the idempotency gate (Req 6.1, 6.6,
-        11.5), and its transaction stays open while the follow-on effects run:
+        11.5), and its transaction stays open while the audit entry is written:
 
-          1. ``UPDATE ... WHERE status='PROCESSING'`` inside a transaction. Zero
-             rows updated means another delivery already advanced the row, so
-             nothing else runs and the message is deleted.
-          2. Redis ``DECR`` — only on the transition, so exactly once per
-             session (Req 7.1, 7.4). Underflow is clamped by the connector and
-             does not abort the transition (Req 7.5).
-          3. DynamoDB ``PutItem`` with ``action=OCR_PROCESSING`` (Req 8.1).
-          4. ``COMMIT``.
+          1. ``UPDATE ... SET plate_status='READ' WHERE plate_status='PENDING'``
+             inside a transaction. Zero rows updated means another delivery
+             already recorded a result, or the cashier typed the plate in the
+             meantime, so nothing else runs and the message is deleted.
+          2. DynamoDB ``PutItem`` with ``action=OCR_PROCESSING`` (Req 8.1).
+          3. ``COMMIT``.
 
         If any step fails, the transaction rolls back so the row stays
-        ``PROCESSING`` and the message is retained (Req 9.2, 13.3). A DECR that
-        already happened is compensated with an ``INCR``, so the redelivery
-        re-runs the whole pipeline from a clean state instead of finding a
-        ``PARKED`` row whose side effects were never applied. The only effect
-        that cannot be undone is an audit entry written right before a failed
-        COMMIT; that leaves an extra ``OCR_PROCESSING`` entry, never a missing
-        one.
+        ``PENDING`` and the message is retained (Req 9.2, 13.3): the redelivery
+        re-runs the whole pipeline instead of finding a ``READ`` row that was
+        never audited. The only effect that cannot be undone is an audit entry
+        written right before a failed COMMIT; that leaves an extra
+        ``OCR_PROCESSING`` entry, never a missing one.
+
+        The spots counter is not involved: the API took the spot when the car
+        came in.
         """
 
         step = "RDS"
-        decremented = False
         try:
-            with self._sessions.parking_transition(session_id, plate) as transitioned:
+            with self._sessions.plate_transition(session_id, plate) as transitioned:
                 if not transitioned:
                     logger.info(
-                        "session %s no longer PROCESSING at update time; "
+                        "session %s plate no longer PENDING at update time; "
                         "skipping side effects, deleting message",
                         session_id,
                     )
                     return Outcome.DELETE, None
-
-                step = "Redis"
-                try:
-                    # None: the counter key is absent (e.g. Redis restarted);
-                    # the API rebuilds it from RDS, which will count this
-                    # session once the transaction commits.
-                    decremented = self._spots.decrement() is not None
-                except SpotsUnderflowError as exc:
-                    # Counter clamped at 0 (net effect zero): nothing to
-                    # compensate, and the transition proceeds.
-                    logger.error("spots counter underflow for %s: %s", session_id, exc)
 
                 step = "DynamoDB"
                 self._audit.log_ocr(session_id, plate)
@@ -446,25 +403,10 @@ class Poller:
                 step,
                 exc,
             )
-            if decremented:
-                self._compensate_decrement(session_id)
             return Outcome.RETAIN, f"{step} failed"
 
-        logger.info("session %s parked with plate %s", session_id, plate)
+        logger.info("session %s plate read: %s", session_id, plate)
         return Outcome.DELETE, None
-
-    def _compensate_decrement(self, session_id: str) -> None:
-        """Undo a DECR whose RDS transaction rolled back."""
-
-        try:
-            self._spots.increment()
-        except Exception as exc:  # noqa: BLE001 - nothing else can be done here
-            logger.error(
-                "failed to compensate spots decrement for %s; counter is now one "
-                "below the committed state until rehydrated: dependency=Redis: %s",
-                session_id,
-                exc,
-            )
 
     def _log_poison_best_effort(self, session_id: str, reason: str) -> None:
         """Record a poison classification reason without blocking (Req 12.1).
@@ -482,14 +424,14 @@ class Poller:
                 exc,
             )
 
-    def _mark_session_failed_best_effort(self, session_id: str, reason: str = "") -> None:
-        """Mark a session as FAILED in RDS and audit the state change (best-effort)."""
+    def _mark_unreadable_best_effort(self, session_id: str, reason: str = "") -> None:
+        """Close a plate reading that will not be retried and audit it (best-effort)."""
         try:
-            if self._sessions.mark_failed(session_id):
+            if self._sessions.mark_unreadable(session_id):
                 self._log_failed_best_effort(session_id, reason)
         except Exception as exc:  # noqa: BLE001 - best-effort status update
             logger.error(
-                "failed to mark session %s as FAILED in RDS: %s",
+                "failed to mark the plate of session %s as UNREADABLE in RDS: %s",
                 session_id,
                 exc,
             )
@@ -697,7 +639,7 @@ class Poller:
             raise _Interrupted
 
     def close(self) -> None:
-        """Close RDS/Redis/AWS connections, surviving individual failures.
+        """Close RDS/AWS connections, surviving individual failures.
 
         Each connector is closed independently; a failure closing one is logged
         with the failed dependency and the routine proceeds to the next, so no
@@ -706,9 +648,8 @@ class Poller:
         """
 
         # (connector, dependency-label) pairs; only those exposing close() are
-        # invoked. Redis (spots) is explicitly required to be closed (Req 16.5).
+        # invoked.
         for connector, dependency in (
-            (self._spots, "Redis"),
             (self._sessions, "RDS"),
             (self._sqs, "SQS"),
             (self._s3, "S3"),
@@ -751,9 +692,9 @@ def main(argv: list[str] | None = None) -> int:
          non-zero exit code without starting the loop (Req 14.2, 16.4).
       3. Build the S3/SQS/DynamoDB boto3 clients through the shared factory so
          every client resolves the same endpoint (Req 15.1, 15.5).
-      4. Construct the connectors. ``SpotsCounter`` and ``AuditLogger`` fail
-         construction on an absent target (Req 7.3, 8.6); any construction error
-         is caught and returns a non-zero exit code before the loop.
+      4. Construct the connectors. ``AuditLogger`` fails construction on an
+         absent target (Req 8.6); any construction error is caught and returns
+         a non-zero exit code before the loop.
       5. Construct the Poller, injecting cfg + the SQS client + connectors +
          the pure OCR/normalizer functions.
       6. Install SIGTERM/SIGINT handlers pointing at ``poller.request_stop`` for
@@ -782,9 +723,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Step 3: build the AWS clients through the shared factory (Req 15.1, 15.5).
-    # Step 4: construct the connectors. SpotsCounter/AuditLogger raise on an
-    # absent target (Req 7.3, 8.6); catch any construction failure and fail fast
-    # rather than entering the loop half-wired (Req 1.7).
+    # Step 4: construct the connectors. AuditLogger raises on an absent target
+    # (Req 8.6); catch any construction failure and fail fast rather than
+    # entering the loop half-wired (Req 1.7).
     try:
         s3 = s3_client(cfg)
         sqs = sqs_client(cfg)
@@ -792,7 +733,6 @@ def main(argv: list[str] | None = None) -> int:
 
         s3_connector = S3Connector(s3, cfg.s3_bucket_name)
         sessions = SessionRepository(cfg.database_url)
-        spots = SpotsCounter(cfg.redis_url)
         audit = AuditLogger(dynamodb, cfg.dynamodb_table_name)
         # Rekognition (AWS only) reads real photos far better than Tesseract
         # and falls back to it; the emulator has no Rekognition.
@@ -800,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.ocr_engine == "rekognition":
             ocr = HybridOcr(rekognition_client(cfg))
         logger.info("OCR engine: %s", cfg.ocr_engine)
-    except (SpotsError, AuditError) as exc:
+    except AuditError as exc:
         logger.error("connector initialization failed; aborting: %s", exc)
         return 2
     except Exception as exc:  # noqa: BLE001 - any startup failure must fail fast
@@ -815,7 +755,6 @@ def main(argv: list[str] | None = None) -> int:
         sqs=sqs,
         s3=s3_connector,
         sessions=sessions,
-        spots=spots,
         audit=audit,
         ocr=ocr,
         normalizer=normalize_plate,

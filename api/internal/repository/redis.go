@@ -51,3 +51,21 @@ return redis.call('DECR', KEYS[1])
 func (r *RedisSpotsRepo) Decrement(ctx context.Context) (int64, error) {
 	return decrIfPositive.Run(ctx, r.client, []string{"spots:available"}).Int64()
 }
+
+// reserveIfFree is decrIfPositive for the entry gate, which must tell "took
+// the last spot" (0) from "the lot was already full" (-1).
+var reserveIfFree = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if not v then return nil end
+if tonumber(v) <= 0 then return -1 end
+return redis.call('DECR', KEYS[1])
+`)
+
+// Reserve returns redis.Nil when the key is absent (nothing is written).
+func (r *RedisSpotsRepo) Reserve(ctx context.Context) (bool, error) {
+	left, err := reserveIfFree.Run(ctx, r.client, []string{"spots:available"}).Int64()
+	if err != nil {
+		return false, err
+	}
+	return left >= 0, nil
+}

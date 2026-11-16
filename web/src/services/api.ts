@@ -92,8 +92,14 @@ export function payExit(id: string): Promise<Session> {
   return request<Session>(`/exits/${encodeURIComponent(id)}/pay`, { method: "POST" });
 }
 
-// Placa digitada pelo operador: em sessão FAILED (OCR não leu) ela passa a PARKED;
-// em PARKED corrige uma leitura errada.
+// Foto de entrada da sessão, servida pela API a partir do armazenamento de objetos.
+// É uma URL para <img>/<a>, não uma chamada fetch: 404 se a sessão ou a foto não existir.
+export function sessionPhotoUrl(id: string): string {
+  return `${BASE_URL}/sessions/${encodeURIComponent(id)}/photo`;
+}
+
+// Placa digitada pelo operador numa sessão estacionada: preenche a que o OCR não leu ou
+// corrige uma leitura errada. É opcional; o ticket paga com ou sem placa.
 export function updatePlate(id: string, plate: string): Promise<Session> {
   return request<Session>(`/sessions/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -122,18 +128,21 @@ export function isTransientError(err: unknown): boolean {
 // Converte um erro em mensagem para a interface (seção 3.3 de docs/frontend.md).
 export function errorMessage(
   err: unknown,
-  context: "session" | "resource" | "plate" = "resource",
+  context: "session" | "resource" | "plate" | "entry" = "resource",
 ): string {
   if (!(err instanceof ApiError)) return "Erro inesperado. Tente novamente.";
   if (err.status === 0) return NETWORK_ERROR_MESSAGE;
   if (context === "plate" && err.status === 400) return INVALID_PLATE_MESSAGE;
   if (context === "plate" && err.status === 409) {
-    return "Só é possível alterar a placa de veículos estacionados ou com falha no OCR.";
+    return "Só é possível alterar a placa de veículos estacionados.";
+  }
+  if (context === "entry" && err.status === 409) {
+    return "Estacionamento lotado. Não há vagas disponíveis no momento.";
   }
   if (err.status === 404) {
     return context === "session" ? "Sessão não encontrada." : "Recurso não encontrado.";
   }
-  if (err.status === 409) return "A sessão não está pronta para pagamento.";
+  if (err.status === 409) return "Este ticket já foi pago.";
   if (err.status === 413) return "A foto excede o tamanho máximo de 10 MB.";
   if (err.status >= 500) {
     const base = "Erro no servidor. Tente novamente.";

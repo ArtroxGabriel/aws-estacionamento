@@ -1,13 +1,26 @@
-import type { AuditEvent, Session, SessionStatus } from "../types/api";
+import type { AuditEvent, PlateStatus, Session, SessionStatus } from "../types/api";
 import { formatCurrency, statusLabel } from "./format";
 
-const SESSION_STATUSES: readonly string[] = ["PROCESSING", "PARKED", "PAID", "FAILED"];
+const SESSION_STATUSES: readonly string[] = ["PARKED", "PAID"];
 
 function isSessionStatus(value: string): value is SessionStatus {
   return SESSION_STATUSES.includes(value);
 }
 
-// Eventos de falha gravados pelo worker (OCR_FAILED, POISON_MESSAGE) e pela API (ENTRY_FAILED).
+// A trilha é imutável: eventos gravados antes de o ticket valer na entrada ainda trazem os
+// status que não existem mais. Eles continuam legíveis.
+const legacyStatusLabels: Record<string, string> = {
+  PROCESSING: "Processando",
+  FAILED: "Falha no OCR",
+};
+
+function anyStatusLabel(status: string): string {
+  if (isSessionStatus(status)) return statusLabel(status);
+  return Object.hasOwn(legacyStatusLabels, status) ? legacyStatusLabels[status] : status;
+}
+
+// Eventos de falha gravados pelo worker (OCR_FAILED, POISON_MESSAGE) e, no modelo antigo,
+// pela API (ENTRY_FAILED). Falham a leitura da placa, nunca o ticket.
 export const FAILURE_ACTIONS: readonly string[] = ["OCR_FAILED", "POISON_MESSAGE", "ENTRY_FAILED"];
 
 export function isFailureAction(action: string): boolean {
@@ -58,31 +71,36 @@ export function failureReasonLabel(reason: string): string {
 
 export interface SessionInfo {
   plate?: string;
-  status?: SessionStatus; // status atual no RDS, quando conhecido
+  status?: SessionStatus; // status atual no banco, quando a sessão ainda existe
+  plateStatus?: PlateStatus; // como terminou a leitura da placa
   failure?: string; // motivo da falha mais recente registrada na auditoria
+  hasPhoto?: boolean; // a sessão existe no banco, então a foto de entrada pode ser aberta
 }
 
 // Situação atual de cada sessão (entity_id → placa/status/falha). Os eventos são imutáveis:
-// ENTRY guarda o status do momento da entrada e EXIT_PAYMENT não traz a placa. As sessões
-// do RDS dão o estado atual; os eventos de OCR/falha cobrem o que não estiver nelas.
-// `events` deve vir do mais recente para o mais antigo.
+// ENTRY é gravado antes de a placa ser lida e EXIT_PAYMENT não traz a placa. As sessões do
+// banco dão o estado atual; os eventos de OCR/falha cobrem o que não estiver nelas (por
+// exemplo, sessão já excluída). `events` deve vir do mais recente para o mais antigo.
 export function sessionInfo(
   events: readonly AuditEvent[],
   sessions: readonly Session[],
 ): Map<string, SessionInfo> {
   const info = new Map<string, SessionInfo>();
   for (const s of sessions) {
-    info.set(s.id, { plate: s.license_plate || undefined, status: s.status });
+    info.set(s.id, {
+      plate: s.license_plate || undefined,
+      status: s.status,
+      plateStatus: s.plate_status,
+      hasPhoto: true,
+    });
   }
   for (const e of events) {
     const current = info.get(e.entity_id) ?? {};
     const plate = plateOf(e.details);
     if (plate) current.plate ??= plate;
-    // POISON_MESSAGE sozinho não encerra a sessão (falhas de infraestrutura mantêm
-    // PROCESSING para reprocessamento); só OCR_FAILED marca FAILED.
-    if (e.action === "OCR_FAILED") current.status ??= "FAILED";
-    // Placa digitada no caixa: a sessão saiu de FAILED e está estacionada.
-    if (e.action === "PLATE_CORRECTION") current.status ??= "PARKED";
+    if (e.action === "OCR_PROCESSING") current.plateStatus ??= "READ";
+    if (e.action === "OCR_FAILED") current.plateStatus ??= "UNREADABLE";
+    if (e.action === "PLATE_CORRECTION") current.plateStatus ??= "MANUAL";
     if (isFailureAction(e.action)) {
       const reason = stringField(e.details, "reason") ?? stringField(e.details, "error");
       if (reason) current.failure ??= failureReasonLabel(reason);
@@ -92,17 +110,18 @@ export function sessionInfo(
   return info;
 }
 
-// Estado ao qual a entrada levou, exibido no evento de entrada em vez do status gravado
-// naquele momento (sempre "Processando"): PARKED com placa lida ou FAILED sem placa.
-// Não é o status atual: depois do pagamento a entrada continua como "Estacionado".
-function entryOutcome(info: SessionInfo | undefined): string | undefined {
-  if (info?.plate) return statusLabel("PARKED");
-  const withReason = (label: string) => (info?.failure ? `${label} · ${info.failure}` : label);
-  if (info?.status === undefined || info.status === "PROCESSING") {
-    // Falha de infraestrutura: a sessão segue PROCESSING aguardando reprocessamento.
-    return info?.failure ? withReason("Erro no processamento") : undefined;
+// O que a entrada produziu. O carro sempre entra (Estacionado, vaga reservada na hora); o
+// que varia é só o destino da foto, mostrado ao lado quando não houve placa.
+function entryOutcome(event: AuditEvent, info: SessionInfo | undefined): string {
+  const parked = statusLabel("PARKED");
+  if (event.details.ocr_queued === false) {
+    return `${parked} · foto não enviada para leitura (fila indisponível)`;
   }
-  return withReason(statusLabel("FAILED")); // concluiu sem placa (mesmo que já pago)
+  if (info?.plate) return parked;
+  if (info?.failure) return `${parked} · sem placa: ${info.failure}`;
+  if (info?.plateStatus === "UNREADABLE") return `${parked} · sem placa`;
+  if (info?.plateStatus === "PENDING") return `${parked} · lendo placa`;
+  return parked;
 }
 
 export function describeEvent(event: AuditEvent, info: SessionInfo | undefined): string {
@@ -113,13 +132,9 @@ export function describeEvent(event: AuditEvent, info: SessionInfo | undefined):
   }
   if (event.action === "SESSION_DELETE") {
     const status = stringField(event.details, "status");
-    const label = status && isSessionStatus(status) ? statusLabel(status) : status;
-    return label ? `Registro excluído · estava ${label}` : "Registro excluído";
+    return status ? `Registro excluído · estava ${anyStatusLabel(status)}` : "Registro excluído";
   }
-  if (event.action === "ENTRY") {
-    const outcome = entryOutcome(info);
-    if (outcome) return outcome;
-  }
+  if (event.action === "ENTRY") return entryOutcome(event, info);
   if (isFailureAction(event.action)) {
     // O rótulo da ação já diz que houve falha: os detalhes mostram só o motivo.
     const reason = stringField(event.details, "reason") ?? stringField(event.details, "error");
@@ -133,7 +148,7 @@ export function describeDetails(details: Record<string, unknown>): string {
   const { amount_paid: amountPaid } = details;
   const status = stringField(details, "status");
   const reason = stringField(details, "reason");
-  if (status) parts.push(isSessionStatus(status) ? statusLabel(status) : status);
+  if (status) parts.push(anyStatusLabel(status));
   if (typeof amountPaid === "number") parts.push(formatCurrency(amountPaid));
   if (reason) parts.push(failureReasonLabel(reason));
   return parts.join(" · ");

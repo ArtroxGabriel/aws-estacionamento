@@ -3,11 +3,12 @@
 ## Project Overview
 - API RESTful em Go que gerencia o ciclo de vida de veículos e vagas no estacionamento.
 - Implementa os endpoints:
-  - `POST /entries`: Recebe foto, salva no S3, cria sessão no RDS com status `PROCESSING`, grava auditoria no DynamoDB e publica na fila SQS.
+  - `POST /entries`: Recebe foto, reserva a vaga no Redis (lotado → 409), salva no S3, cria sessão no RDS com `status` `PARKED` e `plate_status` `PENDING`, publica na fila SQS e grava auditoria no DynamoDB.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
   - `POST /exits/{id}/pay`: Registra saída com tarifa fixa, atualiza status para `PAID` no RDS, incrementa vagas no Redis e grava auditoria no DynamoDB.
-  - `GET /sessions?status=PARKED|FAILED|PROCESSING|PAID|ALL&plate=...`: Lista sessões (array cru, `null` se vazio).
-  - `PATCH /sessions/{id}`: Placa digitada/corrigida pelo caixa (`FAILED` → `PARKED`).
+  - `GET /sessions?status=PARKED|PAID|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`).
+  - `GET /sessions/{id}/photo`: Foto de entrada, lida do S3.
+  - `PATCH /sessions/{id}`: Placa digitada/corrigida pelo caixa (`plate_status` → `MANUAL`).
   - `DELETE /sessions/{id}`: Exclui a sessão e a foto no S3.
   - `GET /audit`: 50 eventos mais recentes do DynamoDB.
   - `GET /health`: Healthcheck simples da aplicação (`{"status":"UP"}`).
@@ -45,8 +46,8 @@ api/
 │   │   ├── dynamodb.go                 # DynamoDBAuditLogger (DynamoDB)
 │   │   ├── migrate.go                  # Migrações via embed.FS (golang-migrate)
 │   │   ├── migrations/                 # Scripts SQL de migração
-│   │   │   ├── 000001_create_sessions_table.up.sql
-│   │   │   └── 000001_create_sessions_table.down.sql
+│   │   │   ├── 000001_create_sessions_table.{up,down}.sql
+│   │   │   └── 000002_add_plate_status.{up,down}.sql
 │   │   └── repository_test.go          # Testes de integração (Testcontainers Postgres & Redis)
 │   └── service/                        # Regras de negócio e orquestração
 │       ├── parking.go
@@ -62,18 +63,24 @@ api/
 - `go test -v -run TestCreateEntry_Success ./internal/handler/...`: Teste específico
 
 ## Architecture Conventions
-- **Status da Sessão**: `PROCESSING` (na entrada) -> `PARKED` (definido pelo worker após OCR) -> `PAID` (após cobrança na saída).
+- **O ticket identifica o carro** (`docs/DECISOES.md`, D20): `status` é `PARKED` (desde a entrada) -> `PAID` (após a cobrança). A leitura da placa fica em `plate_status`: `PENDING` -> `READ` | `UNREADABLE` (worker) ou `MANUAL` (caixa). Nada na API pode condicionar pagamento ou saída à placa. Constantes em `internal/model/session.go`.
+- **Entrada (`CreateEntry`)**: a ordem é reservar a vaga → upload → `INSERT` → publicar. Falha no upload ou no `INSERT` devolve a vaga (`Increment`). Falha ao publicar **não** falha a entrada: grava `plate_status = UNREADABLE` e a auditoria `ENTRY` sai com `ocr_queued: false` e `queue_error` (o evento `ENTRY_FAILED` não é mais emitido).
+- **Reserva de vaga (`SpotsRepository.Reserve`)**: script Lua que distingue vaga reservada, lotado (`false`) e chave ausente (erro). O `Decrement` não serve para isso: devolve `0` tanto ao ocupar a última vaga quanto quando já estava lotado. Com erro (chave ausente ou Redis fora), `reserveSpot` decide pelo Postgres (`total - CountActive`) e regrava o contador já contando o carro.
+- **Sessões ativas (`CountActive`)**: só `PARKED`, porque a vaga é devolvida no pagamento. Quando existir o estado `EXITED` (cancela de saída), `PAID` passa a contar e o `Increment` sai do `PayExit`; mude os dois juntos.
+- **Foto (`GET /sessions/{id}/photo`)**: 404 se a sessão ou o objeto não existirem (`repository.ErrBlobNotFound`). O `Content-Type` gravado vem do cliente que fez o upload: só `image/jpeg|png|webp|gif` são devolvidos como imagem; qualquer outro vira `application/octet-stream` com `Content-Disposition: attachment`. Sempre `X-Content-Type-Options: nosniff`.
+- **Migração 000002 em banco com dados**: converte `PROCESSING`/`FAILED` em `PARKED`. Essas sessões não ocupavam vaga no contador: apague a chave `spots:available` depois de migrar, que a API recalcula.
 - **Logs no DynamoDB**: Criar registros com chave única contendo timestamp, ação (`ENTRY`, `EXIT_PAYMENT`) e payload resumido.
 - **Redis & Anti-Overbooking**: Chave `spots:available` lida em alta frequência. Se o Redis falhar ou a chave sumir (reboot no meio do dia), **a API nunca assume o default 50**: consulta o banco relacional (`totalSpots - count(ativas)`), responde a contagem precisa e reidrata o Redis com `SET spots:available`.
 - **AWS real x Floci**: `AWS_ENDPOINT_URL` e as chaves `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` não têm default. Sem elas o SDK usa os endpoints reais e a cadeia padrão de credenciais (instance profile na EC2); localmente o `.env`/`task dev:api` apontam para o Floci. `AWS_SESSION_TOKEN` é aceito para credenciais temporárias. Path-style no S3 só com endpoint customizado.
 - **RDS exige SSL**: na AWS use `DATABASE_URL=...?sslmode=require` (o PostgreSQL 16 do RDS recusa `sslmode=disable`).
 - **Migrations no boot**: se o Postgres ainda não responder, a API sobe mesmo assim e tenta as migrations a cada 5 s em background (advisory lock do `golang-migrate` torna seguro com várias instâncias do ASG).
-- **Placa digitada no caixa (`PATCH /sessions/{id}`, body `{"license_plate": "ABC1D23"}`)**: aceita os formatos dos 4 países do Mercosul: `ABC1D23`, `ABC1234`, `AB123CD`, `ABC123`, `ABCD123` (hífen/espaços são removidos; 400 se inválida; `docs/DECISOES.md` D8). Só para `PARKED` (corrige leitura errada) ou `FAILED` (OCR não leu → vira `PARKED` e faz `DECR`, porque a sessão `FAILED` nunca ocupou vaga no contador). 409 em outros status. Auditoria `PLATE_CORRECTION` com `license_plate`, `previous_plate`, `previous_status`, `status`.
+- **Placa digitada no caixa (`PATCH /sessions/{id}`, body `{"license_plate": "ABC1D23"}`)**: aceita os formatos dos 4 países do Mercosul: `ABC1D23`, `ABC1234`, `AB123CD`, `ABC123`, `ABCD123` (hífen/espaços são removidos; 400 se inválida; `docs/DECISOES.md` D8). Só para sessão `PARKED` (preenche a placa que o OCR não leu ou corrige uma leitura errada); grava `plate_status = MANUAL` e não mexe no contador. 409 em outros status. Auditoria `PLATE_CORRECTION` com `license_plate`, `previous_plate`, `previous_plate_status`, `status`.
 - **Exclusão (`DELETE /sessions/{id}`)**: remove a sessão do RDS e a foto do S3 (best effort, com log se falhar), faz `INCR` só se estava `PARKED` e audita `SESSION_DELETE` (`status`, `license_plate`, `s3_photo_key`). Devolve a sessão excluída (200) ou 404.
-- **Contador nunca é criado nem fica negativo pela API**: `Increment`/`Decrement` rodam em Lua só se a chave existir; o `Decrement` para em 0.
+- **Contador nunca é criado nem fica negativo pela API**: `Increment`/`Decrement`/`Reserve` rodam em Lua só se a chave existir; `Decrement` e `Reserve` param em 0.
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-11-16: Sessão `PARKED` e vaga reservada na entrada (409 se lotado), `plate_status`, migração 000002, `GET /sessions/{id}/photo`, filtro `plate_status`; `PROCESSING`/`FAILED` e `ENTRY_FAILED` removidos.
 - 2026-10-03: `PATCH /sessions/{id}` (placa digitada/corrigida no caixa) e `DELETE /sessions/{id}` (CRUD completo, com remoção da foto no S3); `Decrement` seguro em Lua; CORS com PATCH/DELETE.
 - 2026-10-03: Config sem defaults do Floci para endpoint/credenciais (instance profile na AWS), `AWS_SESSION_TOKEN`, retry das migrations e build do Dockerfile no `$BUILDPLATFORM` (cross-compile para `linux/amd64`).
 - 2026-09-21: Reestruturação da API no padrão Go (`cmd/` e `internal/`), migrações via `golang-migrate`, TDD com 100% dos testes passando e endpoints padronizados em inglês.

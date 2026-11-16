@@ -26,7 +26,6 @@ _REQUIRED_VARS = (
     "AWS_REGION",
     "SQS_QUEUE_URL",
     "DATABASE_URL",
-    "REDIS_URL",
     "S3_BUCKET_NAME",
     "DYNAMODB_TABLE_NAME",
 )
@@ -35,7 +34,6 @@ _REQUIRED_VARS = (
 # Each maps to the set of acceptable URL schemes.
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _DB_SCHEMES = frozenset({"postgres", "postgresql"})
-_REDIS_SCHEMES = frozenset({"redis", "rediss"})
 
 # OCR engines: Tesseract everywhere; Amazon Rekognition only on real AWS (the
 # local emulator does not implement it), always with Tesseract as fallback.
@@ -57,7 +55,6 @@ class Config:
     aws_session_token: str | None  # temporary credentials (AWS Academy)
     sqs_queue_url: str
     database_url: str
-    redis_url: str
     s3_bucket_name: str
     dynamodb_table_name: str
     ocr_engine: str = "tesseract"  # "tesseract" | "rekognition" (AWS only)
@@ -93,7 +90,7 @@ def redact(value: str) -> str:
     """Return a fixed redaction marker in place of a secret value (Req 14.5).
 
     Used whenever credentials (``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``,
-    or credentials embedded in ``DATABASE_URL`` / ``REDIS_URL``) might otherwise
+    or credentials embedded in ``DATABASE_URL``) might otherwise
     appear in log output. The marker is a constant, so the original secret
     substring can never leak through.
     """
@@ -141,7 +138,6 @@ def load_config(env: Mapping[str, str]) -> Config:
     session_token = _clean(env.get("AWS_SESSION_TOKEN"))
     sqs_queue_url = _clean(env.get("SQS_QUEUE_URL"))
     database_url = _clean(env.get("DATABASE_URL"))
-    redis_url = _clean(env.get("REDIS_URL"))
     s3_bucket_name = _clean(env.get("S3_BUCKET_NAME"))
     dynamodb_table_name = _clean(env.get("DYNAMODB_TABLE_NAME"))
 
@@ -149,7 +145,6 @@ def load_config(env: Mapping[str, str]) -> Config:
         "AWS_REGION": region,
         "SQS_QUEUE_URL": sqs_queue_url,
         "DATABASE_URL": database_url,
-        "REDIS_URL": redis_url,
         "S3_BUCKET_NAME": s3_bucket_name,
         "DYNAMODB_TABLE_NAME": dynamodb_table_name,
     }
@@ -170,8 +165,6 @@ def load_config(env: Mapping[str, str]) -> Config:
         invalid.append("SQS_QUEUE_URL")
     if database_url and not _has_scheme(database_url, _DB_SCHEMES):
         invalid.append("DATABASE_URL")
-    if redis_url and not _has_scheme(redis_url, _REDIS_SCHEMES):
-        invalid.append("REDIS_URL")
     # AWS_ENDPOINT_URL is optional, but when present it must be http/https
     # (Req 15.3).
     if endpoint and not _has_scheme(endpoint, _HTTP_SCHEMES):
@@ -192,7 +185,6 @@ def load_config(env: Mapping[str, str]) -> Config:
         aws_session_token=session_token or None,
         sqs_queue_url=sqs_queue_url,
         database_url=database_url,
-        redis_url=redis_url,
         s3_bucket_name=s3_bucket_name,
         dynamodb_table_name=dynamodb_table_name,
         ocr_engine=ocr_engine,
