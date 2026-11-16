@@ -1,8 +1,8 @@
 """In-memory fakes for the Poller's connectors.
 
-They model only the behavior the Poller relies on: the RDS row transition with
-commit/rollback semantics, the Redis counter, the DynamoDB audit trail, and the
-SQS delete call. Each fake can be told to fail the next N calls so tests can
+They model only the behavior the Poller relies on: the RDS plate transition
+with commit/rollback semantics, the DynamoDB audit trail, and the SQS delete
+call. Each fake can be told to fail the next N calls so tests can
 inject failures at any step of the pipeline.
 """
 
@@ -18,7 +18,6 @@ from ocr.clean import PlateResult
 from ocr.processor import OcrResult
 from storage.audit import AuditWriteError
 from storage.session_repo import SessionRow
-from storage.spots import SpotsDecrementError, SpotsUnderflowError
 from worker import Poller
 
 SESSION_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
@@ -43,13 +42,13 @@ class FakeSessionRepository:
         return replace(row) if row is not None else None
 
     @contextmanager
-    def parking_transition(self, session_id: str, plate: str) -> Iterator[bool]:
+    def plate_transition(self, session_id: str, plate: str) -> Iterator[bool]:
         row = self.rows.get(session_id)
-        if row is None or row.status != "PROCESSING":
+        if row is None or row.plate_status != "PENDING":
             yield False
             return
         snapshot = replace(row)
-        self.rows[session_id] = replace(row, status="PARKED", license_plate=plate)
+        self.rows[session_id] = replace(row, plate_status="READ", license_plate=plate)
         try:
             yield True
         except BaseException:
@@ -60,43 +59,12 @@ class FakeSessionRepository:
             self.rows[session_id] = snapshot
             raise CommitError("COMMIT failed")
 
-    def mark_failed(self, session_id: str) -> bool:
+    def mark_unreadable(self, session_id: str) -> bool:
         row = self.rows.get(session_id)
-        if row is not None and row.status == "PROCESSING":
-            self.rows[session_id] = replace(row, status="FAILED")
+        if row is not None and row.plate_status == "PENDING":
+            self.rows[session_id] = replace(row, plate_status="UNREADABLE")
             return True
         return False
-
-
-class FakeSpotsCounter:
-    """``value=None`` models the ``spots:available`` key being absent."""
-
-    def __init__(self, value: int | None = 10) -> None:
-        self.value = value
-        self.fail_decrement = 0
-        self.decrements = 0
-        self.increments = 0
-
-    def decrement(self) -> int | None:
-        if self.fail_decrement:
-            self.fail_decrement -= 1
-            raise SpotsDecrementError(3)
-        if self.value is None:
-            return None
-        self.decrements += 1
-        self.value -= 1
-        if self.value < 0:
-            observed = self.value
-            self.value = 0
-            raise SpotsUnderflowError(observed)
-        return self.value
-
-    def increment(self) -> int | None:
-        if self.value is None:
-            return None
-        self.increments += 1
-        self.value += 1
-        return self.value
 
 
 class FakeAuditLogger:
@@ -155,7 +123,6 @@ BASE_ENV = {
     "AWS_SECRET_ACCESS_KEY": "test",
     "SQS_QUEUE_URL": "http://localhost:4566/000000000000/ocr-processamento-fila",
     "DATABASE_URL": "postgresql://u:p@localhost:5432/db",
-    "REDIS_URL": "redis://localhost:6379",
     "S3_BUCKET_NAME": "bucket",
     "DYNAMODB_TABLE_NAME": "AuditoriaEstacionamento",
 }
@@ -175,25 +142,25 @@ def make_message(body: str | None = None, receive_count: int = 1, handle: str = 
     }
 
 
-def processing_row(session_id: str = SESSION_ID) -> SessionRow:
+def pending_row(session_id: str = SESSION_ID, status: str = "PARKED") -> SessionRow:
+    """A session as the API creates it: in the lot, plate still to be read."""
     return SessionRow(
         id=session_id,
         license_plate=None,
-        status="PROCESSING",
+        status=status,
         s3_photo_key=S3_KEY,
+        plate_status="PENDING",
     )
 
 
 def make_poller(
     sessions: FakeSessionRepository | None = None,
-    spots: FakeSpotsCounter | None = None,
     audit: FakeAuditLogger | None = None,
     plate: str | None = "ABC1D23",
     s3: Any = None,
     ocr: Any = None,
-) -> tuple[Poller, FakeSessionRepository, FakeSpotsCounter, FakeAuditLogger, FakeSQS]:
-    sessions = sessions or FakeSessionRepository({SESSION_ID: processing_row()})
-    spots = spots or FakeSpotsCounter()
+) -> tuple[Poller, FakeSessionRepository, FakeAuditLogger, FakeSQS]:
+    sessions = sessions or FakeSessionRepository({SESSION_ID: pending_row()})
     audit = audit or FakeAuditLogger()
     sqs = FakeSQS()
     s3 = s3 or FakeS3()
@@ -211,9 +178,8 @@ def make_poller(
         sqs=sqs,
         s3=s3,
         sessions=sessions,
-        spots=spots,
         audit=audit,
         ocr=ocr or fake_ocr,
         normalizer=fake_normalizer,
     )
-    return poller, sessions, spots, audit, sqs
+    return poller, sessions, audit, sqs

@@ -19,7 +19,6 @@ ALWAYS_REQUIRED = (
     "AWS_REGION",
     "SQS_QUEUE_URL",
     "DATABASE_URL",
-    "REDIS_URL",
     "S3_BUCKET_NAME",
     "DYNAMODB_TABLE_NAME",
 )
@@ -73,7 +72,6 @@ def test_every_missing_variable_is_reported(missing):
     ("name", "value"),
     [
         ("AWS_ENDPOINT_URL", "localhost:4566"),
-        ("REDIS_URL", "localhost:6379"),
         ("DATABASE_URL", "mysql://u:p@h/db"),
         ("SQS_QUEUE_URL", "ocr-processamento-fila"),
     ],
@@ -102,6 +100,20 @@ def test_all_clients_use_default_aws_endpoints_without_override(monkeypatch):
     for client in build_all(cfg):
         assert client.meta.endpoint_url.endswith(".amazonaws.com")
         assert client.meta.region_name == "us-east-1"
+
+
+def test_redis_is_not_part_of_the_configuration():
+    """The spot is taken by the API at the entry; the Worker has no counter to
+    touch, so it must start without any Redis setting."""
+    cfg = load_config(BASE_ENV)
+
+    assert "REDIS_URL" not in BASE_ENV
+    assert not hasattr(cfg, "redis_url")
+
+
+def test_leftover_redis_url_is_ignored():
+    """Deployments that still export REDIS_URL keep starting."""
+    load_config({**BASE_ENV, "REDIS_URL": "not-even-a-url"})
 
 
 def test_ocr_engine_defaults_to_tesseract():

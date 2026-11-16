@@ -42,9 +42,10 @@ __all__ = [
     "MAX_RETRIES",
 ]
 
-# Audit actions — shared contract with the Go API. ``OCR_PROCESSING`` matches
-# the action the worker records on a successful PROCESSING -> PARKED transition
-# (Req 8.1). ``POISON_MESSAGE`` labels a poison classification record (Req 12.1).
+# Audit actions — shared contract with the Go API. ``OCR_PROCESSING`` is
+# recorded when the plate is read (plate_status PENDING -> READ, Req 8.1),
+# ``OCR_FAILED`` when the photo yields no plate (PENDING -> UNREADABLE) and
+# ``POISON_MESSAGE`` labels a poison classification record (Req 12.1).
 ACTION_OCR_PROCESSING = "OCR_PROCESSING"
 ACTION_OCR_FAILED = "OCR_FAILED"
 ACTION_POISON_MESSAGE = "POISON_MESSAGE"
@@ -110,7 +111,7 @@ class AuditLogger:
         self._max_retries = max(1, max_retries)
 
     def log_ocr(self, session_id: str, plate: str) -> None:
-        """Record one ``OCR_PROCESSING`` Audit_Entry for a parked session.
+        """Record one ``OCR_PROCESSING`` Audit_Entry for a plate read by OCR.
 
         Writes an item whose ``id`` is ``<session_id>#<timestamp_nano>``,
         ``action`` is ``OCR_PROCESSING``, ``entity_id`` is ``session_id``,
@@ -153,11 +154,12 @@ class AuditLogger:
         )
 
     def log_failed(self, session_id: str, reason: str) -> None:
-        """Record a session failure Audit_Entry (Req 8).
+        """Record that a photo yielded no plate (Req 8).
 
-        Writes an item labelled ``OCR_FAILED`` carrying the failing
-        ``session_id``, ``status='FAILED'``, and ``reason`` in ``details``, using
-        the same idempotent, retried write path as :meth:`log_ocr`.
+        Writes an item labelled ``OCR_FAILED`` carrying the ``session_id``,
+        ``plate_status='UNREADABLE'`` and the ``reason`` in ``details``, using
+        the same idempotent, retried write path as :meth:`log_ocr`. The session
+        itself is not failed: its ticket stays valid.
 
         Raises:
             AuditWriteError: the write failed after all retries (Req 8.5).
@@ -168,7 +170,7 @@ class AuditLogger:
             ACTION_OCR_FAILED,
             {
                 "session_id": {"S": session_id},
-                "status": {"S": "FAILED"},
+                "plate_status": {"S": "UNREADABLE"},
                 "reason": {"S": reason},
             },
         )
