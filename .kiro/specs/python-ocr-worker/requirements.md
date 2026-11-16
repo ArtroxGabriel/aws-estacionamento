@@ -100,32 +100,33 @@ The Worker must operate identically against a local emulated environment (Floci 
 6. WHEN a license plate value already in Mercosul_Format or Old_Format is provided as input, THE Plate_Normalizer SHALL return that same plate value unchanged (idempotence).
 7. IF no window matches either pattern exactly, THEN THE Plate_Normalizer SHALL try each window against the Mercosul_Format and Old_Format position templates, replacing commonly confused characters with the character kind the position requires (e.g. `O` -> `0` in a digit position, `1` -> `I` in a letter position), with at most 2 replacements per plate, choosing the window with the fewest replacements; WHERE the OCR text contains `BRASIL` or `MERCOSUL`, only the Mercosul_Format template SHALL be used; WHERE the OCR_Processor located a Mercosul plate, only the Mercosul_Format template SHALL be used with at most 3 replacements.
 
-### Requirement 6: Session Update in RDS
+### Requirement 6: Plate Recording in RDS
 
-**User Story:** As a system operator, I want the Worker to record the identified plate and advance the session status, so that the vehicle is registered as parked.
+> Revisado em 2026-11-16 (`docs/DECISOES.md`, D20): o ticket identifica o carro. A sessão já nasce `PARKED`; o Worker grava apenas a leitura da placa em `plate_status`.
+
+**User Story:** As a system operator, I want the Worker to record the plate read from the entry photo, so that the session carries it as evidence and as a shortcut to find the ticket, without the reading ever deciding whether the vehicle is parked.
 
 #### Acceptance Criteria
 
-1. WHEN a plate is successfully normalized, THE Session_Repository SHALL update the Session_Record identified by `session_id`, setting `license_plate` to the normalized plate and `status` to `PARKED`.
+1. WHEN a plate is successfully normalized, THE Session_Repository SHALL update the Session_Record identified by `session_id`, setting `license_plate` to the normalized plate and `plate_status` to `READ`.
 2. THE Session_Repository SHALL read the RDS connection string from the `DATABASE_URL` environment variable.
-3. IF no Session_Record exists with the given `session_id`, THEN THE Session_Repository SHALL return a not-found error to the Poller and SHALL NOT create a new Session_Record.
-4. WHEN the Session_Repository updates a Session_Record, THE Session_Repository SHALL set `license_plate` to a non-empty value between 1 and 16 characters and `status` to a value between 1 and 20 characters.
-5. IF the update operation fails due to an RDS connection or query error, THEN THE Session_Repository SHALL return an error to the Poller, SHALL leave the existing Session_Record `license_plate` and `status` values unchanged, and SHALL NOT advance the status to `PARKED`.
-6. IF the existing Session_Record identified by `session_id` has a `status` other than `PROCESSING`, THEN THE Session_Repository SHALL return an invalid-state error to the Poller and SHALL leave the Session_Record unchanged.
+3. IF no Session_Record exists with the given `session_id`, THEN THE Session_Repository SHALL report that nothing was updated and SHALL NOT create a new Session_Record.
+4. THE Session_Repository SHALL NOT modify the Session_Record `status` under any circumstance; `status` is owned by the API.
+5. IF the update operation fails due to an RDS connection or query error, THEN THE Session_Repository SHALL return an error to the Poller and SHALL leave the existing `license_plate` and `plate_status` values unchanged.
+6. IF the existing Session_Record has a `plate_status` other than `PENDING` (already `READ` or `UNREADABLE`, or `MANUAL` because the cashier typed the plate), THEN THE Session_Repository SHALL leave the Session_Record unchanged, so that a plate typed by a person is never overwritten by the OCR.
+7. THE Session_Repository SHALL record the plate regardless of the Session_Record `status`, so that a vehicle that paid before its photo was read still has its plate recorded.
 
-### Requirement 7: Atomic Available-Spots Decrement in Redis
+### Requirement 7: No Spots Counter in the Worker
 
-**User Story:** As a system operator, I want the Worker to decrement the available-spots counter when a vehicle parks, so that spot availability stays accurate.
+> Revisado em 2026-11-16 (D20). Substitui "Atomic Available-Spots Decrement in Redis".
+
+**User Story:** As a system operator, I want the spot to be taken when the vehicle enters, not when its plate is read, so that availability is accurate even when the OCR is slow, wrong or down.
 
 #### Acceptance Criteria
 
-1. WHEN a Session_Record is updated to `PARKED` for a message not previously processed, THE Spots_Counter SHALL atomically decrement the Spots_Key value by one within 500 milliseconds of the status update.
-2. THE Spots_Counter SHALL read the Redis connection target from the `REDIS_URL` environment variable.
-3. IF the `REDIS_URL` environment variable is absent or empty at startup, THEN THE Spots_Counter SHALL NOT begin processing messages and SHALL emit a startup error indicating the missing connection target.
-4. IF the same message is redelivered after its Session_Record already has status `PARKED`, THEN THE Spots_Counter SHALL NOT decrement the Spots_Key value again.
-5. IF the atomic decrement would reduce the Spots_Key value below zero, THEN THE Spots_Counter SHALL leave the Spots_Key value at zero and SHALL emit an error indicating a counter underflow condition.
-6. IF the Redis connection is unavailable when the decrement is attempted, THEN THE Spots_Counter SHALL retry the decrement operation up to 3 times with the message remaining unacknowledged, and SHALL emit an error indicating the decrement failed after retries when all attempts are exhausted.
-7. IF the Spots_Key does not exist when the decrement (or its compensating increment) is attempted, THEN THE Spots_Counter SHALL leave it absent, atomically on the Redis server, so that the API rebuilds the count from RDS instead of reading a counter the Worker created at zero.
+1. THE Worker SHALL NOT read or modify the Spots_Key; the API reserves the spot atomically while handling `POST /entries`.
+2. THE Worker SHALL start without a `REDIS_URL` environment variable and SHALL ignore it when present.
+3. THE Worker SHALL have no Redis dependency.
 
 ### Requirement 8: Immutable Audit Logging in DynamoDB
 
@@ -153,15 +154,17 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 ### Requirement 10: Unreadable Plate Handling
 
-**User Story:** As a system operator, I want the Worker to handle photos whose plate cannot be read, so that such events are surfaced without corrupting session data.
+> Revisado em 2026-11-16 (D20).
+
+**User Story:** As a system operator, I want a photo whose plate cannot be read to be recorded as such without any effect on the vehicle, so that the driver leaves with the ticket and nobody has to act.
 
 #### Acceptance Criteria
 
-1. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL leave the corresponding Session_Record status unchanged as `PROCESSING` and SHALL NOT write a plate value to the Session_Record.
-2. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL record an unreadable-plate error entry that includes the `session_id` and a reason indicating the plate was unreadable, without modifying any other Session_Record field.
-3. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL leave the SQS message available for redelivery rather than deleting it.
-4. WHEN a message reaches the configured maximum receive count of 3 without producing a readable plate, THE Poller SHALL classify the message as a Poison_Message and SHALL remove it from the active processing flow.
-5. WHEN the Poller classifies a message as a Poison_Message, THE Poller SHALL record a Poison_Message error entry identifying the `session_id` while leaving the corresponding Session_Record status as `PROCESSING`.
+1. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL set the Session_Record `plate_status` to `UNREADABLE`, only if it is still `PENDING`, and SHALL NOT write a plate value nor change `status`.
+2. IF the Poller sets `plate_status` to `UNREADABLE`, THEN THE Poller SHALL record an `OCR_FAILED` Audit_Entry that includes the `session_id`, `plate_status` and a reason indicating the plate was unreadable.
+3. IF the Plate_Normalizer returns an unreadable-plate result, THEN THE Poller SHALL delete the SQS message on that same delivery, because the OCR is deterministic and a redelivery would produce the same result.
+4. IF recording `UNREADABLE` fails due to an RDS error, THEN THE Poller SHALL leave the message available for redelivery.
+5. WHEN the Poller classifies a message as a Poison_Message, THE Poller SHALL record a Poison_Message error entry identifying the `session_id` and SHALL set `plate_status` to `UNREADABLE` if it is still `PENDING`, whatever the failure was, so that no session waits for a reading that will not come.
 
 ### Requirement 11: Idempotent Message Processing
 

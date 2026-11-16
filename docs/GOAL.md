@@ -11,8 +11,8 @@
 ## 1. Visão Geral do Sistema (A Jornada do Estacionamento com Duas Cancelas)
 
 O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo real. O fluxo físico divide-se claramente em:
-1. **Cancela de Entrada**: Identificação fotográfica, emissão de ticket provisório e abertura da cancela de entrada.
-2. **Processamento em Background (Worker OCR)**: Reconhecimento assíncrono da placa e reserva de vaga.
+1. **Cancela de Entrada**: Foto do veículo, reserva da vaga, emissão do ticket e abertura da cancela de entrada. **O ticket (ID da sessão) é o que identifica o carro e já vale na emissão.**
+2. **Processamento em Background (Worker OCR)**: Leitura assíncrona da placa na foto. É um enriquecimento: serve de evidência para a auditoria e de atalho na saída. Nunca bloqueia o carro (ver [DECISOES.md](DECISOES.md), D20).
 3. **Terminal / Totem de Pagamento (Caixa)**: Pagamento do ticket antes de ir ao carro. O pagamento **habilita** o veículo a sair, mas **não libera a vaga de imediato** nem abre cancela alguma.
 4. **Cancela de Saída**: Leitura automática da placa na cancela de saída. Se a placa tiver pagamento confirmado, a cancela abre imediatamente. Se a câmera falhar ou a placa estiver ilegível/suja, o motorista insere o ID do ticket em papel para validação. Somente na abertura da cancela de saída a vaga é restituída e a sessão é encerrada (`EXITED`).
 
@@ -22,17 +22,18 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 ========================================================================================================
 [Cancela / Totem Entrada] ──(1. Foto do Carro)──> [API Go]
                                                     ├── Salva foto no RustFS (S3-compatible)
-                                                    ├── Cria sessão 'PROCESSING' no PostgreSQL
-                                                    ├── Publica evento na fila RabbitMQ
+                                                    ├── Reserva a vaga no Redis (lotado -> 409, cancela fechada)
+                                                    ├── Cria sessão 'PARKED' (plate_status 'PENDING') no PostgreSQL
+                                                    ├── Publica evento na fila RabbitMQ (fila fora do ar não derruba a entrada)
                                                     ├── Grava auditoria no DynamoDB (ação: 'ENTRY')
                                                     └── Retorna ticket impresso (ID) e ABRE A CANCELA
 
 [Worker OCR Python] <──(2. Consome RabbitMQ)────────┘
         ├── Baixa foto do RustFS e redimensiona
         ├── Extrai placa via Tesseract OCR (Mercosul 4 países)
-        ├── Atualiza sessão no PostgreSQL ('PARKED' + Placa)
-        ├── Decrementa vagas no Redis ('spots:available')
-        └── Grava auditoria no DynamoDB (ação: 'OCR_PROCESSING')
+        ├── Grava a placa no PostgreSQL (plate_status 'READ'), ou 'UNREADABLE' se não houver placa
+        ├── Não altera o status da sessão nem o contador de vagas
+        └── Grava auditoria no DynamoDB (ação: 'OCR_PROCESSING' ou 'OCR_FAILED')
 
 ========================================================================================================
 2. CONSULTA EM TEMPO REAL & CAIXA DE PAGAMENTO
@@ -66,9 +67,9 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 ## 2. Metas e Papéis de Cada Módulo
 
 ### 2.1. Frontend Web & Simulação dos Totens (`web/` — React + Vite + TypeScript)
-* **Totem da Cancela de Entrada (`/cancela-entrada`):** Simula a câmera de entrada. Envia foto via `POST /entries`, exibe a impressão do ticket preliminar (com ID único, QR code e horário) e sinaliza a abertura da cancela de entrada.
+* **Totem da Cancela de Entrada (`/cancela-entrada`):** Simula a câmera de entrada. Envia foto via `POST /entries`, exibe o ticket (com ID único e horário), já válido, e sinaliza a abertura da cancela de entrada. A placa aparece quando for lida; se não for, nada é exigido do motorista. Pátio lotado: mensagem clara e cancela fechada.
 * **Painel de Vagas em Tempo Real (`/`):** Exibe contagem de vagas em alta frequência via `GET /spots/available` sem onerar o banco relacional.
-* **Caixa / Terminal de Autoatendimento (`/pagamento`):** Permite buscar sessões por placa ou ID do ticket. Processa o pagamento via `POST /sessions/{id}/pay`, alterando o status para `PAID`. Informa claramente que o cliente agora possui permissão para se dirigir à cancela de saída.
+* **Caixa / Terminal de Autoatendimento (`/pagamento`):** Permite buscar sessões por ID do ticket ou placa, mostra a foto da entrada para conferência e cobra com ou sem placa lida ("Informar placa" é opcional). Processa o pagamento via `POST /sessions/{id}/pay`, alterando o status para `PAID`. Informa claramente que o cliente agora possui permissão para se dirigir à cancela de saída.
 * **Totem da Cancela de Saída (`/cancela-saida`):** Simula o dispositivo na barreira de saída:
   * **Modo Câmera (Placa):** Envia leitura/foto para `POST /barrier/exit/plate`. Se reconhecido e pago, aciona a animação de abertura da cancela.
   * **Modo Contingência (Ticket em Papel):** Se a placa não for identificada ou estiver ilegível, motorista insere o ID do ticket em `POST /barrier/exit/ticket` para destravar a cancela.
@@ -77,19 +78,21 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 ### 2.2. API Backend (`api/` — Go + Uber Fx)
 * **Armazenamento de Objetos (RustFS):** Substitui o S3. Usa o cliente S3 oficial da AWS com `UsePathStyle: true` apontado para o endpoint do RustFS (`http://rustfs:9000`), armazenando fotos em `photos/{session_id}_{filename}`.
 * **Persistência Transacional (PostgreSQL):** Gerenciado pela equipe em container Docker. Mantém a tabela `sessions` e gerencia as transições de estado:
-  $$\text{PROCESSING} \longrightarrow \text{PARKED} \longrightarrow \text{PAID} \longrightarrow \text{EXITED}$$
-  *(ou $\text{PROCESSING} \rightarrow \text{FAILED} \rightarrow \text{PARKED}$ em contingência de placa ilegível)*.
+  $$\text{PARKED} \longrightarrow \text{PAID} \longrightarrow \text{EXITED}$$
+  A leitura da placa corre em paralelo, na coluna `plate_status`: $\text{PENDING} \rightarrow \text{READ}$ ou $\text{UNREADABLE}$ (worker), ou $\text{MANUAL}$ (placa digitada no caixa). Ela nunca muda o `status`.
 * **Mensageria Assíncrona (RabbitMQ):** Substitui o SNS/SQS. Publica mensagens persistentes em JSON na fila durável `ocr-processamento-fila`.
 * **Auditoria NoSQL (Amazon DynamoDB):** Conforme exigência 1.a da especificação, continua utilizando DynamoDB para log imutável de todas as ações. Suporta tanto a AWS real quanto o `dynamodb-local` para desenvolvimento e correção offline.
-* **Cache de Vagas Anti-Overbooking (Redis):** Mantém `spots:available`. A vaga é decrementada quando o carro é estacionado (`PARKED`), mantida durante o pagamento (`PAID`), e **apenas incrementada na cancela de saída** (`EXITED`). Em caso de reinicialização do Redis, recalcula a partir do PostgreSQL:
+* **Cache de Vagas Anti-Overbooking (Redis):** Mantém `spots:available`. A vaga é reservada pela API **na entrada** (script Lua atômico; lotado devolve `409`), mantida durante o pagamento (`PAID`), e **apenas incrementada na cancela de saída** (`EXITED`). Em caso de reinicialização do Redis, recalcula a partir do PostgreSQL:
   $$\text{vagas\_disponiveis} = \max(0, \text{capacidade\_total} - \text{COUNT}(\text{sessions ativas}))$$
-  *(onde ativas = `status IN ('PROCESSING', 'PARKED', 'PAID')`)*.
+  *(onde ativas = `status IN ('PARKED', 'PAID')`)*.
+* **Foto como evidência:** `GET /sessions/{id}/photo` devolve a foto da entrada lida do armazenamento de objetos (download pela API, sem expor o storage ao navegador).
 
 ### 2.3. Worker de Visão Computacional (`worker/` — Python + OCR)
 * **Consumo via RabbitMQ:** Consome mensagens da fila `ocr-processamento-fila` via protocolo AMQP (`pika`), utilizando confirmação manual (`basic_ack`).
 * **Download de Imagens no RustFS:** Baixa a imagem do RustFS usando o cliente S3 (boto3) apontado para o RustFS.
 * **Extração de Placa (Tesseract OCR):** Motor open-source de OCR rodando com pré-processamento Pillow/OpenCV, normalizando para placas Mercosul (Brasil, Argentina, Uruguai e Paraguai).
-* **Tratamento de Falhas e Dead Letter:** Se a placa for ilegível na primeira tentativa, marca sessão como `FAILED` no Postgres, sem descartar o carro (o caixa poderá corrigir). Erros irrecuperáveis de infraestrutura são roteados para a fila de mensagens mortas (DLQ `ocr-processamento-fila-dlq`).
+* **Tratamento de Falhas e Dead Letter:** Se a placa for ilegível na primeira tentativa, grava `plate_status = UNREADABLE` e confirma a mensagem. A sessão continua `PARKED` e o ticket continua valendo; o caixa pode digitar a placa se quiser. Erros de infraestrutura são reentregues; na última entrega a mensagem vai para a fila de mensagens mortas (DLQ `ocr-processamento-fila-dlq`) e a leitura também é encerrada como `UNREADABLE`.
+* **Sem Redis:** o worker não toca no contador de vagas (a API reserva a vaga na entrada).
 
 ### 2.4. Orquestração & Contêineres (`docker-compose.yml`)
 * Inicialização completa com um único comando: `docker compose up -d`.
@@ -118,24 +121,35 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 
 | Estado | Significado Físico | Vaga Ocupada? | Ações Permitidas |
 |---|---|---|---|
-| `PROCESSING` | Carro acabou de passar na Cancela de Entrada; OCR em andamento. | Sim (preliminar) | Aguarda Worker OCR. |
-| `PARKED` | Placa lida com sucesso; carro estacionado. | Sim (-1 no Redis) | Pagamento no Caixa, Correção de Placa (`PATCH`), Cancelamento (`DELETE`). |
-| `FAILED` | Placa ilegível na entrada; requer atenção do caixa. | Não | Caixa digita placa (`PATCH` $\rightarrow$ `PARKED`), ou cancelamento. |
+| `PARKED` | Carro passou na Cancela de Entrada e está no pátio, com ou sem placa lida. | Sim (-1 no Redis, na entrada) | Pagamento no Caixa pelo ticket, Placa digitada/corrigida (`PATCH`, opcional), Cancelamento (`DELETE`). |
 | `PAID` | Cliente efetuou o pagamento no Caixa. Habilitado a sair! | Sim (ainda ocupa vaga) | Aproximação na Cancela de Saída. |
 | `EXITED` | Carro cruzou a Cancela de Saída. Sessão concluída. | Liberada (+1 no Redis) | Consulta histórica/auditoria. |
 
+**Leitura da placa (`plate_status`), independente do estado acima:**
+
+| Valor | Significado | Quem grava |
+|---|---|---|
+| `PENDING` | Foto na fila, aguardando o worker. | API, na entrada |
+| `READ` | Placa lida pelo OCR. | Worker |
+| `UNREADABLE` | A foto não deu placa, a fila estava fora do ar ou o worker desistiu após as reentregas. | Worker ou API |
+| `MANUAL` | Placa digitada ou corrigida no caixa. | API (`PATCH /sessions/{id}`) |
+
+O worker só grava enquanto o valor é `PENDING`: uma placa digitada pelo operador nunca é sobrescrita pelo OCR.
+
+> **Estado atual da implementação:** as rotas da cancela de saída e o estado `EXITED` ainda não existem. Até lá o ciclo é `PARKED` $\rightarrow$ `PAID`, a vaga é devolvida no pagamento (`POST /exits/{id}/pay`) e só `PARKED` conta como sessão ativa.
+
 ### 3.2. Chaves de Cache no Redis
 * **Chave:** `spots:available`
-* **Entrada (Worker após ler placa):** `DECR spots:available`
+* **Entrada (API, em `POST /entries`):** reserva atômica (`DECR` só se houver vaga; sem vaga, `409`). Se o upload ou o `INSERT` falharem, a vaga é devolvida.
 * **Pagamento no Caixa:** Contador inalterado (carro continua fisicamente na vaga).
 * **Cancela de Saída (Passagem do carro):** `INCR spots:available`
-* **Auto-Recuperação:** $\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PROCESSING'}, \text{'PARKED'}, \text{'PAID'}\}))$.
+* **Auto-Recuperação:** $\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PARKED'}, \text{'PAID'}\}))$. A mesma conta decide a entrada quando a chave não existe.
 
 ### 3.3. Tabela DynamoDB (`AuditoriaEstacionamento`)
 Ações registradas:
 * `ENTRY`: Cancela de entrada aberta, ticket impresso e foto salva no RustFS.
-* `OCR_PROCESSING`: Worker reconheceu a placa e confirmou status `PARKED`.
-* `OCR_FAILED`: Worker não identificou placa válida; marcada para intervenção no caixa.
+* `OCR_PROCESSING`: Worker reconheceu a placa (`plate_status = READ`).
+* `OCR_FAILED`: Worker não identificou placa válida (`plate_status = UNREADABLE`). Não exige ação: o ticket segue válido.
 * `PLATE_CORRECTION`: Operador digitou ou corrigiu a placa no caixa.
 * `PAYMENT_RECEIVED`: Pagamento efetuado com sucesso no terminal/caixa.
 * `EXIT_BARRIER_OPENED`: Cancela de saída destravada (por placa ou por ticket) e vaga restituída.
@@ -175,8 +189,8 @@ Ações registradas:
 ## 5. Checklist de Verificação Rápida
 
 - [ ] **Comando Único:** `docker compose up -d` inicia PostgreSQL, RustFS, RabbitMQ, Redis, DynamoDB Local, API, Worker e Web sem falhas.
-- [ ] **Fluxo da Cancela de Entrada:** Upload da foto no RustFS $\rightarrow$ sessão `PROCESSING` no Postgres $\rightarrow$ mensagem no RabbitMQ $\rightarrow$ ticket emitido $\rightarrow$ cancela de entrada abre.
-- [ ] **Worker Assíncrono:** Consome do RabbitMQ $\rightarrow$ baixa do RustFS $\rightarrow$ OCR Tesseract $\rightarrow$ atualiza para `PARKED` no Postgres $\rightarrow$ decrementa vaga no Redis.
+- [ ] **Fluxo da Cancela de Entrada:** Upload da foto no RustFS $\rightarrow$ vaga reservada no Redis $\rightarrow$ sessão `PARKED` no Postgres $\rightarrow$ mensagem no RabbitMQ $\rightarrow$ ticket emitido (já válido) $\rightarrow$ cancela de entrada abre.
+- [ ] **Worker Assíncrono:** Consome do RabbitMQ $\rightarrow$ baixa do RustFS $\rightarrow$ OCR Tesseract $\rightarrow$ grava a placa (`plate_status = READ`) ou `UNREADABLE`, sem mexer no status nem nas vagas. Com o worker parado, entrada e pagamento continuam funcionando.
 - [ ] **Fluxo do Caixa de Pagamento:** Consulta por ID ou placa $\rightarrow$ pagamento registrado (`PAID`) $\rightarrow$ vaga **continua** retida $\rightarrow$ ticket habilitado para saída.
 - [ ] **Fluxo da Cancela de Saída:**
   - Tentativa 1 (Câmera/Placa): Detecta placa paga $\rightarrow$ atualiza para `EXITED` $\rightarrow$ incrementa vaga no Redis $\rightarrow$ cancela de saída abre.

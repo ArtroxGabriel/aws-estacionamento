@@ -85,39 +85,39 @@ O worker deixa de ser dono da vaga, então fica bem mais simples:
 ## 5. Tarefas
 
 ### Fase 1 — Banco e API
-- [ ] 1.1 Migration `000002_add_plate_status`: coluna `plate_status VARCHAR(16) NOT NULL DEFAULT 'PENDING'`. Conversão dos dados existentes: `PARKED`/`PAID` com placa → `READ`; `FAILED` → `PARKED` + `UNREADABLE`; `PROCESSING` → `PARKED` + `PENDING`. A migration `down` desfaz.
-- [ ] 1.2 `model.Session`: campo `PlateStatus` (`plate_status` no JSON).
-- [ ] 1.3 `CreateEntry`: reservar a vaga antes de criar a sessão; lotado → `ErrParkingFull` → `409`. Se o upload ou o `INSERT` falharem, devolver a vaga.
+- [x] 1.1 Migration `000002_add_plate_status`: coluna `plate_status VARCHAR(16) NOT NULL DEFAULT 'PENDING'`. Conversão dos dados existentes: `PARKED`/`PAID` com placa → `READ`; `FAILED` → `PARKED` + `UNREADABLE`; `PROCESSING` → `PARKED` + `PENDING`. A migration `down` desfaz.
+- [x] 1.2 `model.Session`: campo `PlateStatus` (`plate_status` no JSON).
+- [x] 1.3 `CreateEntry`: reservar a vaga antes de criar a sessão; lotado → `ErrParkingFull` → `409`. Se o upload ou o `INSERT` falharem, devolver a vaga.
   - O script `decrIfPositive` atual devolve `0` tanto ao ocupar a última vaga quanto quando já estava lotado. Criar `Reserve` (novo script Lua) que distingue os casos: vaga reservada, lotado ou chave ausente.
   - Chave ausente (Redis reiniciado): recalcular pelo Postgres, regravar e tentar a reserva de novo.
-- [ ] 1.4 `CreateEntry`: falha ao publicar na fila não derruba a entrada; grava `plate_status=UNREADABLE` e o aviso na auditoria.
-- [ ] 1.5 `PayExit`: aceitar só `PARKED`; remover o caso `FAILED`.
-- [ ] 1.6 `UpdatePlate`: `plate_status=MANUAL`; remover o `Decrement` do caso `FAILED`.
-- [ ] 1.7 `DeleteSession`: devolver a vaga para `PARKED` **e** `PAID`.
-- [ ] 1.8 `CountActive`: `status IN ('PARKED','PAID')`.
-- [ ] 1.9 `GET /sessions/{id}/photo` (handler + service, com `Content-Type` do objeto; `404` se a sessão ou a foto não existirem).
-- [ ] 1.10 `GET /sessions`: filtro por `plate_status` (o caixa lista "sem placa").
-- [ ] 1.11 Testes de service e handler: entrada desconta a vaga; lotado devolve `409`; falha de fila mantém a entrada; pagamento sem placa; exclusão de sessão `PAID` devolve a vaga; rota da foto.
+- [x] 1.4 `CreateEntry`: falha ao publicar na fila não derruba a entrada; grava `plate_status=UNREADABLE` e o aviso na auditoria.
+- [x] 1.5 `PayExit`: aceitar só `PARKED`; remover o caso `FAILED`.
+- [x] 1.6 `UpdatePlate`: `plate_status=MANUAL`; remover o `Decrement` do caso `FAILED`.
+- [x] 1.7 `DeleteSession`: devolver a vaga para `PARKED` **e** `PAID`. *Implementado só para `PARKED`: sem o estado `EXITED` na `main`, a vaga ainda é devolvida no pagamento; incrementar também em `PAID` contaria duas vezes. Muda junto com as rotas da cancela de saída.*
+- [x] 1.8 `CountActive`: `status IN ('PARKED','PAID')`. *Implementado só com `PARKED`, pelo mesmo motivo.*
+- [x] 1.9 `GET /sessions/{id}/photo` (handler + service, com `Content-Type` do objeto; `404` se a sessão ou a foto não existirem).
+- [x] 1.10 `GET /sessions`: filtro por `plate_status` (o caixa lista "sem placa").
+- [x] 1.11 Testes de service e handler: entrada desconta a vaga; lotado devolve `409`; falha de fila mantém a entrada; pagamento sem placa; exclusão de sessão `PAID` devolve a vaga; rota da foto.
 
 ### Fase 2 — Worker
-- [ ] 2.1 `session_repo.py`: `plate_transition(session_id, plate)` com a nova condição (`plate_status='PENDING'`) e `mark_unreadable(session_id)`; remover `mark_failed`.
-- [ ] 2.2 Processamento: tirar o `DECR`, a compensação e o tratamento de `FAILED`; estados terminais passam a ser "`plate_status` diferente de `PENDING`".
-- [ ] 2.3 Na 3ª falha de infraestrutura, além da DLQ, marcar `UNREADABLE`.
-- [ ] 2.4 Remover `storage/spots.py`, `REDIS_URL` da configuração e do compose do worker, e os testes do contador.
-- [ ] 2.5 Atualizar `test_poller_side_effects.py` e `test_poison.py`: leitura depois de `EXITED`/`MANUAL` não altera nada; entrega repetida não grava a placa duas vezes; ilegível não muda `status`.
+- [x] 2.1 `session_repo.py`: `plate_transition(session_id, plate)` com a nova condição (`plate_status='PENDING'`) e `mark_unreadable(session_id)`; remover `mark_failed`.
+- [x] 2.2 Processamento: tirar o `DECR`, a compensação e o tratamento de `FAILED`; estados terminais passam a ser "`plate_status` diferente de `PENDING`".
+- [x] 2.3 Na 3ª falha de infraestrutura, além da DLQ, marcar `UNREADABLE`.
+- [x] 2.4 Remover `storage/spots.py`, `REDIS_URL` da configuração e do compose do worker, e os testes do contador.
+- [x] 2.5 Atualizar `test_poller_side_effects.py` e `test_poison.py`: leitura depois de `EXITED`/`MANUAL` não altera nada; entrega repetida não grava a placa duas vezes; ilegível não muda `status`.
 
 ### Fase 3 — Frontend
-- [ ] 3.1 `types/api.ts`: `SessionStatus` sem `PROCESSING`/`FAILED`; novo `PlateStatus`.
-- [ ] 3.2 Entrada (`EntryPage`): o ticket aparece **válido de imediato** ("cancela aberta"); a placa surge quando for lida; some o aviso de "procure o operador". Lotado → mensagem clara.
-- [ ] 3.3 Caixa (`PaymentPage`): listar só `PARKED`; sessão sem placa aparece como "sem placa", sem alerta; mostrar a miniatura da foto; "Informar placa" vira ação opcional.
+- [x] 3.1 `types/api.ts`: `SessionStatus` sem `PROCESSING`/`FAILED`; novo `PlateStatus`.
+- [x] 3.2 Entrada (`EntryPage`): o ticket aparece **válido de imediato** ("cancela aberta"); a placa surge quando for lida; some o aviso de "procure o operador". Lotado → mensagem clara.
+- [x] 3.3 Caixa (`PaymentPage`): listar só `PARKED`; sessão sem placa aparece como "sem placa", sem alerta; mostrar a miniatura da foto; "Informar placa" vira ação opcional.
 - [ ] 3.4 Cancela de saída (quando existir): tenta a placa; sem correspondência única → campo do ticket; mostra a foto da entrada para conferência.
-- [ ] 3.5 Auditoria (`AuditPage`): rótulo de `OCR_FAILED` deixa de ser "falha" (vira "placa não lida"); link para a foto.
-- [ ] 3.6 `StatusBadge` e testes das páginas.
+- [x] 3.5 Auditoria (`AuditPage`): rótulo de `OCR_FAILED` deixa de ser "falha" (vira "placa não lida"); link para a foto.
+- [x] 3.6 `StatusBadge` e testes das páginas.
 
 ### Fase 4 — Documentação
-- [ ] 4.1 [GOAL.md](GOAL.md): ciclo de vida, tabela de estados, regra do contador e contratos das rotas.
-- [ ] 4.2 [DECISOES.md](DECISOES.md): nova decisão substituindo a D4.
-- [ ] 4.3 `AGENTS.md` (raiz, `api/`, `worker/`, `web/`) e spec do worker (requisitos 6, 7 e 10).
+- [x] 4.1 [GOAL.md](GOAL.md): ciclo de vida, tabela de estados, regra do contador e contratos das rotas.
+- [x] 4.2 [DECISOES.md](DECISOES.md): nova decisão substituindo a D4.
+- [x] 4.3 `AGENTS.md` (raiz, `api/`, `worker/`, `web/`) e spec do worker (requisitos 6, 7 e 10).
 
 ### Fase 5 — Verificação
 - [ ] 5.1 Testes: `go test ./...`, `uv run pytest`, `npm test`.

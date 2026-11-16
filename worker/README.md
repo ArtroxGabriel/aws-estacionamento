@@ -2,8 +2,11 @@
 
 Worker assíncrono em Python 3.14 (gerenciado por `uv`) que consome a fila SQS
 `ocr-processamento-fila`, baixa a foto do S3, extrai a placa via Tesseract OCR,
-atualiza a sessão no RDS, decrementa o contador de vagas no Redis e grava
-auditoria no DynamoDB.
+grava a placa na sessão no RDS (`plate_status`) e registra auditoria no DynamoDB.
+
+O worker só enriquece a sessão: o carro já está `PARKED`, com a vaga reservada
+pela API, e o ticket já vale. Ele não altera `status` nem o contador de vagas
+(não usa Redis). Ver `docs/DECISOES.md`, D20.
 
 ## Layout
 
@@ -19,7 +22,6 @@ worker/
 │   ├── clients.py          # Fábrica de clientes boto3
 │   ├── s3_store.py         # S3_Connector
 │   ├── session_repo.py     # Session_Repository (RDS)
-│   ├── spots.py            # Spots_Counter (Redis)
 │   └── audit.py            # Audit_Logger (DynamoDB)
 ├── pyproject.toml
 └── tests/                  # Espelha o layout dos módulos

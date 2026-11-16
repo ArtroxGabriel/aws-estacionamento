@@ -113,7 +113,7 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 4. Caso a placa esteja suja, danificada ou o OCR falhe na saída, o motorista insere o ticket impresso em papel (cujo ID foi fornecido na cancela de entrada) para validar o pagamento e abrir a cancela.
 
 **Decisão:**
-1. **Cancela de Entrada (`POST /entries`):** Registra foto, emite ticket com ID único e abre a cancela de entrada. Status: `PROCESSING` $\rightarrow$ `PARKED`.
+1. **Cancela de Entrada (`POST /entries`):** Registra foto, reserva a vaga, emite ticket com ID único e abre a cancela de entrada. Status: `PARKED` desde a emissão (D20).
 2. **Terminal de Pagamento / Caixa (`POST /sessions/{id}/pay`):** Registra o pagamento e altera o status para `PAID`. **A vaga continua ocupada no Redis!** O ticket/placa passa a estar autorizado a sair.
 3. **Cancela de Saída com Dupla Validação:**
    - **Fluxo Principal (Câmera / Placa — `POST /barrier/exit/plate`):** Lê a placa na cancela de saída. Se existir sessão ativa com status `PAID`, a cancela abre!
@@ -133,10 +133,10 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 **Decisão:** Manter o **Redis** (`redis:7-alpine`) no Docker Compose gerenciando a chave `spots:available`:
 - Leitura instantânea (< 2ms) para os displays e totens.
-- A vaga é decrementada quando o Worker conclui o OCR e confirma o veículo como `PARKED`.
+- A vaga é reservada pela API na entrada, de forma atômica (D20); o worker não toca no contador.
 - A vaga é incrementada apenas quando o veículo cruza a Cancela de Saída (`EXITED`).
 - Em caso de falha ou reinicialização do Redis, a API reconcilia o valor consultando as sessões ativas no PostgreSQL:
-  $$\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PROCESSING'}, \text{'PARKED'}, \text{'PAID'}\}))$$
+  $$\text{vagas} = \max(0, \text{capacidade} - \text{COUNT}(\text{status} \in \{\text{'PARKED'}, \text{'PAID'}\}))$$
 
 **Por quê:** Garante que o painel de vagas suporte milhares de consultas simultâneas sem degradar o PostgreSQL, mantendo a consistência transacional com reconciliação automática.
 
@@ -197,6 +197,39 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 **Consequências:**
 - O worker roda com `OCR_ENGINE=tesseract` por padrão, sem tocar em nenhuma API da AWS.
 - O código de `worker/ocr/rekognition.py` é removido/desativado do fluxo principal.
-- Casos em que o OCR não atinja certeza imediata resultam em status `FAILED`, permitindo que o operador no caixa digite ou corrija a placa no fluxo de contingência já modelado.
+- Casos em que o OCR não atinja certeza imediata ficam com `plate_status = UNREADABLE`. A sessão segue `PARKED` e o ticket vale; o operador pode digitar a placa, mas isso é opcional (D20).
 
 **Onde:** `worker/ocr/locate.py`, `worker/ocr/processor.py`, `worker/ocr/clean.py`, `worker/worker.py`, `worker/config.py`.
+
+---
+
+## D20. O Ticket Identifica o Carro; a Foto é Evidência e Atalho
+
+**Substitui:** a D4 do Trabalho 1 ("placa ilegível vira `FAILED` na hora; o caixa digita a placa").
+
+**Contexto:** A sessão nascia `PROCESSING` e só virava `PARKED` (ocupando a vaga) quando o worker lia a placa. Uma foto ilegível deixava a sessão `FAILED` e o motorista dependia de o operador digitar a placa. Na prática, o OCR era pré-requisito para o carro existir no sistema:
+- Com o Tesseract acertando cerca de metade das fotos reais, metade dos carros exigia intervenção manual.
+- Com o worker ou a fila fora do ar, nenhum carro era contado: o painel mostrava vagas que não existiam.
+- Sessão `FAILED` não ocupava vaga no contador, embora o carro estivesse no pátio.
+
+**Decisão:**
+1. **O ticket (ID da sessão) é a identidade do carro.** `POST /entries` cria a sessão já `PARKED` e ela é pagável pelo ticket desde a emissão.
+2. **A API reserva a vaga na entrada**, com um script Lua atômico no Redis (`Reserve`). Pátio lotado devolve `409` e a cancela não abre. Sem a chave (Redis reiniciado), a decisão é tomada pelo PostgreSQL e o contador é regravado. Se o upload da foto ou o `INSERT` falharem, a vaga é devolvida.
+3. **A leitura da placa vira uma coluna à parte, `plate_status`:** `PENDING` $\rightarrow$ `READ` ou `UNREADABLE` (worker), ou `MANUAL` (caixa). Os status `PROCESSING` e `FAILED` deixam de existir; a migração `000002` converte os dados antigos.
+4. **O worker só enriquece:** grava a placa enquanto `plate_status = 'PENDING'`, não altera `status` e não usa mais o Redis. Uma placa digitada pelo operador nunca é sobrescrita; um carro que já pagou ainda tem a placa gravada (evidência).
+5. **Fila fora do ar não derruba a entrada:** a sessão é criada com `UNREADABLE` e a auditoria `ENTRY` registra `ocr_queued: false`. O evento `ENTRY_FAILED` deixa de ser emitido.
+6. **A foto é servida pela API** (`GET /sessions/{id}/photo`) e aparece no caixa e na auditoria. O tipo do arquivo vem de quem fez o upload, então só imagens conhecidas são devolvidas como imagem; o resto sai como download, com `X-Content-Type-Options: nosniff`.
+7. **`PATCH /sessions/{id}` continua existindo como conveniência** (busca por placa), sem mexer no contador.
+
+**Por quê:**
+- O estacionamento funciona com o OCR errando, lento ou parado. A leitura da placa passa a ser o que ela é no mundo real: um registro para auditoria e um atalho na cancela de saída.
+- O contador de vagas passa a refletir os carros que entraram, não os que tiveram a placa lida.
+- O worker fica mais simples: sem contador, sem compensação de `DECR`, uma única condição de idempotência.
+
+**Consequências:**
+- Contrato da API: `status` perde `PROCESSING` e `FAILED`; toda sessão traz `plate_status`. API, worker e frontend mudam juntos.
+- Depois de aplicar a migração num banco com dados antigos, apague a chave `spots:available`: as sessões que eram `PROCESSING`/`FAILED` não ocupavam vaga no contador e a API o recalcula pelo banco.
+- Enquanto `EXITED` não existir, o ciclo é `PARKED` $\rightarrow$ `PAID`, a vaga é devolvida no pagamento e só `PARKED` conta como ativa. Quando as rotas da cancela de saída entrarem, `PAID` passa a contar e o `INCR` vai para a saída (D15).
+- Na última entrega de uma mensagem o worker encerra a leitura como `UNREADABLE`, mesmo que a causa tenha sido uma indisponibilidade. Reprocessar a mensagem pela DLQ depois disso não grava a placa; para tentar de novo, volte `plate_status` para `PENDING` antes.
+
+**Onde:** `api/internal/service/parking.go`, `api/internal/repository/redis.go`, `api/internal/repository/migrations/000002_add_plate_status.up.sql`, `worker/worker.py`, `worker/storage/session_repo.py`, `web/src/pages/EntryPage.tsx`, `web/src/pages/PaymentPage.tsx`. Plano: [PLANO-FOTO-OPCIONAL.md](PLANO-FOTO-OPCIONAL.md).

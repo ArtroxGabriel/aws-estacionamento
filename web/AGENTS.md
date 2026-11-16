@@ -1,7 +1,7 @@
 # AGENTS.md - Frontend Web (React / Vite)
 
 ## Project Overview
-- Interface Web do operador e do totem da cancela: painel de vagas disponíveis em tempo real, totem de entrada (foto do veículo + ticket provisório com acompanhamento do OCR), caixa de saída (busca, cobrança e liberação da vaga) e trilha de auditoria do DynamoDB.
+- Interface Web do operador e do totem da cancela: painel de vagas disponíveis em tempo real, totem de entrada (foto do veículo + ticket já válido, com a placa aparecendo quando for lida), caixa de saída (busca por ticket ou placa, foto da entrada, cobrança e liberação da vaga) e trilha de auditoria do DynamoDB.
 - Plano completo e contratos: `docs/frontend.md`.
 
 ## Tech Stack
@@ -37,15 +37,17 @@ Testes ficam ao lado do arquivo testado (`*.test.ts(x)`).
 | Tela | Endpoint |
 |------|----------|
 | Painel (`/`) | `GET /spots/available` (polling 5 s) |
-| Totem (`/entrada`) | `POST /entries` (multipart `photo`), `GET /sessions?status=ALL` (enquanto `PROCESSING`: 2 s no primeiro minuto, depois 15 s até 12 min; erros transitórios mantêm a consulta; a sessão é localizada pelo ID na lista) |
-| Saída (`/saida`) | `GET /sessions?status=PARKED` + `GET /sessions?status=FAILED` (polling 15 s), `POST /exits/{id}/pay` |
+| Totem (`/entrada`) | `POST /entries` (multipart `photo`; 409 = pátio lotado), `GET /sessions?status=ALL` (enquanto `plate_status` for `PENDING`: 2 s no primeiro minuto, depois 15 s até 12 min; erros transitórios mantêm a consulta; a sessão é localizada pelo ID na lista) |
+| Saída (`/saida`) | `GET /sessions?status=PARKED` (polling 15 s), `GET /sessions/{id}/photo` (miniatura em `<img>`), `POST /exits/{id}/pay` |
 | Auditoria (`/auditoria`) | `GET /audit` (50 eventos mais recentes) |
 
-Na Auditoria, a placa e o resultado do OCR vêm da sessão (`GET /sessions?status=ALL`), pois os eventos são imutáveis: `ENTRY` guarda `PROCESSING` e `EXIT_PAYMENT` não traz placa. Falhas (`OCR_FAILED`, `POISON_MESSAGE`, `ENTRY_FAILED`) aparecem destacadas, com o motivo do worker traduzido em `src/utils/audit.ts` e o filtro "Somente falhas".
+**O ticket identifica o carro** (`docs/DECISOES.md`, D20). A sessão chega do `POST /entries` já `PARKED`; `plate_status` (`PENDING`, `READ`, `UNREADABLE`, `MANUAL`) diz só como foi a leitura da placa. Nenhuma tela pode tratar sessão sem placa como erro, pedir a placa antes de cobrar ou mandar o motorista procurar o operador: o texto é sempre "o ticket é válido". `PlateStatusBadge` não usa vermelho por isso.
 
-No Caixa, cada linha tem **Pagar e liberar**, **Informar placa** (sessão `FAILED`, OCR não leu) ou **Corrigir placa** (leitura errada) e **Excluir**, com confirmação. A placa é validada no navegador (`isValidPlate`, mesma regra da API: formatos dos 4 países do Mercosul) e enviada normalizada via `PATCH /sessions/{id}`; a exclusão usa `DELETE /sessions/{id}`. Na Auditoria, `PLATE_CORRECTION` mostra a placa nova e a anterior, e `SESSION_DELETE` o status que a sessão tinha.
+Na Auditoria, a placa e o resultado da leitura vêm da sessão (`GET /sessions?status=ALL`), pois os eventos são imutáveis: `ENTRY` é gravado antes da leitura e `EXIT_PAYMENT` não traz placa. A entrada aparece sempre como "Estacionado", com "sem placa: <motivo>" ao lado quando a foto não deu placa. `OCR_FAILED` ("Placa não lida") e `POISON_MESSAGE` aparecem destacados, com o motivo do worker traduzido em `src/utils/audit.ts` e o filtro "Somente falhas". O link "foto" só aparece para sessões que ainda existem no banco. A trilha guarda eventos anteriores a essa mudança (`status` `PROCESSING`/`FAILED`, ação `ENTRY_FAILED`); `legacyStatusLabels` os mantém legíveis, não remova.
 
-As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED`/`FAILED` retorna 409.
+No Caixa, cada linha tem a miniatura da foto de entrada, **Pagar e liberar**, **Informar placa** (opcional, sessão sem placa) ou **Corrigir placa** (leitura errada) e **Excluir**, com confirmação. A placa é validada no navegador (`isValidPlate`, mesma regra da API: formatos dos 4 países do Mercosul) e enviada normalizada via `PATCH /sessions/{id}`; a exclusão usa `DELETE /sessions/{id}`. Na Auditoria, `PLATE_CORRECTION` mostra a placa nova e a anterior, e `SESSION_DELETE` o status que a sessão tinha.
+
+As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED` (já paga) retorna 409. A URL da foto vem de `sessionPhotoUrl` em `src/services/api.ts`.
 
 Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produção o nginx do container faz o mesmo para `API_UPSTREAM` (padrão `http://api:8080`). Mesma origem, sem CORS. O `nginx-api-upstream.envsh` extrai `host:porta` de `API_UPSTREAM` para um bloco `upstream` com keepalive. Sem keepalive, cada request abre um TCP novo, e sob carga isso lota a tabela conntrack do Docker.
 
@@ -66,6 +68,7 @@ Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produçã
 - DoD: `npm run lint`, `npm run test -- --run` e `npm run build` sem erros nem warnings.
 
 ## Changelog
+- 2026-11-16: Ticket válido na emissão: `SessionStatus` só `PARKED`/`PAID`, novo `PlateStatus`, totem sem "procure o operador" e com aviso de pátio lotado, Caixa lista só `PARKED` com a foto de entrada, Auditoria com link para a foto.
 - 2026-10-03: Caixa com placa digitada/corrigida e exclusão de registro; Auditoria com `PLATE_CORRECTION` e `SESSION_DELETE`.
 - 2026-10-03: nginx com `upstream` + keepalive para a API (estabilidade sob carga no ALB); build no `$BUILDPLATFORM`.
 - 2026-10-03: Implementação do frontend (painel, totem, saída, auditoria), cliente HTTP tipado, `usePolling`, testes com Vitest e container nginx.

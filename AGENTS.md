@@ -9,7 +9,7 @@
 ## Mapeamento de Serviços AWS
 
 1. **EC2**: Instâncias (`t2.micro`/`t3.micro`) executando a API e o painel Web servido via container Docker, sob Application Load Balancer e Auto Scaling Group (1 a 3 réplicas).
-2. **Amazon RDS**: PostgreSQL (`db.t3.micro`, Single-AZ) para persistência transacional de vagas, sessões de permanência (`PROCESSANDO`, `ESTACIONADO`, `PAGO`) e cálculo de tarifas.
+2. **Amazon RDS**: PostgreSQL (`db.t3.micro`, Single-AZ) para persistência transacional de vagas, sessões de permanência (`status`: `PARKED`, `PAID`; `plate_status`: `PENDING`, `READ`, `UNREADABLE`, `MANUAL`) e cálculo de tarifas.
 3. **Amazon S3**: Bucket para arquivos binários (fotos dos veículos capturadas na entrada).
 4. **Amazon ElastiCache**: Cluster Redis nó único (`cache.t3.micro`) mantendo em memória o mapa de vagas disponíveis para leituras de alta frequência e baixa latência.
 5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
@@ -19,24 +19,27 @@
 
 ```text
 [Totem/Web: React + Vite] ──> POST /entries (com foto)
-    ├── 1. API (Go) salva a imagem original no S3
-    ├── 2. Registra sessão preliminar no RDS (status: "PROCESSING")
-    ├── 3. Envia evento direto na fila SQS
-    ├── 4. Grava log de auditoria no DynamoDB (ação: "ENTRY")
-    └── 5. Retorna ticket provisório ao usuário
+    ├── 1. API (Go) reserva a vaga no ElastiCache (lotado → 409)
+    ├── 2. Salva a imagem original no S3
+    ├── 3. Registra a sessão no RDS (status: "PARKED", plate_status: "PENDING")
+    ├── 4. Envia evento direto na fila SQS (fila fora do ar não derruba a entrada)
+    ├── 5. Grava log de auditoria no DynamoDB (ação: "ENTRY")
+    └── 6. Retorna o ticket, já válido para a saída
 
-[Worker Assíncrono: Python]
+[Worker Assíncrono: Python]  (só enriquece a sessão; não muda status nem vagas)
     ├── Consome mensagens da fila SQS
     ├── Baixa a foto do S3, redimensiona a imagem e roda o OCR (Tesseract)
-    ├── Atualiza a sessão no RDS com a placa identificada e status "PARKED"
-    ├── Decrementa o contador de vagas no ElastiCache (Redis)
+    ├── Grava a placa no RDS (plate_status "PENDING" → "READ")
     └── Grava log de auditoria da placa processada no DynamoDB (ação: "OCR_PROCESSING")
 
 [Consulta de Vagas] ──> GET /spots/available
     └── Responde instantaneamente direto da memória do ElastiCache
 
-[Placa ilegível] ──> Worker marca a sessão "FAILED" na 1ª entrega (auditoria "OCR_FAILED")
-    └── Caixa digita a placa: PATCH /sessions/:id ("FAILED" → "PARKED", DECR da vaga, auditoria "PLATE_CORRECTION")
+[Placa ilegível] ──> Worker grava plate_status "UNREADABLE" na 1ª entrega (auditoria "OCR_FAILED")
+    ├── A sessão continua "PARKED" e o ticket paga normalmente, sem ação do operador
+    └── Opcional: caixa digita a placa em PATCH /sessions/:id (plate_status "MANUAL", auditoria "PLATE_CORRECTION")
+
+[Foto de entrada] ──> GET /sessions/:id/photo (evidência exibida no caixa e na auditoria)
 
 [Exclusão] ──> DELETE /sessions/:id (remove a sessão e a foto do S3, INCR se estava "PARKED", auditoria "SESSION_DELETE")
 
@@ -71,8 +74,8 @@
 └── docs/                   # Especificação, GOAL, ARQUITETURA, DECISOES, DEPLOY-AWS, CHECKLIST-AWS
 ```
 
-- `api/`: API REST responsável pelas rotas `/entries`, `/spots/available` e `/exits/{id}/pay`.
-- `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e atualizar o RDS/Redis.
+- `api/`: API REST responsável pelas rotas `/entries`, `/spots/available`, `/sessions` e `/exits/{id}/pay`.
+- `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e gravar a placa no RDS.
 - `web/`: Interface para o operador e totem de entrada.
 - `infra/`: Definições IaC (OpenTofu) e ambiente local (Docker Compose com Floci).
 
@@ -108,10 +111,11 @@ Configurar variáveis locais no `.env`:
 
 ## Architecture Conventions
 
+- **O ticket identifica o carro** (`docs/DECISOES.md`, D20): a sessão nasce `PARKED`, com a vaga reservada, e é pagável pelo ticket (ID da sessão) desde a emissão. A foto e a placa são evidência para a auditoria e atalho para achar o ticket; nenhuma regra pode exigir placa lida para o carro pagar ou sair.
 - **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila SQS e libera a requisição HTTP.
 - **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
 - **Cache de Alta Frequência**: A consulta de vagas disponíveis bate exclusivamente no ElastiCache (Redis).
-- **Consistência de Contadores**: O decremento ocorre no término do OCR e o incremento ocorre na liberação da vaga após pagamento.
+- **Consistência de Contadores**: Só a API mexe em `spots:available`: reserva atômica na entrada (`POST /entries`) e incremento na liberação da vaga após o pagamento. O worker não usa Redis.
 
 ## Known Gotchas
 
@@ -123,6 +127,8 @@ Configurar variáveis locais no `.env`:
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
+
+- 2026-11-16: O ticket passa a identificar o carro: sessão `PARKED` e vaga reservada na entrada, `plate_status` separado do `status`, pátio lotado devolve 409, foto servida em `GET /sessions/{id}/photo`, worker sem Redis (`docs/DECISOES.md`, D20).
 
 - 2026-10-04: Datasets versionados (1.000 recortes do Roboflow + 400 sintéticas, com respostas guardadas), scripts de análise em `scripts/analise-ocr/`, `docs/ARQUITETURA.md` com o antes × depois.
 
