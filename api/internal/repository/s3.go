@@ -3,12 +3,14 @@ package repository
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 
 	"api/internal/config"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type S3BlobStorage struct {
@@ -49,6 +51,10 @@ func (s *S3BlobStorage) Download(ctx context.Context, key string) (io.ReadCloser
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			return nil, "", ErrBlobNotFound
+		}
 		return nil, "", err
 	}
 

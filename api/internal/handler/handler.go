@@ -3,8 +3,10 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
+	"api/internal/repository"
 	"api/internal/service"
 )
 
@@ -46,6 +48,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /entries", h.HandleCreateEntry)
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
 	mux.HandleFunc("GET /sessions", h.HandleGetSessions)
+	mux.HandleFunc("GET /sessions/{id}/photo", h.HandleGetSessionPhoto)
 	mux.HandleFunc("PATCH /sessions/{id}", h.HandleUpdatePlate)
 	mux.HandleFunc("DELETE /sessions/{id}", h.HandleDeleteSession)
 	mux.HandleFunc("GET /audit", h.HandleGetAuditLogs)
@@ -95,6 +98,10 @@ func (h *Handler) HandleCreateEntry(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	session, err := h.svc.CreateEntry(r.Context(), header.Filename, file, header.Header.Get("Content-Type"))
+	if errors.Is(err, service.ErrParkingFull) {
+		writeError(w, http.StatusConflict, "parking lot is full")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -166,28 +173,55 @@ func (h *Handler) HandleDeleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
-	plate := r.URL.Query().Get("plate")
-	var platePtr *string
-	if plate != "" {
-		platePtr = &plate
+	query := r.URL.Query()
+	filter := repository.SessionFilter{
+		Status:      query.Get("status"),
+		Plate:       query.Get("plate"),
+		PlateStatus: query.Get("plate_status"),
+	}
+	switch filter.Status {
+	case "":
+		filter.Status = "PARKED" // Default to parked
+	case "ALL":
+		filter.Status = ""
 	}
 
-	status := r.URL.Query().Get("status")
-	if status == "" {
-		status = "PARKED" // Default to parked
-	}
-	var statusPtr *string
-	if status != "ALL" {
-		statusPtr = &status
-	}
-
-	sessions, err := h.svc.FindSessions(r.Context(), statusPtr, platePtr)
+	sessions, err := h.svc.FindSessions(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, sessions)
+}
+
+// HandleGetSessionPhoto streams the entry photo of a session from the object
+// storage. It is evidence for the cashier and the audit trail, so it is never
+// cached by shared caches.
+func (h *Handler) HandleGetSessionPhoto(w http.ResponseWriter, r *http.Request) {
+	body, contentType, err := h.svc.GetSessionPhoto(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, service.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	case errors.Is(err, service.ErrPhotoNotFound):
+		writeError(w, http.StatusNotFound, "photo not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer body.Close()
+
+	w.Header().Set("Content-Type", contentType)
+	// The stored type came from the uploader: never let the browser guess.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	if contentType == "application/octet-stream" {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
 }
 
 func (h *Handler) HandleGetAuditLogs(w http.ResponseWriter, r *http.Request) {

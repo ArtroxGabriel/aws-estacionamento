@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -50,7 +51,28 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 	}
 	defer db.Close()
 
-	// 2. Test Migrations (Up)
+	// 2. Legacy data, as the previous model left it: the table of migration
+	// 000001 with sessions in PROCESSING/FAILED. Migration 000002 must turn
+	// them into the ticket-first model.
+	legacySchema, err := os.ReadFile("migrations/000001_create_sessions_table.up.sql")
+	if err != nil {
+		t.Fatalf("failed to read migration 000001: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, string(legacySchema)); err != nil {
+		t.Fatalf("failed to create legacy schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO sessions (id, license_plate, status, s3_photo_key) VALUES
+			('legacy-processing', NULL,      'PROCESSING', 'photos/a.jpg'),
+			('legacy-failed',     NULL,      'FAILED',     'photos/b.jpg'),
+			('legacy-parked',     'ABC1D23', 'PARKED',     'photos/c.jpg'),
+			('legacy-paid',       'ABC1234', 'PAID',       'photos/d.jpg'),
+			('legacy-paid-blind', NULL,      'PAID',       'photos/e.jpg')
+	`); err != nil {
+		t.Fatalf("failed to insert legacy sessions: %v", err)
+	}
+
+	// 3. Test Migrations (Up)
 	t.Run("RunMigrations", func(t *testing.T) {
 		err := repository.RunMigrations(db)
 		if err != nil {
@@ -63,23 +85,55 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		if err != nil || tableName != "sessions" {
 			t.Fatalf("expected table 'sessions' to exist, got error: %v", err)
 		}
+
+		// Running again is a no-op.
+		if err := repository.RunMigrations(db); err != nil {
+			t.Fatalf("second RunMigrations failed: %v", err)
+		}
 	})
 
-	// 3. Test PostgresSessionRepo
 	repo := repository.NewPostgresSessionRepo(db)
 
-	t.Run("CreateAndGetByID", func(t *testing.T) {
-		plate := "ABC1234"
-		session := &model.Session{
-			ID:           "test-pg-session-1",
-			LicensePlate: &plate,
-			Status:       "PROCESSING",
-			S3PhotoKey:   "photos/car.jpg",
-			EnteredAt:    time.Now().UTC().Truncate(time.Millisecond),
+	t.Run("Migration_ConvertsLegacySessions", func(t *testing.T) {
+		want := map[string][2]string{
+			"legacy-processing": {"PARKED", "PENDING"},
+			"legacy-failed":     {"PARKED", "UNREADABLE"},
+			"legacy-parked":     {"PARKED", "READ"},
+			"legacy-paid":       {"PAID", "READ"},
+			"legacy-paid-blind": {"PAID", "UNREADABLE"},
 		}
+		for id, expected := range want {
+			s, err := repo.GetByID(ctx, id)
+			if err != nil || s == nil {
+				t.Fatalf("%s: expected session, got %+v, %v", id, s, err)
+			}
+			if s.Status != expected[0] || s.PlateStatus != expected[1] {
+				t.Fatalf("%s: expected %s/%s, got %s/%s", id, expected[0], expected[1], s.Status, s.PlateStatus)
+			}
+		}
+		// Every car that was inside now holds a spot.
+		if count, _ := repo.CountActive(ctx); count != 3 {
+			t.Fatalf("expected 3 PARKED sessions after the migration, got %d", count)
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+			t.Fatalf("failed to clean legacy sessions: %v", err)
+		}
+	})
 
-		err := repo.Create(ctx, session)
-		if err != nil {
+	// 4. Test PostgresSessionRepo
+	newSession := func(id string) *model.Session {
+		return &model.Session{
+			ID:          id,
+			Status:      model.StatusParked,
+			PlateStatus: model.PlatePending,
+			S3PhotoKey:  "photos/" + id + ".jpg",
+			EnteredAt:   time.Now().UTC().Truncate(time.Millisecond),
+		}
+	}
+
+	t.Run("CreateAndGetByID", func(t *testing.T) {
+		session := newSession("test-pg-session-1")
+		if err := repo.Create(ctx, session); err != nil {
 			t.Fatalf("failed to create session: %v", err)
 		}
 
@@ -90,59 +144,113 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		if fetched == nil {
 			t.Fatal("expected session, got nil")
 		}
-		if fetched.ID != session.ID || fetched.Status != "PROCESSING" || *fetched.LicensePlate != plate {
+		if fetched.ID != session.ID || fetched.Status != "PARKED" || fetched.PlateStatus != "PENDING" || fetched.LicensePlate != nil {
 			t.Fatalf("mismatched session data: %+v", fetched)
 		}
 	})
 
-	t.Run("CountActive_IgnoresProcessing", func(t *testing.T) {
+	t.Run("CountActive_CountsEveryParkedSession", func(t *testing.T) {
+		// A session holds its spot from the entry, plate read or not.
 		count, err := repo.CountActive(ctx)
 		if err != nil {
 			t.Fatalf("CountActive failed: %v", err)
 		}
-		if count != 0 {
-			t.Fatalf("expected PROCESSING session not to be counted, got %d", count)
-		}
-		if _, err := db.ExecContext(ctx, `UPDATE sessions SET status = 'PARKED' WHERE id = 'test-pg-session-1'`); err != nil {
-			t.Fatalf("failed to park session: %v", err)
-		}
-		if count, _ = repo.CountActive(ctx); count != 1 {
-			t.Fatalf("expected 1 PARKED session, got %d", count)
+		if count != 1 {
+			t.Fatalf("expected the PARKED/PENDING session to be counted, got %d", count)
 		}
 	})
 
-	t.Run("MarkAsPaid", func(t *testing.T) {
+	t.Run("MarkPlateUnreadable_OnlyWhilePending", func(t *testing.T) {
+		if err := repo.Create(ctx, newSession("test-pg-unreadable")); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		if err := repo.MarkPlateUnreadable(ctx, "test-pg-unreadable"); err != nil {
+			t.Fatalf("MarkPlateUnreadable failed: %v", err)
+		}
+		s, _ := repo.GetByID(ctx, "test-pg-unreadable")
+		if s.Status != "PARKED" || s.PlateStatus != "UNREADABLE" {
+			t.Fatalf("expected PARKED/UNREADABLE, got %s/%s", s.Status, s.PlateStatus)
+		}
+
+		// A plate the cashier already typed is never overwritten.
+		if err := repo.Create(ctx, newSession("test-pg-manual")); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		if _, err := repo.UpdatePlate(ctx, "test-pg-manual", "ABC1D23"); err != nil {
+			t.Fatalf("failed to update plate: %v", err)
+		}
+		if err := repo.MarkPlateUnreadable(ctx, "test-pg-manual"); err != nil {
+			t.Fatalf("MarkPlateUnreadable failed: %v", err)
+		}
+		s, _ = repo.GetByID(ctx, "test-pg-manual")
+		if s.PlateStatus != "MANUAL" || s.LicensePlate == nil || *s.LicensePlate != "ABC1D23" {
+			t.Fatalf("expected MANUAL with ABC1D23 kept, got %s %v", s.PlateStatus, s.LicensePlate)
+		}
+	})
+
+	t.Run("UpdatePlate_SetsManualAndKeepsParked", func(t *testing.T) {
+		updated, err := repo.UpdatePlate(ctx, "test-pg-unreadable", "LSN4I49")
+		if err != nil {
+			t.Fatalf("failed to update plate: %v", err)
+		}
+		if updated == nil || updated.Status != "PARKED" || updated.PlateStatus != "MANUAL" || *updated.LicensePlate != "LSN4I49" {
+			t.Fatalf("expected PARKED/MANUAL with LSN4I49, got %+v", updated)
+		}
+	})
+
+	t.Run("FindAll_Filters", func(t *testing.T) {
+		ids := func(filter repository.SessionFilter) map[string]bool {
+			sessions, err := repo.FindAll(ctx, filter)
+			if err != nil {
+				t.Fatalf("FindAll failed: %v", err)
+			}
+			got := map[string]bool{}
+			for _, s := range sessions {
+				got[s.ID] = true
+			}
+			return got
+		}
+		if got := ids(repository.SessionFilter{}); len(got) != 3 {
+			t.Fatalf("expected 3 sessions without a filter, got %v", got)
+		}
+		if got := ids(repository.SessionFilter{PlateStatus: "PENDING"}); len(got) != 1 || !got["test-pg-session-1"] {
+			t.Fatalf("expected only the PENDING session, got %v", got)
+		}
+		if got := ids(repository.SessionFilter{Status: "PARKED", PlateStatus: "MANUAL"}); len(got) != 2 {
+			t.Fatalf("expected the 2 MANUAL sessions, got %v", got)
+		}
+		if got := ids(repository.SessionFilter{Plate: "LSN4I49"}); len(got) != 1 || !got["test-pg-unreadable"] {
+			t.Fatalf("expected the session found by plate, got %v", got)
+		}
+		if got := ids(repository.SessionFilter{Status: "PAID"}); len(got) != 0 {
+			t.Fatalf("expected no PAID session yet, got %v", got)
+		}
+	})
+
+	t.Run("MarkAsPaid_WithoutPlate", func(t *testing.T) {
 		exitedAt := time.Now().UTC().Truncate(time.Millisecond)
 		amount := 12.50
 
+		// test-pg-session-1 never had its plate read: the ticket alone pays.
 		paid, err := repo.MarkAsPaid(ctx, "test-pg-session-1", exitedAt, amount)
 		if err != nil {
 			t.Fatalf("failed to mark session as paid: %v", err)
 		}
-		if paid.Status != "PAID" {
-			t.Fatalf("expected status PAID, got %s", paid.Status)
+		if paid == nil || paid.Status != "PAID" || paid.PlateStatus != "PENDING" {
+			t.Fatalf("expected PAID keeping plate_status PENDING, got %+v", paid)
 		}
 		if paid.AmountPaid == nil || *paid.AmountPaid != amount {
 			t.Fatalf("expected amount %f, got %v", amount, paid.AmountPaid)
 		}
+		if count, _ := repo.CountActive(ctx); count != 2 {
+			t.Fatalf("expected 2 PARKED sessions after the payment, got %d", count)
+		}
 	})
 
-	t.Run("UpdatePlate_FailedBecomesParked", func(t *testing.T) {
-		session := &model.Session{
-			ID:         "test-pg-failed",
-			Status:     "FAILED",
-			S3PhotoKey: "photos/failed.jpg",
-			EnteredAt:  time.Now().UTC(),
-		}
-		if err := repo.Create(ctx, session); err != nil {
-			t.Fatalf("failed to create session: %v", err)
-		}
-		updated, err := repo.UpdatePlate(ctx, "test-pg-failed", "ABC1D23")
-		if err != nil {
-			t.Fatalf("failed to update plate: %v", err)
-		}
-		if updated == nil || updated.Status != "PARKED" || *updated.LicensePlate != "ABC1D23" {
-			t.Fatalf("expected PARKED with ABC1D23, got %+v", updated)
+	t.Run("MarkAsPaid_TwiceIsRefused", func(t *testing.T) {
+		paid, err := repo.MarkAsPaid(ctx, "test-pg-session-1", time.Now().UTC(), 12.50)
+		if err != nil || paid != nil {
+			t.Fatalf("expected nil for an already PAID session, got %+v, %v", paid, err)
 		}
 	})
 
@@ -154,14 +262,14 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 	})
 
 	t.Run("Delete", func(t *testing.T) {
-		deleted, err := repo.Delete(ctx, "test-pg-failed")
+		deleted, err := repo.Delete(ctx, "test-pg-manual")
 		if err != nil || !deleted {
 			t.Fatalf("expected deleted, got %v, %v", deleted, err)
 		}
-		if fetched, _ := repo.GetByID(ctx, "test-pg-failed"); fetched != nil {
+		if fetched, _ := repo.GetByID(ctx, "test-pg-manual"); fetched != nil {
 			t.Fatalf("expected session gone, got %+v", fetched)
 		}
-		if deleted, _ := repo.Delete(ctx, "test-pg-failed"); deleted {
+		if deleted, _ := repo.Delete(ctx, "test-pg-manual"); deleted {
 			t.Fatal("expected second delete to report false")
 		}
 	})
@@ -258,6 +366,47 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 			t.Fatalf("failed to delete key: %v", err)
 		}
 		if _, err := repo.Decrement(ctx); !errors.Is(err, redis.Nil) {
+			t.Fatalf("expected redis.Nil, got %v", err)
+		}
+		if n, _ := rdb.Exists(ctx, "spots:available").Result(); n != 0 {
+			t.Fatalf("expected key to stay absent, got exists=%d", n)
+		}
+	})
+
+	t.Run("Reserve_TakesASpot", func(t *testing.T) {
+		if err := repo.SetAvailable(ctx, 2); err != nil {
+			t.Fatalf("failed to set spots: %v", err)
+		}
+		reserved, err := repo.Reserve(ctx)
+		if err != nil || !reserved {
+			t.Fatalf("expected a spot reserved, got %v, %v", reserved, err)
+		}
+		if spots, _ := repo.GetAvailable(ctx); spots != 1 {
+			t.Fatalf("expected 1 spot left, got %d", spots)
+		}
+	})
+
+	t.Run("Reserve_LastSpotThenFull", func(t *testing.T) {
+		// 1 spot left: the first car takes it, the second is refused and the
+		// counter stays at 0.
+		reserved, err := repo.Reserve(ctx)
+		if err != nil || !reserved {
+			t.Fatalf("expected the last spot reserved, got %v, %v", reserved, err)
+		}
+		reserved, err = repo.Reserve(ctx)
+		if err != nil || reserved {
+			t.Fatalf("expected a full lot to refuse, got %v, %v", reserved, err)
+		}
+		if spots, _ := repo.GetAvailable(ctx); spots != 0 {
+			t.Fatalf("expected the counter to stay at 0, got %d", spots)
+		}
+	})
+
+	t.Run("Reserve_MissingKeyIsNotCreated", func(t *testing.T) {
+		if err := rdb.Del(ctx, "spots:available").Err(); err != nil {
+			t.Fatalf("failed to delete key: %v", err)
+		}
+		if _, err := repo.Reserve(ctx); !errors.Is(err, redis.Nil) {
 			t.Fatalf("expected redis.Nil, got %v", err)
 		}
 		if n, _ := rdb.Exists(ctx, "spots:available").Result(); n != 0 {
