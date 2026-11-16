@@ -120,15 +120,17 @@ O worker deixa de ser dono da vaga, então fica bem mais simples:
 - [x] 4.3 `AGENTS.md` (raiz, `api/`, `worker/`, `web/`) e spec do worker (requisitos 6, 7 e 10).
 
 ### Fase 5 — Verificação
-- [ ] 5.1 Testes: `go test ./...`, `uv run pytest`, `npm test`.
-- [ ] 5.2 Entrada com foto legível: ticket válido na hora; vagas −1 **antes** do OCR; placa aparece em seguida.
-- [ ] 5.3 Entrada com foto ilegível (ou arquivo que não é imagem): ticket válido, vagas −1, `plate_status=UNREADABLE`; pagar e sair pelo ticket **sem nenhuma ação do operador**.
-- [ ] 5.4 Worker parado: entrada, pagamento e saída pelo ticket funcionam; ao religar o worker, as placas pendentes são preenchidas.
-- [ ] 5.5 Fila fora do ar: a entrada continua funcionando.
-- [ ] 5.6 Estacionamento lotado (`TOTAL_PARKING_SPOTS=1`): a 2ª entrada recebe `409`.
-- [ ] 5.7 Redis reiniciado: o painel recalcula `total − (PARKED + PAID)`.
-- [ ] 5.8 Foto visível no caixa e na auditoria.
-- [ ] 5.9 Banco com dados antigos (`PROCESSING`, `FAILED`): a migration converte e o contador bate depois de apagar a chave do Redis.
+- [x] 5.1 Testes: `go test ./...`, `uv run pytest`, `npm test`.
+- [x] 5.2 Entrada com foto legível: ticket válido na hora; vagas −1 **antes** do OCR; placa aparece em seguida.
+- [x] 5.3 Entrada com foto ilegível (ou arquivo que não é imagem): ticket válido, vagas −1, `plate_status=UNREADABLE`; pagar e sair pelo ticket **sem nenhuma ação do operador**.
+- [x] 5.4 Worker parado: entrada, pagamento e saída pelo ticket funcionam; ao religar o worker, as placas pendentes são preenchidas.
+- [x] 5.5 Fila fora do ar: a entrada continua funcionando.
+- [x] 5.6 Estacionamento lotado (`TOTAL_PARKING_SPOTS=1`): a 2ª entrada recebe `409`.
+- [x] 5.7 Redis reiniciado: o painel recalcula `total − (PARKED + PAID)`. *Conferido com `total − PARKED`, a regra em vigor enquanto `EXITED` não existe (ver 1.7 e 1.8).*
+- [x] 5.8 Foto visível no caixa e na auditoria.
+- [x] 5.9 Banco com dados antigos (`PROCESSING`, `FAILED`): a migration converte e o contador bate depois de apagar a chave do Redis.
+
+> Verificado em 2026-11-16 com as imagens desta branch (API, worker e web) numa rede Docker isolada: emulador Floci para S3/SQS/DynamoDB, `postgres:16-alpine` e `redis:7-alpine`, `TOTAL_PARKING_SPOTS=4` e a fila com `VisibilityTimeout` de 5 s para observar as reentregas. A fila "fora do ar" do item 5.5 foi simulada apagando a fila.
 
 ## 6. Impacto e riscos
 
