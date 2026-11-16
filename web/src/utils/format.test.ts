@@ -7,6 +7,7 @@ import {
   formatTime,
   isValidPlate,
   normalizePlate,
+  plateStatusLabel,
   shortId,
   statusLabel,
 } from "./format";
@@ -75,10 +76,17 @@ describe("normalizePlate", () => {
 
 describe("statusLabel", () => {
   it("traduz os status", () => {
-    expect(statusLabel("PROCESSING")).toBe("Processando");
     expect(statusLabel("PARKED")).toBe("Estacionado");
     expect(statusLabel("PAID")).toBe("Pago");
-    expect(statusLabel("FAILED")).toBe("Falha no OCR");
+  });
+});
+
+describe("plateStatusLabel", () => {
+  it("traduz a situação da leitura da placa", () => {
+    expect(plateStatusLabel("PENDING")).toBe("Lendo placa...");
+    expect(plateStatusLabel("READ")).toBe("Lida pela foto");
+    expect(plateStatusLabel("UNREADABLE")).toBe("Sem placa");
+    expect(plateStatusLabel("MANUAL")).toBe("Digitada no caixa");
   });
 });
 
@@ -88,6 +96,7 @@ describe("actionLabel", () => {
     expect(actionLabel("OCR_PROCESSING")).toBe("Leitura de placa");
     expect(actionLabel("EXIT_PAYMENT")).toBe("Pagamento/Saída");
     expect(actionLabel("POISON_MESSAGE")).toBe("Falha no processamento");
+    expect(actionLabel("OCR_FAILED")).toBe("Placa não lida");
   });
 
   it("devolve a própria ação quando desconhecida", () => {

@@ -9,6 +9,7 @@ import {
   listAuditEvents,
   listSessions,
   payExit,
+  sessionPhotoUrl,
   updatePlate,
   deleteSession,
 } from "./api";
@@ -66,7 +67,7 @@ describe("services/api", () => {
 
   it("listSessions converte null (lista vazia na API) em []", async () => {
     mockFetch("null\n");
-    await expect(listSessions("FAILED")).resolves.toEqual([]);
+    await expect(listSessions("PAID")).resolves.toEqual([]);
   });
 
   it("getSession localiza a sessão na listagem com status=ALL", async () => {
@@ -127,7 +128,12 @@ describe("errorMessage", () => {
     [new ApiError(400, "photo is required"), "resource", "photo is required"],
     [new ApiError(404, "session not found"), "session", "Sessão não encontrada."],
     [new ApiError(404, "not found"), "resource", "Recurso não encontrado."],
-    [new ApiError(409, "conflict"), "session", "A sessão não está pronta para pagamento."],
+    [new ApiError(409, "conflict"), "session", "Este ticket já foi pago."],
+    [
+      new ApiError(409, "parking lot is full"),
+      "entry",
+      "Estacionamento lotado. Não há vagas disponíveis no momento.",
+    ],
     [new ApiError(413, "photo too large"), "resource", "A foto excede o tamanho máximo de 10 MB."],
     [new ApiError(500, "boom"), "resource", "Erro no servidor. Tente novamente. (boom)"],
     [new Error("x"), "resource", "Erro inesperado. Tente novamente."],
@@ -168,6 +174,11 @@ describe("services/api — placa e exclusão", () => {
     const { url, init } = lastCall(spy);
     expect(url).toBe("/api/sessions/a%20b");
     expect(init?.method).toBe("DELETE");
+  });
+
+  it("sessionPhotoUrl aponta para a foto de entrada com o ID codificado", () => {
+    expect(sessionPhotoUrl("9f2c4e1a")).toBe("/api/sessions/9f2c4e1a/photo");
+    expect(sessionPhotoUrl("a/b c")).toBe("/api/sessions/a%2Fb%20c/photo");
   });
 
   it("errorMessage no contexto plate traduz 400 e 409", () => {

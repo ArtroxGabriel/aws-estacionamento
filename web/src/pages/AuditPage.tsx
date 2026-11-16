@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
-import { errorMessage, listAuditEvents, listSessions } from "../services/api";
+import { errorMessage, listAuditEvents, listSessions, sessionPhotoUrl } from "../services/api";
 import type { AuditAction, AuditEvent, Session } from "../types/api";
 import {
   describeEvent,
@@ -36,8 +36,9 @@ const actionClasses: Record<string, string> = {
   SESSION_DELETE: "bg-slate-200 text-slate-800",
 };
 
-// Os eventos não trazem a situação atual da sessão (placa no pagamento, resultado do OCR
+// Os eventos não trazem a situação atual da sessão (placa no pagamento, resultado da leitura
 // na entrada): ela é buscada nas sessões, e a falha dessa consulta não impede a auditoria.
+// É também o que diz se a foto de entrada ainda pode ser aberta (sessão não excluída).
 async function loadAudit(): Promise<{ events: AuditEvent[]; sessions: Map<string, SessionInfo> }> {
   const [events, sessions] = await Promise.all([
     listAuditEvents(),
@@ -187,8 +188,21 @@ export default function AuditPage() {
                         {actionLabel(e.action)}
                       </span>
                     </td>
-                    <td className="px-3 py-2 font-mono" title={e.entity_id}>
-                      {shortId(e.entity_id)}
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className="font-mono" title={e.entity_id}>
+                        {shortId(e.entity_id)}
+                      </span>
+                      {sessions.get(e.entity_id)?.hasPhoto && (
+                        <a
+                          href={sessionPhotoUrl(e.entity_id)}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Foto de entrada do ticket ${shortId(e.entity_id)}`}
+                          className="ml-2 text-xs font-medium text-blue-700 underline hover:text-blue-900"
+                        >
+                          foto
+                        </a>
+                      )}
                     </td>
                     <td className="px-3 py-2 font-mono">{sessions.get(e.entity_id)?.plate ?? "—"}</td>
                     <td className="px-3 py-2">{describeEvent(e, sessions.get(e.entity_id))}</td>

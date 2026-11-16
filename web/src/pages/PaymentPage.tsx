@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import Alert from "../components/Alert";
 import Spinner from "../components/Spinner";
-import StatusBadge from "../components/StatusBadge";
+import { PlateStatusBadge } from "../components/StatusBadge";
 import { usePolling } from "../hooks/usePolling";
 import {
   deleteSession,
@@ -9,6 +9,7 @@ import {
   INVALID_PLATE_MESSAGE,
   listSessions,
   payExit,
+  sessionPhotoUrl,
   updatePlate,
 } from "../services/api";
 import type { Session } from "../types/api";
@@ -21,11 +22,9 @@ import {
   shortId,
 } from "../utils/format";
 
-// Sessões que podem pagar a saída: PARKED e também FAILED (placa não lida pelo OCR;
-// o totem orienta o motorista a procurar o operador).
-async function listPayableSessions(): Promise<Session[]> {
-  const [parked, failed] = await Promise.all([listSessions("PARKED"), listSessions("FAILED")]);
-  return [...parked, ...failed];
+// Todo carro no pátio está PARKED e pode pagar com o ticket, com ou sem placa lida.
+function listPayableSessions(): Promise<Session[]> {
+  return listSessions("PARKED");
 }
 
 function matches(session: Session, query: string): boolean {
@@ -45,7 +44,7 @@ export default function PaymentPage() {
   const [paidIds, setPaidIds] = useState<ReadonlySet<string>>(new Set());
   const [receipt, setReceipt] = useState<Session>();
   const [payError, setPayError] = useState<string>();
-  // Placa digitada pelo operador (OCR não leu ou leu errado) e exclusão de registro.
+  // Placa digitada pelo operador (opcional: OCR não leu ou leu errado) e exclusão de registro.
   const [editingId, setEditingId] = useState<string>();
   const [plateInput, setPlateInput] = useState("");
   const [savingPlate, setSavingPlate] = useState(false);
@@ -152,7 +151,8 @@ export default function PaymentPage() {
         <Alert variant="success">
           <p className="font-semibold">Pagamento confirmado. Cancela de saída liberada.</p>
           <p>
-            Placa: <span className="font-mono">{receipt.license_plate ?? "—"}</span> · Valor pago:{" "}
+            Ticket: <span className="font-mono">{shortId(receipt.id)}</span> · Placa:{" "}
+            <span className="font-mono">{receipt.license_plate ?? "sem placa"}</span> · Valor pago:{" "}
             {receipt.amount_paid !== undefined ? formatCurrency(receipt.amount_paid) : "—"} · Saída:{" "}
             {receipt.exited_at ? formatDateTime(receipt.exited_at) : "—"}
           </p>
@@ -163,7 +163,7 @@ export default function PaymentPage() {
 
       <div className="space-y-1">
         <label htmlFor="search" className="block font-medium">
-          Buscar por placa ou ID
+          Buscar por ticket ou placa
         </label>
         <input
           id="search"
@@ -173,6 +173,10 @@ export default function PaymentPage() {
           placeholder="ABC1D23 ou 9f2c4e1a"
           className="w-full max-w-sm rounded-md border border-slate-300 px-3 py-2"
         />
+        <p className="text-sm text-slate-600">
+          O ticket identifica o veículo. A placa é opcional: serve para localizar o ticket e
+          conferir com a foto da entrada.
+        </p>
       </div>
 
       {error && data === undefined ? (
@@ -197,6 +201,7 @@ export default function PaymentPage() {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-100 text-slate-600">
                   <tr>
+                    <th scope="col" className="px-3 py-2">Foto</th>
                     <th scope="col" className="px-3 py-2">Placa</th>
                     <th scope="col" className="px-3 py-2">Ticket</th>
                     <th scope="col" className="px-3 py-2">Entrada</th>
@@ -209,8 +214,15 @@ export default function PaymentPage() {
                     const paying = payingId === s.id;
                     return (
                       <tr key={s.id} className="border-t border-slate-200">
-                        <td className="px-3 py-2 font-mono font-semibold">
-                          {s.license_plate ?? (s.status === "FAILED" ? <StatusBadge status="FAILED" /> : "—")}
+                        <td className="px-3 py-2">
+                          <EntryPhoto session={s} />
+                        </td>
+                        <td className="px-3 py-2">
+                          {s.license_plate ? (
+                            <span className="font-mono font-semibold">{s.license_plate}</span>
+                          ) : (
+                            <PlateStatusBadge status={s.plate_status} />
+                          )}
                         </td>
                         <td className="px-3 py-2 font-mono" title={s.id}>{shortId(s.id)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(s.entered_at)}</td>
@@ -336,5 +348,25 @@ export default function PaymentPage() {
         </>
       )}
     </div>
+  );
+}
+
+// Miniatura da foto de entrada, para o caixa conferir o veículo com o ticket. Abre em
+// tamanho real em outra aba. Se a foto não carregar, fica só o texto.
+function EntryPhoto({ session }: { session: Session }) {
+  const [broken, setBroken] = useState(false);
+  const url = sessionPhotoUrl(session.id);
+  const label = `Foto de entrada do ticket ${shortId(session.id)}`;
+  if (broken) return <span className="text-xs text-slate-500">Foto indisponível</span>;
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title="Abrir a foto de entrada">
+      <img
+        src={url}
+        alt={label}
+        loading="lazy"
+        onError={() => setBroken(true)}
+        className="h-12 w-20 rounded border border-slate-200 object-cover"
+      />
+    </a>
   );
 }

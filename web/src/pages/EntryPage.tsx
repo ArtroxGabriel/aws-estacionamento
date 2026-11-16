@@ -7,9 +7,10 @@ import { createEntry, errorMessage, getSession, isTransientError } from "../serv
 import type { Session } from "../types/api";
 
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
-// Acompanhamento do OCR em duas fases: rápida enquanto o carro está na cancela e lenta
-// até o prazo em que o worker desiste de uma placa ilegível. O worker só marca FAILED na
-// 3ª entrega da mensagem no SQS (visibility timeout de 300 s), ~10 min após a entrada.
+// O ticket já é válido quando a API responde; o que se acompanha aqui é só a leitura da
+// placa (plate_status PENDING), um extra. Duas fases: rápida enquanto o carro está na
+// cancela e lenta até o prazo em que o worker desiste da foto (3ª entrega da mensagem,
+// ~10 min após a entrada, quando ele grava UNREADABLE).
 const OCR_FAST_INTERVAL_MS = 2000;
 const OCR_FAST_PHASE_MS = 60_000;
 const OCR_SLOW_INTERVAL_MS = 15_000;
@@ -82,7 +83,7 @@ export default function EntryPage() {
   }, [ticketId, updateTracking]);
 
   const polling =
-    ticket?.status === "PROCESSING" &&
+    ticket?.plate_status === "PENDING" &&
     tracking !== undefined &&
     tracking.id === ticketId &&
     (tracking.phase === "fast" || tracking.phase === "slow");
@@ -147,7 +148,7 @@ export default function EntryPage() {
       setTicket(session);
       setTracking({ id: session.id, round: 0, phase: "fast", offline: false });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, "entry"));
     } finally {
       setSubmitting(false);
     }
@@ -168,15 +169,20 @@ export default function EntryPage() {
       {ticket ? (
         <div className="space-y-4">
           <TicketCard session={ticket} />
-          {ticket.status === "PARKED" && ticket.license_plate && (
+          {ticket.license_plate && (
             <Alert variant="success">
               Placa identificada: <strong className="font-mono">{ticket.license_plate}</strong>
             </Alert>
           )}
-          {ticket.status === "FAILED" && (
-            <Alert variant="warning">Não foi possível ler a placa. Procure o operador.</Alert>
+          {ticket.plate_status === "UNREADABLE" && (
+            <Alert variant="info">
+              Não foi possível ler a placa pela foto. Não é preciso fazer nada: o ticket é válido
+              para a saída.
+            </Alert>
           )}
-          {ticket.status === "PROCESSING" && <TrackingStatus tracking={tracking} onRetry={restartTracking} />}
+          {ticket.plate_status === "PENDING" && (
+            <TrackingStatus tracking={tracking} onRetry={restartTracking} />
+          )}
           <button
             type="button"
             onClick={handleReset}
@@ -255,8 +261,7 @@ function TrackingStatus({ tracking, onRetry }: { tracking?: Tracking; onRetry: (
   if (tracking.phase === "expired") {
     return (
       <Alert variant="warning" onRetry={onRetry}>
-        Não foi possível confirmar a leitura da placa. O ticket é válido; procure o operador se
-        precisar.
+        A leitura da placa não foi concluída. O ticket é válido para a saída.
       </Alert>
     );
   }
