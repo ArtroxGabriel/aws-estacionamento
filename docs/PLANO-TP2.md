@@ -87,7 +87,7 @@ flowchart TD
 
 ### Componente 1: Infraestrutura e Orquestração Local (`infra/docker-compose.yaml` e `Taskfile.yaml`)
 
-> **Estado:** parcial. O arquivo real é `infra/docker-compose.yaml` (não há compose na raiz) e já tem `rustfs`, `postgres`, `rabbitmq` (filas carregadas de `infra/rabbitmq/definitions.json`), `redis` (já existia no compose, mas nada o usa enquanto a API não está lá), `dynamodb-local`, `createbuckets`, `createtables` e `worker`. Faltam `api` e `web`, e as tasks abaixo.
+> **Estado: FEITO** (exceto as tasks `k8s:*`). O arquivo é `infra/docker-compose.yaml` (não há compose na raiz), com os 8 serviços mais `createbuckets` e `createtables`. O healthcheck do RabbitMQ usa `check_port_connectivity` (o `ping` ficava saudável antes da porta 5672 aceitar conexões). `task up`/`down`/`logs`/`test` existem; `task infra:up` sobe só as dependências.
 
 #### [NEW] `infra/docker-compose.yaml` (completar)
 Substitui a dependência do Floci por containers oficiais e especializados:
@@ -96,9 +96,9 @@ Substitui a dependência do Floci por containers oficiais e especializados:
 - `rabbitmq`: Imagem `rabbitmq:3-management-alpine`, portas 5672 (AMQP) e 15672 (Management), volume `rabbitmq_data`, `healthcheck` via `rabbitmq-diagnostics ping`.
 - `redis`: Imagem `redis:7-alpine`, porta 6379, volume `redis_data`, `healthcheck` via `redis-cli ping`.
 - `dynamodb-local`: Imagem `amazon/dynamodb-local:latest`, porta 8000, volume `dynamo_data`.
-- `api`: Build `./api`, expõe 8080, `depends_on` de postgres, rabbitmq, rustfs, redis e dynamodb-local com `condition: service_healthy`.
+- `api`: **[FEITO]** Build `../api`, expõe 8080, `depends_on` de postgres, rabbitmq, rustfs, redis e dynamodb-local com `condition: service_healthy`.
 - `worker`: **[FEITO]** Build `../worker`, consome rabbitmq e conecta ao postgres, rustfs e dynamodb-local. **Não usa Redis** (D20).
-- `web`: Build `./web`, expõe 3000 (Nginx servindo React e roteando `/api/` para `http://api:8080/`).
+- `web`: **[FEITO]** Build `../web`, expõe 3000 (Nginx servindo React e roteando `/api/` para `http://api:8080/`).
 
 #### [MODIFY] `Taskfile.yaml`
 Atualizar as tasks de automação:
@@ -109,6 +109,8 @@ Atualizar as tasks de automação:
 ---
 
 ### Componente 2: API Backend (`api/`)
+
+> **Estado: FEITO** (`.kiro/specs/api-rabbitmq-exit-barrier`, fases 1 a 3). Diferenças em relação ao texto abaixo: a rota de pagamento continua `POST /exits/{id}/pay` com auditoria `EXIT_PAYMENT`; `POST /barrier/exit/plate` recebe a placa em JSON, sem foto; a busca por placa se chama `FindOccupyingByPlate` e devolve uma lista; existe a coluna `paid_at`. Ver `docs/DECISOES.md`, D21 e D22.
 
 #### [MODIFY] `api/go.mod`
 - Adicionar dependência oficial AMQP: `github.com/rabbitmq/amqp091-go`.
@@ -197,6 +199,8 @@ Corpo da mensagem (contrato com o worker): `{"session_id": "<32 hex>", "s3_key":
 
 ### Componente 4: Frontend Web & Totens (`web/`)
 
+> **Estado: FEITO** (fase 4 da spec). `/entrada` e `/saida` redirecionam para as rotas novas. O totem de saída aceita os 8 caracteres em destaque no ticket.
+
 #### [MODIFY] `web/src/App.tsx` & Navegação
 Adicionar rotas dedicadas para o fluxo completo:
 - `/cancela-entrada`: Interface do Totem da Cancela de Entrada (captura foto, emite ticket e simula abertura da cancela).
@@ -284,19 +288,21 @@ curl -I http://localhost:30080
 
 ## 5. Estado atual e decisões em aberto
 
-### 5.1. Estado por componente (2026-11-16)
+### 5.1. Estado por componente (2026-11-17)
 
 | Componente | Estado |
 |---|---|
-| 1. Compose / Taskfile | **Parcial.** Feitos: `rustfs`, `postgres`, `rabbitmq` (+ `definitions.json`), `redis`, `dynamodb-local`, `createbuckets`, `createtables`, `worker`. Faltam: `api`, `web`, e as tasks `up`/`down`/`logs`/`test`/`k8s:*` |
-| 2. API Go | **Não iniciado** (ainda publica no SQS, usa os endpoints do Floci e libera a vaga no pagamento) |
+| 1. Compose / Taskfile | **Feito.** 8 serviços em `infra/docker-compose.yaml`; `task up`/`down`/`logs`/`test`. Faltam só as tasks `k8s:*` (bônus) |
+| 2. API Go | **Feito e verificado** (`.kiro/specs/api-rabbitmq-exit-barrier`): RabbitMQ, endpoints próprios, `EXITED`, cancela de saída |
 | 3. Worker | **Feito e verificado** (`PLANO-TP2-WORKER.md`). Pendente só o item 7.3 (prints para o README) |
-| 4. Frontend | **Não iniciado** (as páginas atuais são painel, totem de entrada, caixa e auditoria) |
+| 4. Frontend | **Feito e verificado**: cancela de entrada, caixa, cancela de saída, painel com carros no pátio |
 | 5. Kubernetes (bônus) | **Não iniciado** |
+
+A seção 4.2 foi conferida num stack novo (`docker compose -p ...` com volumes vazios): os passos 1 a 7 passaram pelo nginx do web, e a entrada com o pátio lotado devolveu 409.
 
 ### 5.2. Decisões em aberto
 
-> **Atualização (2026-11-16):** a especificação `.kiro/specs/api-rabbitmq-exit-barrier/` (branch `feat/api-rabbitmq-exit-barrier`) cobre os Componentes 1, 2 e 4 e fecha as decisões 1 a 7 desta tabela (ver a tabela "Decisions" do `design.md`, D-A1 a D-A12): as duas cancelas ficam, o pagamento mantém `POST /exits/{id}/pay` e `EXIT_PAYMENT`, e a saída por placa recebe a placa em JSON, sem OCR. Continuam abertas a 8 (deploy do TP1), a 9 (Kubernetes) e a 10 (docs).
+> **Atualização (2026-11-17):** as decisões 1 a 7 foram fechadas pela especificação `.kiro/specs/api-rabbitmq-exit-barrier/` (`design.md`, D-A1 a D-A12) e registradas em `docs/DECISOES.md` (D21 e D22): as duas cancelas ficam, o pagamento mantém `POST /exits/{id}/pay` e `EXIT_PAYMENT`, a saída por placa recebe a placa em JSON, sem OCR, as páginas novas substituem as antigas (com redirecionamento) e a API não recria o contador na subida. A 10 foi feita, exceto os `scripts/analise-ocr/rek_dump*.py`. Continuam abertas a 8 (deploy do TP1) e a 9 (Kubernetes). A tabela abaixo fica como registro.
 
 | # | O que definir | Opções e impacto |
 |---|---|---|

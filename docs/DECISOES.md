@@ -17,6 +17,8 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 | **Orquestração e Empacotamento** | Terraform / OpenTofu + ECR | **Dockerfiles Multi-Stage + Docker Compose Único** | [D17](#d17-dockerfiles-multi-stage-e-orquestração-com-docker-compose) |
 | **Orquestração em Nuvem (Bônus)** | AWS ASG + ALB | **Kubernetes** (Deployments, Services NodePort/ClusterIP, Secrets) | [D18](#d18-preparação-do-bônus-kubernetes-k8s) |
 | **Motor de OCR** | Amazon Rekognition (AWS) | **Tesseract OCR + OpenCV (Modelo Python 100% Open Source)** | [D19](#d19-retorno-ao-modelo-open-source-em-python-opencv--tesseract-e-descarte-do-amazon-rekognition) |
+| **Implementação da saída** | — | **`EXITED`, `paid_at`, saída por placa ou ticket, vaga liberada uma vez** | [D21](#d21-implementação-das-duas-cancelas) |
+| **API na fila e nos endpoints** | SQS + `AWS_ENDPOINT_URL` único | **Publisher RabbitMQ com confirmação; um endpoint por serviço** | [D22](#d22-api-publicando-no-rabbitmq-e-um-endpoint-por-serviço) |
 
 ---
 
@@ -73,9 +75,10 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 **Decisão:** Adotar o **RabbitMQ** (`rabbitmq:3-management-alpine`):
 - Fila de trabalho durável: `ocr-processamento-fila`.
-- DLQ (Dead Letter Queue): `ocr-processamento-fila-dlq` configurada via `x-dead-letter-exchange` para mensagens venenosas após esgotamento de retentativas.
-- Publicação pela API em Go via driver AMQP 0-9-1 (`github.com/rabbitmq/amqp091-go`).
-- Consumo pelo Worker Python via `pika` com confirmação manual (`basic_ack` / `basic_nack`).
+- Fila de espera `ocr-processamento-fila-retry` (TTL 30 s, volta sozinha para a principal) e DLQ `ocr-processamento-fila-dlq`. O worker conta as tentativas no cabeçalho `x-attempt` e manda para a DLQ na 3ª falha (`docs/PLANO-TP2-WORKER.md`). A principal também tem `x-dead-letter-routing-key` para a DLQ, como rede de segurança.
+- Topologia declarada só em `infra/rabbitmq/definitions.json`, carregado pelo broker na subida. API e worker fazem declaração passiva.
+- Publicação pela API em Go via driver AMQP 0-9-1 (`github.com/rabbitmq/amqp091-go`), com confirmação do broker (D22).
+- Consumo pelo Worker Python via `pika`, `prefetch_count=1` e confirmação manual (`basic_ack`).
 
 **Por quê RabbitMQ e não Kafka:**
 - **Modelo de Mensageria Alinhado ao Problema:** O estacionamento precisa de uma *Fila de Trabalho* (Task Queue / Competing Consumers), onde cada carro é processado exatamente uma vez pelo worker disponível. O RabbitMQ foi concebido especificamente para esse padrão. O Kafka é um log de eventos distribuído particionado (Streaming Log), que introduz complexidade desnecessária de gerenciamento de offsets, partições e rebalanceamento de grupos de consumidores.
@@ -86,7 +89,7 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 - Dependência `github.com/rabbitmq/amqp091-go` na API Go e `pika` no Worker Python.
 - Configuração de `RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/`.
 
-**Onde:** `api/internal/repository/rabbitmq.go`, `worker/worker.py`, `docker-compose.yml`.
+**Onde:** `api/internal/repository/rabbitmq.go`, `worker/consumer.py`, `infra/rabbitmq/definitions.json`, `infra/docker-compose.yaml`.
 
 ---
 
@@ -96,11 +99,11 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 **Decisão:** Manter a tabela `AuditoriaEstacionamento` no DynamoDB com estratégia dual:
 - Se variáveis de credenciais AWS estiverem preenchidas (`AWS_ACCESS_KEY_ID`, etc.), conecta ao Amazon DynamoDB na nuvem.
-- Se nenhuma credencial for informada ou `AWS_ENDPOINT_URL` apontar para `http://dynamodb-local:8000`, conecta ao contêiner oficial `amazon/dynamodb-local:latest`.
+- Com `DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000` (o que o compose define), conecta ao contêiner oficial `amazon/dynamodb-local:latest`. Endpoint vazio = AWS real (D22).
 
 **Por quê:** Atende simultaneamente à imposição formal 1.a da especificação acadêmica e ao critério de reprodutibilidade local sem dependências externas.
 
-**Onde:** `api/internal/repository/dynamodb.go`, `worker/storage/audit.py`, `docker-compose.yml`.
+**Onde:** `api/internal/repository/dynamodb.go`, `worker/storage/audit.py`, `infra/docker-compose.yaml`.
 
 ---
 
@@ -114,16 +117,18 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 **Decisão:**
 1. **Cancela de Entrada (`POST /entries`):** Registra foto, reserva a vaga, emite ticket com ID único e abre a cancela de entrada. Status: `PARKED` desde a emissão (D20).
-2. **Terminal de Pagamento / Caixa (`POST /sessions/{id}/pay`):** Registra o pagamento e altera o status para `PAID`. **A vaga continua ocupada no Redis!** O ticket/placa passa a estar autorizado a sair.
+2. **Terminal de Pagamento / Caixa (`POST /exits/{id}/pay`, rota mantida do TP1; ver D21):** Registra o pagamento e altera o status para `PAID`. **A vaga continua ocupada no Redis!** O ticket/placa passa a estar autorizado a sair.
 3. **Cancela de Saída com Dupla Validação:**
-   - **Fluxo Principal (Câmera / Placa — `POST /barrier/exit/plate`):** Lê a placa na cancela de saída. Se existir sessão ativa com status `PAID`, a cancela abre!
+   - **Fluxo Principal (Câmera / Placa — `POST /barrier/exit/plate`):** Recebe a placa reconhecida pela câmera da saída (sem OCR na API; ver D21). Se existir sessão no pátio com essa placa e status `PAID`, a cancela abre!
    - **Fluxo de Contingência (Ticket em Papel — `POST /barrier/exit/ticket`):** Se a placa não for lida, o motorista informa o ID do ticket em papel. Se estiver `PAID`, a cancela abre!
    - **Efeito Físico de Saída:** Somente na validação da cancela de saída o status passa para `EXITED`, a vaga é incrementada no Redis (`INCR spots:available`) e o evento `EXIT_BARRIER_OPENED` é auditado no DynamoDB.
    - **Bloqueio de Inadimplência:** Se o ticket ou placa constar como `PARKED` (não pago), a cancela de saída recusa a abertura e instrui o motorista a realizar o pagamento no caixa.
 
 **Por quê:** Reflete com fidelidade máxima a arquitetura de engenharia de tráfego e automação predial de estacionamentos reais, prevenindo o problema de overbooking entre o pagamento e a efetiva desocupação da vaga.
 
-**Onde:** `api/internal/service/parking.go`, `api/internal/handler/handler.go`, `web/src/pages/EntryBarrierPage.tsx`, `web/src/pages/ExitBarrierPage.tsx`, `web/src/pages/PaymentPage.tsx`.
+**Implementação:** ver D21.
+
+**Onde:** `api/internal/service/parking.go`, `api/internal/handler/handler.go`, `web/src/pages/EntryPage.tsx`, `web/src/pages/ExitBarrierPage.tsx`, `web/src/pages/PaymentPage.tsx`.
 
 ---
 
@@ -229,7 +234,54 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 **Consequências:**
 - Contrato da API: `status` perde `PROCESSING` e `FAILED`; toda sessão traz `plate_status`. API, worker e frontend mudam juntos.
 - Depois de aplicar a migração num banco com dados antigos, apague a chave `spots:available`: as sessões que eram `PROCESSING`/`FAILED` não ocupavam vaga no contador e a API o recalcula pelo banco.
-- Enquanto `EXITED` não existir, o ciclo é `PARKED` $\rightarrow$ `PAID`, a vaga é devolvida no pagamento e só `PARKED` conta como ativa. Quando as rotas da cancela de saída entrarem, `PAID` passa a contar e o `INCR` vai para a saída (D15).
+- Com a cancela de saída (D21), o ciclo é `PARKED` $\rightarrow$ `PAID` $\rightarrow$ `EXITED`: `PAID` conta como ativa e o `INCR` foi do pagamento para a saída.
 - Na última entrega de uma mensagem o worker encerra a leitura como `UNREADABLE`, mesmo que a causa tenha sido uma indisponibilidade. Reprocessar a mensagem pela DLQ depois disso não grava a placa; para tentar de novo, volte `plate_status` para `PENDING` antes.
 
 **Onde:** `api/internal/service/parking.go`, `api/internal/repository/redis.go`, `api/internal/repository/migrations/000002_add_plate_status.up.sql`, `worker/worker.py`, `worker/storage/session_repo.py`, `web/src/pages/EntryPage.tsx`, `web/src/pages/PaymentPage.tsx`. Plano: [PLANO-FOTO-OPCIONAL.md](PLANO-FOTO-OPCIONAL.md).
+
+---
+
+## D21. Implementação das Duas Cancelas
+
+**Contexto:** A D15 definiu o fluxo de duas cancelas, mas deixou pontos em aberto: o nome da rota de pagamento, como a cancela de saída recebe a placa, o que fazer com placas repetidas, onde guardar a hora do pagamento e o que acontece com as sessões `PAID` já gravadas. As escolhas estão detalhadas em `.kiro/specs/api-rabbitmq-exit-barrier/design.md` (D-A1 a D-A12).
+
+**Decisão:**
+1. **Rota e auditoria do pagamento mantidas:** `POST /exits/{id}/pay` e `EXIT_PAYMENT`. Renomear para `/sessions/{id}/pay` e `PAYMENT_RECEIVED` quebraria o frontend e os testes sem ganho.
+2. **Pagar não mexe no contador.** A sessão vai para `PAID` e ganha `paid_at`; `exited_at` passa a significar "passou pela cancela de saída".
+3. **A saída abre por `UPDATE ... WHERE status = 'PAID' RETURNING`.** Só a requisição que mudou a linha faz o `INCR`: pedidos simultâneos para o mesmo carro liberam a vaga uma vez e o outro recebe `already_exited`.
+4. **A cancela de saída recebe a placa em JSON, sem foto e sem OCR.** Rodar OCR na requisição contraria o desacoplamento assíncrono e a D20. A câmera da saída é simulada pelo campo da placa no totem.
+5. **Só placa confiável abre:** `plate_status` `READ` ou `MANUAL`, de um carro no pátio. Entre vários `PAID` com a mesma placa, abre o de pagamento mais antigo. Placa `PENDING` ou `UNREADABLE` nunca casa: o ticket é a alternativa e sempre funciona.
+6. **Erros com código estável** (`payment_pending`, `already_exited`, `plate_not_found`, `session_not_found`, `invalid_*`), para o totem não depender do texto.
+7. **O caixa pode corrigir a placa de um carro `PAID`**, para ele sair pela placa. Excluir um carro `PARKED` ou `PAID` devolve a vaga; um `EXITED` já devolveu.
+8. **Migração `000003`:** cria `paid_at` e converte as sessões `PAID` antigas em `EXITED`, porque pela regra anterior esses carros já tinham saído e devolvido a vaga. O contador continua válido sem ser apagado.
+9. **O totem aceita os 8 caracteres em destaque no ticket impresso** e resolve o ID completo pela listagem de sessões (só com uma sessão única), porque a API exige o ID inteiro.
+
+**Por quê:** cada escolha mantém a D20 (o ticket sempre basta) e torna a liberação da vaga idempotente, que é o que impede o contador de divergir.
+
+**Alternativas descartadas:**
+- **OCR síncrono na saída:** prende a cancela ao tempo do Tesseract e falha justamente nas fotos ruins.
+- **Saída por placa sem conferir `plate_status`:** uma leitura errada (ou uma placa ainda não lida) poderia abrir a cancela para outro carro.
+
+**Verificação:** testes de sequências aleatórias de entrada, pagamento, saída e exclusão conferem que o contador sempre bate com os carros no pátio e que ninguém sai sem pagar; um teste com 20 saídas simultâneas confere a liberação única. O fluxo inteiro foi conferido no compose.
+
+**Onde:** `api/internal/service/parking.go`, `api/internal/repository/postgres.go`, `api/internal/repository/migrations/000003_exit_barrier.up.sql`, `api/internal/handler/handler.go`, `web/src/pages/ExitBarrierPage.tsx`.
+
+---
+
+## D22. API Publicando no RabbitMQ e um Endpoint por Serviço
+
+**Contexto:** No TP1 a API publicava no SQS e usava um único `AWS_ENDPOINT_URL` para S3, SQS e DynamoDB (o Floci emulava os três na mesma porta). No TP2 cada serviço é um container diferente, e o worker já tinha migrado para o RabbitMQ.
+
+**Decisão:**
+1. **Publisher RabbitMQ atrás da mesma interface `EventPublisher`.** O serviço e os handlers não mudaram.
+2. **Conexão sob demanda:** abre na primeira publicação e é refeita depois de qualquer falha. A API sobe e atende com o broker fora do ar.
+3. **Declaração passiva da fila**, como no worker: a topologia é do `definitions.json`.
+4. **Publicação persistente, `mandatory`, com confirmação do broker e limite de 5 s.** Só conta como publicada a mensagem que o broker confirmou.
+5. **`RABBITMQ_URL` vazio é falha, não um "não faz nada".** Sem fila, a sessão fica `UNREADABLE` em vez de esperar para sempre um worker que nunca vai receber a mensagem.
+6. **Um endpoint por serviço:** `S3_ENDPOINT_URL` (com path-style) e `DYNAMODB_ENDPOINT_URL`, os mesmos nomes do worker. Vazio = AWS real. `AWS_ENDPOINT_URL` e `SQS_QUEUE_URL` não são mais lidos.
+7. **Bucket criado na subida** quando o storage é local, como segunda garantia além do `createbuckets` do compose.
+8. **Healthcheck do RabbitMQ por porta** (`check_port_connectivity`): o `ping` ficava saudável antes de a porta 5672 aceitar conexões, e a primeira entrada podia perder a leitura da placa.
+
+**Consequências:** a fila fora do ar continua não derrubando a entrada (D20); a entrada só fica até 5 s mais lenta. O deploy do TP1 na AWS não funciona com essa imagem da API.
+
+**Onde:** `api/internal/repository/rabbitmq.go`, `api/internal/config/config.go`, `api/cmd/api/main.go`, `infra/docker-compose.yaml`.
