@@ -22,12 +22,12 @@
     ├── 1. API (Go) reserva a vaga no ElastiCache (lotado → 409)
     ├── 2. Salva a imagem original no S3
     ├── 3. Registra a sessão no RDS (status: "PARKED", plate_status: "PENDING")
-    ├── 4. Envia evento direto na fila SQS (fila fora do ar não derruba a entrada)
+    ├── 4. Envia evento direto na fila (TP2: RabbitMQ; fila fora do ar não derruba a entrada)
     ├── 5. Grava log de auditoria no DynamoDB (ação: "ENTRY")
     └── 6. Retorna o ticket, já válido para a saída
 
 [Worker Assíncrono: Python]  (só enriquece a sessão; não muda status nem vagas)
-    ├── Consome mensagens da fila (TP2: RabbitMQ; o worker já migrou, a API ainda publica no SQS)
+    ├── Consome mensagens da fila (TP2: RabbitMQ `ocr-processamento-fila`)
     ├── Baixa a foto do S3, redimensiona a imagem e roda o OCR (Tesseract)
     ├── Grava a placa no RDS (plate_status "PENDING" → "READ")
     └── Grava log de auditoria da placa processada no DynamoDB (ação: "OCR_PROCESSING")
@@ -112,7 +112,7 @@ Configurar variáveis locais no `.env`:
 ## Architecture Conventions
 
 - **O ticket identifica o carro** (`docs/DECISOES.md`, D20): a sessão nasce `PARKED`, com a vaga reservada, e é pagável pelo ticket (ID da sessão) desde a emissão. A foto e a placa são evidência para a auditoria e atalho para achar o ticket; nenhuma regra pode exigir placa lida para o carro pagar ou sair.
-- **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila SQS e libera a requisição HTTP.
+- **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila (RabbitMQ no TP2) e libera a requisição HTTP.
 - **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
 - **Cache de Alta Frequência**: A consulta de vagas disponíveis bate exclusivamente no ElastiCache (Redis).
 - **Consistência de Contadores**: Só a API mexe em `spots:available`: reserva atômica na entrada (`POST /entries`) e incremento na liberação da vaga após o pagamento. O worker não usa Redis.
@@ -124,11 +124,12 @@ Configurar variáveis locais no `.env`:
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
 - **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
 - **Parar o Worker**: use `docker stop -t 30`; o worker termina a mensagem em andamento, confirma (`ack`) e sai. O que o broker não entregou continua na fila.
-- **Fila do worker é do RabbitMQ**: as filas `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` vêm de `infra/rabbitmq/definitions.json`; o worker só confere que existem e sai com código 2 se faltar alguma. Até a API migrar, ela ainda publica no SQS: para testar o worker no compose, publique pelo painel (`:15672`).
+- **Fila do worker é do RabbitMQ**: as filas `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` vêm de `infra/rabbitmq/definitions.json`; o worker só confere que existem e sai com código 2 se faltar alguma. A API publica nessa fila com `RABBITMQ_URL` e também só confere que ela existe. Sem o broker, a entrada continua e a placa fica `UNREADABLE`.
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
 
+- 2026-11-16: API migrada para o TP2, fase 1 (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ no lugar do SQS e usa `S3_ENDPOINT_URL`/`DYNAMODB_ENDPOINT_URL`. O fluxo foto → API → fila → worker → placa volta a fechar no compose. O deploy do TP1 na AWS (`infra/*.tf`) não funciona com as imagens novas.
 - 2026-11-16: Worker migrado para o TP2 (`docs/PLANO-TP2-WORKER.md`): consome o RabbitMQ (`prefetch=1`, fila de espera com TTL e DLQ, `x-attempt`), S3 e DynamoDB com endpoints próprios, sem Rekognition (`OCR_ENGINE` e `worker/floci.env` removidos), serviço `worker` no `infra/docker-compose.yaml`.
 - 2026-11-16: O ticket passa a identificar o carro: sessão `PARKED` e vaga reservada na entrada, `plate_status` separado do `status`, pátio lotado devolve 409, foto servida em `GET /sessions/{id}/photo`, worker sem Redis (`docs/DECISOES.md`, D20).
 

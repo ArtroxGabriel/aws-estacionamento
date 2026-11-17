@@ -8,29 +8,30 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
 
 ## Tasks
 
-- [ ] 1. API on RabbitMQ, RustFS and DynamoDB Local (no business rule changes)
-  - [ ] 1.1 Configuration
+- [x] 1. API on RabbitMQ, RustFS and DynamoDB Local (no business rule changes)
+  - [x] 1.1 Configuration
     - Remove `AWSEndpointURL` and `SQSQueueURL`; add `S3EndpointURL`, `DynamoDBEndpointURL`, `RabbitMQURL`, `RabbitMQQueueName` (default `ocr-processamento-fila`)
     - Update `config_test.go`
     - _Requirements: 1.4, 3.1, 3.3, 3.4, 3.7_
-  - [ ] 1.2 `repository/rabbitmq.go`
+  - [x] 1.2 `repository/rabbitmq.go`
     - Add `github.com/rabbitmq/amqp091-go`; implement `RabbitMQEventPublisher` (lazy connection, passive declaration, confirms, `mandatory`, persistent, 5 s bound, reconnect after failure, `Close`)
     - URL redaction helper for logs
     - _Requirements: 1.1, 1.2, 1.3, 1.5, 1.6, 1.7, 1.8, 2.3, 2.4_
-  - [ ] 1.3 Publisher tests with an injected dialer
+  - [x] 1.3 Publisher tests with an injected dialer
     - Confirmed, nacked, returned, timeout, reconnection after a closed channel, empty URL, queue missing
     - _Requirements: 1.2, 1.7, 2.3, 12.1_
-  - [ ] 1.4 Wire `main.go`
+  - [x] 1.4 Wire `main.go`
     - S3 and DynamoDB clients with their own endpoints; remove `NewSQSClient`; provide the RabbitMQ publisher; close it on stop
     - Delete `repository/sqs.go` and drop the SQS module from `go.mod`
     - _Requirements: 1.9, 3.1, 3.2, 3.3_
-  - [ ] 1.5 `EnsureBucket` at startup when `S3_ENDPOINT_URL` is set
+  - [x] 1.5 `EnsureBucket` at startup when `S3_ENDPOINT_URL` is set
     - _Requirements: 3.5, 3.6_
-  - [ ] 1.6 Entry tests for the degraded path
+  - [x] 1.6 Entry tests for the degraded path
     - Publisher failure keeps HTTP 201, `PARKED`, plate `UNREADABLE`, `ocr_queued: false`
     - _Requirements: 2.1, 2.2_
-  - [ ] 1.7 Checkpoint: `task dev:api` against the compose services plus the `worker` service
+  - [x] 1.7 Checkpoint: `task dev:api` against the compose services plus the `worker` service
     - Send a photo through `POST /entries`; the session reaches `plate_status = READ`; the queues end empty
+    - Done 2026-11-16 with the API image running on the compose network (no local Go toolchain): readable photo -> `READ` `LSN4I49`, covered plate -> `UNREADABLE`, counter 50 -> 48, the three queues empty
 
 - [ ] 2. Status model and persistence
   - [ ] 2.1 Migration `000003_exit_barrier` (up and down)
@@ -79,8 +80,9 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
   - [ ] 5.3 End-to-end verification (`docs/PLANO-TP2.md`, section 4.2)
     - Entry with photo; OCR by the Worker; payment keeps the counter; exit by plate frees one spot; exit by ticket with an unreadable plate; unpaid car refused; audit trail complete; full lot answers 409
     - _Requirements: 11.3, 9.2_
-  - [ ] 5.4 Broker outage check
+  - [x] 5.4 Broker outage check
     - Stop `rabbitmq`, create an entry, confirm HTTP 201 and plate `UNREADABLE`; start it again and confirm the next entry is queued
+    - Done 2026-11-16: with the broker stopped the entry answered 201 in 5.2 s, `UNREADABLE`, `ENTRY` audit with `ocr_queued: false`; once the broker listened again the next entry was queued and read
     - _Requirements: 2.1, 2.2, 1.7_
 
 - [ ] 6. Documentation

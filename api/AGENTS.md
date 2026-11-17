@@ -3,7 +3,7 @@
 ## Project Overview
 - API RESTful em Go que gerencia o ciclo de vida de veículos e vagas no estacionamento.
 - Implementa os endpoints:
-  - `POST /entries`: Recebe foto, reserva a vaga no Redis (lotado → 409), salva no S3, cria sessão no RDS com `status` `PARKED` e `plate_status` `PENDING`, publica na fila SQS e grava auditoria no DynamoDB.
+  - `POST /entries`: Recebe foto, reserva a vaga no Redis (lotado → 409), salva no S3, cria sessão no RDS com `status` `PARKED` e `plate_status` `PENDING`, publica na fila RabbitMQ `ocr-processamento-fila` e grava auditoria no DynamoDB.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
   - `POST /exits/{id}/pay`: Registra saída com tarifa fixa, atualiza status para `PAID` no RDS, incrementa vagas no Redis e grava auditoria no DynamoDB.
   - `GET /sessions?status=PARKED|PAID|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`).
@@ -16,7 +16,8 @@
 ## Tech Stack
 - **Linguagem**: Go 1.27
 - **Injeção de Dependências**: `go.uber.org/fx` (Uber Fx) com gerenciamento de ciclo de vida (`fx.Lifecycle`)
-- **AWS SDK**: `aws-sdk-go-v2` (S3, SQS, DynamoDB)
+- **AWS SDK**: `aws-sdk-go-v2` (S3, DynamoDB)
+- **Fila**: `github.com/rabbitmq/amqp091-go` (RabbitMQ)
 - **Bancos**: PostgreSQL driver (`lib/pq`), Redis client (`go-redis/v9`)
 - **Migrações**: `golang-migrate/migrate` via `embed.FS` nativo
 
@@ -42,7 +43,7 @@ api/
 │   │   ├── postgres.go                 # PostgresSessionRepo (RDS)
 │   │   ├── redis.go                    # RedisSpotsRepo (ElastiCache)
 │   │   ├── s3.go                       # S3BlobStorage (S3)
-│   │   ├── sqs.go                      # SQSEventPublisher (SQS)
+│   │   ├── rabbitmq.go                 # RabbitMQEventPublisher (RabbitMQ)
 │   │   ├── dynamodb.go                 # DynamoDBAuditLogger (DynamoDB)
 │   │   ├── migrate.go                  # Migrações via embed.FS (golang-migrate)
 │   │   ├── migrations/                 # Scripts SQL de migração
@@ -71,7 +72,8 @@ api/
 - **Migração 000002 em banco com dados**: converte `PROCESSING`/`FAILED` em `PARKED`. Essas sessões não ocupavam vaga no contador: apague a chave `spots:available` depois de migrar, que a API recalcula.
 - **Logs no DynamoDB**: Criar registros com chave única contendo timestamp, ação (`ENTRY`, `EXIT_PAYMENT`) e payload resumido.
 - **Redis & Anti-Overbooking**: Chave `spots:available` lida em alta frequência. Se o Redis falhar ou a chave sumir (reboot no meio do dia), **a API nunca assume o default 50**: consulta o banco relacional (`totalSpots - count(ativas)`), responde a contagem precisa e reidrata o Redis com `SET spots:available`.
-- **AWS real x Floci**: `AWS_ENDPOINT_URL` e as chaves `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` não têm default. Sem elas o SDK usa os endpoints reais e a cadeia padrão de credenciais (instance profile na EC2); localmente o `.env`/`task dev:api` apontam para o Floci. `AWS_SESSION_TOKEN` é aceito para credenciais temporárias. Path-style no S3 só com endpoint customizado.
+- **Um endpoint por serviço**: `S3_ENDPOINT_URL` (path-style, RustFS) e `DYNAMODB_ENDPOINT_URL` (DynamoDB Local); vazio = AWS real. As chaves `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` não têm default: sem elas o SDK usa a cadeia padrão de credenciais. `AWS_SESSION_TOKEN` é aceito para credenciais temporárias. `AWS_ENDPOINT_URL` e `SQS_QUEUE_URL` não são mais lidos. Com `S3_ENDPOINT_URL` definido, a API cria o bucket na subida se ele não existir.
+- **Fila (RabbitMQ)**: `RABBITMQ_URL` e `RABBITMQ_QUEUE_NAME` (padrão `ocr-processamento-fila`). O publisher conecta na primeira publicação e reconecta após falha, então a API sobe e atende com o broker fora do ar. Ele só **confere** a fila (declaração passiva): a topologia é do `infra/rabbitmq/definitions.json`. Publicação persistente, com confirmação do broker, limitada a 5 s. Falha (broker fora, fila ausente, `RABBITMQ_URL` vazio) não derruba a entrada: a sessão fica `PARKED` com `plate_status` `UNREADABLE` e a auditoria `ENTRY` registra `ocr_queued: false`. O `session_id` da mensagem tem 32 caracteres hexadecimais; o worker recusa outro formato.
 - **RDS exige SSL**: na AWS use `DATABASE_URL=...?sslmode=require` (o PostgreSQL 16 do RDS recusa `sslmode=disable`).
 - **Migrations no boot**: se o Postgres ainda não responder, a API sobe mesmo assim e tenta as migrations a cada 5 s em background (advisory lock do `golang-migrate` torna seguro com várias instâncias do ASG).
 - **Placa digitada no caixa (`PATCH /sessions/{id}`, body `{"license_plate": "ABC1D23"}`)**: aceita os formatos dos 4 países do Mercosul: `ABC1D23`, `ABC1234`, `AB123CD`, `ABC123`, `ABCD123` (hífen/espaços são removidos; 400 se inválida; `docs/DECISOES.md` D8). Só para sessão `PARKED` (preenche a placa que o OCR não leu ou corrige uma leitura errada); grava `plate_status = MANUAL` e não mexe no contador. 409 em outros status. Auditoria `PLATE_CORRECTION` com `license_plate`, `previous_plate`, `previous_plate_status`, `status`.
@@ -80,6 +82,7 @@ api/
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-11-16: Fase 1 do TP2 na API (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ (`rabbitmq.go`, sem SQS), endpoints separados para S3 e DynamoDB, bucket criado na subida em storage local.
 - 2026-11-16: Sessão `PARKED` e vaga reservada na entrada (409 se lotado), `plate_status`, migração 000002, `GET /sessions/{id}/photo`, filtro `plate_status`; `PROCESSING`/`FAILED` e `ENTRY_FAILED` removidos.
 - 2026-10-03: `PATCH /sessions/{id}` (placa digitada/corrigida no caixa) e `DELETE /sessions/{id}` (CRUD completo, com remoção da foto no S3); `Decrement` seguro em Lua; CORS com PATCH/DELETE.
 - 2026-10-03: Config sem defaults do Floci para endpoint/credenciais (instance profile na AWS), `AWS_SESSION_TOKEN`, retry das migrations e build do Dockerfile no `$BUILDPLATFORM` (cross-compile para `linux/amd64`).

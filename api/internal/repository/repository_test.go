@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"api/internal/config"
 	"api/internal/model"
 	"api/internal/repository"
 
@@ -425,12 +424,4 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 			t.Fatalf("expected key to stay absent, got exists=%d", n)
 		}
 	})
-}
-
-func TestSQSEventPublisher_EmptyQueue(t *testing.T) {
-	pub := repository.NewSQSEventPublisher(nil, config.Config{SQSQueueURL: ""})
-	err := pub.Publish(context.Background(), map[string]string{"foo": "bar"})
-	if err != nil {
-		t.Fatalf("expected nil error when queue URL is empty, got %v", err)
-	}
 }
