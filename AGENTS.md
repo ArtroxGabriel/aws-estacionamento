@@ -27,7 +27,7 @@
     └── 6. Retorna o ticket, já válido para a saída
 
 [Worker Assíncrono: Python]  (só enriquece a sessão; não muda status nem vagas)
-    ├── Consome mensagens da fila SQS
+    ├── Consome mensagens da fila (TP2: RabbitMQ; o worker já migrou, a API ainda publica no SQS)
     ├── Baixa a foto do S3, redimensiona a imagem e roda o OCR (Tesseract)
     ├── Grava a placa no RDS (plate_status "PENDING" → "READ")
     └── Grava log de auditoria da placa processada no DynamoDB (ação: "OCR_PROCESSING")
@@ -75,7 +75,7 @@
 ```
 
 - `api/`: API REST responsável pelas rotas `/entries`, `/spots/available`, `/sessions` e `/exits/{id}/pay`.
-- `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e gravar a placa no RDS.
+- `worker/`: Worker consumidor da fila RabbitMQ (`ocr-processamento-fila`) para processar a foto no storage S3, rodar OCR (OpenCV + Tesseract) e gravar a placa no RDS.
 - `web/`: Interface para o operador e totem de entrada.
 - `infra/`: Definições IaC (OpenTofu) e ambiente local (Docker Compose com Floci).
 
@@ -94,7 +94,7 @@
 - **Execução dos Serviços**:
   - `task dev:api`: Executa a API Go
   - `task dev:worker`: Executa o Worker Python
-  - `docker build -t estacionamento-worker ./worker` + `docker run --network container:floci_aws --env-file worker/floci.env estacionamento-worker`: Worker em container com Tesseract (ver `worker/README.md`)
+  - `cd infra && docker compose up -d --build worker`: Worker em container com Tesseract, com RabbitMQ, RustFS, Postgres e DynamoDB Local (ver `worker/README.md`)
   - `task dev:web`: Inicia servidor local Vite (proxy `/api` → `localhost:8080`)
   - `task install:web` / `task test:web` / `task lint:web`: Dependências, testes (Vitest) e lint do frontend
   - `task build:web`: Gera bundle estático do frontend
@@ -123,11 +123,13 @@ Configurar variáveis locais no `.env`:
 - **Créditos AWS Academy**: Sempre executar `task tf:destroy:aws` ao encerrar os testes em nuvem.
 - **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
 - **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
-- **Parar o Worker**: use `docker stop -t 30`; o worker espera o long poll do SQS em andamento terminar (até 20 s) para não perder mensagens.
+- **Parar o Worker**: use `docker stop -t 30`; o worker termina a mensagem em andamento, confirma (`ack`) e sai. O que o broker não entregou continua na fila.
+- **Fila do worker é do RabbitMQ**: as filas `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` vêm de `infra/rabbitmq/definitions.json`; o worker só confere que existem e sai com código 2 se faltar alguma. Até a API migrar, ela ainda publica no SQS: para testar o worker no compose, publique pelo painel (`:15672`).
 - **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
 
 ## Changelog
 
+- 2026-11-16: Worker migrado para o TP2 (`docs/PLANO-TP2-WORKER.md`): consome o RabbitMQ (`prefetch=1`, fila de espera com TTL e DLQ, `x-attempt`), S3 e DynamoDB com endpoints próprios, sem Rekognition (`OCR_ENGINE` e `worker/floci.env` removidos), serviço `worker` no `infra/docker-compose.yaml`.
 - 2026-11-16: O ticket passa a identificar o carro: sessão `PARKED` e vaga reservada na entrada, `plate_status` separado do `status`, pátio lotado devolve 409, foto servida em `GET /sessions/{id}/photo`, worker sem Redis (`docs/DECISOES.md`, D20).
 
 - 2026-10-04: Datasets versionados (1.000 recortes do Roboflow + 400 sintéticas, com respostas guardadas), scripts de análise em `scripts/analise-ocr/`, `docs/ARQUITETURA.md` com o antes × depois.

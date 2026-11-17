@@ -87,7 +87,7 @@ API ──publish──► [ocr-processamento-fila] ──► worker
                                    [ocr-processamento-fila-dlq]
 ```
 
-- `ocr-processamento-fila`: durável; mensagens persistentes (`delivery_mode=2`).
+- `ocr-processamento-fila`: durável; mensagens persistentes (`delivery_mode=2`). Foi acrescentado `x-dead-letter-routing-key=ocr-processamento-fila-dlq` como rede de segurança: uma mensagem rejeitada sem requeue vai para a DLQ em vez de sumir.
 - `ocr-processamento-fila-retry`: durável, `x-message-ttl=30000`, `x-dead-letter-exchange=""`, `x-dead-letter-routing-key=ocr-processamento-fila`. Ninguém consome dela: a mensagem expira e volta para a fila principal.
 - `ocr-processamento-fila-dlq`: durável, sem consumidor; inspecionada no painel (`:15672`).
 - `MAX_ATTEMPTS = 3`, o mesmo valor de hoje (`MAX_RECEIVE_COUNT`). O worker lê `x-attempt` (ausente = 1).
@@ -129,49 +129,66 @@ Cliente S3 com `Config(s3={"addressing_style": "path"})`: storage local não res
 ## 5. Tarefas
 
 ### Fase 0 — Atualizar a branch
-- [ ] 0.1 Trazer a `main` (PR #7) para a branch e rodar `uv run pytest` em `worker/` para partir de uma base verde.
+- [x] 0.1 Trazer a `main` (PR #7) para a branch e rodar `uv run pytest` em `worker/` para partir de uma base verde.
 
 ### Fase 1 — Refatoração sem mudar comportamento
-- [ ] 1.1 Extrair `MessageProcessor` para `worker/processor.py` (o `_handle`, `_process`, `_apply_side_effects`, `_mark_unreadable_best_effort` e as auditorias de melhor esforço), recebendo `attempt` no lugar do dicionário do SQS.
-- [ ] 1.2 Ajustar `test_poller_side_effects.py` e `test_poison.py` para o `MessageProcessor`. **Todos os testes continuam verdes com o SQS ainda no lugar.**
+- [x] 1.1 Extrair `MessageProcessor` para `worker/processor.py` (o `_handle`, `_process`, `_apply_side_effects`, `_mark_unreadable_best_effort` e as auditorias de melhor esforço), recebendo `attempt` no lugar do dicionário do SQS.
+- [x] 1.2 Ajustar `test_poller_side_effects.py` e `test_poison.py` para o `MessageProcessor`. **Todos os testes continuam verdes com o SQS ainda no lugar.**
 
 ### Fase 2 — Configuração e clientes
-- [ ] 2.1 `config.py`: variáveis da seção 4.5; validar esquema de `RABBITMQ_URL`; redação de credenciais.
-- [ ] 2.2 `storage/clients.py`: endpoint por serviço (`S3_ENDPOINT_URL`, `DYNAMODB_ENDPOINT_URL`), estilo *path* no S3; remover `sqs_client` e `rekognition_client`.
-- [ ] 2.3 Atualizar `test_config.py` (incluindo a propriedade "toda variável faltante é reportada").
+- [x] 2.1 `config.py`: variáveis da seção 4.5; validar esquema de `RABBITMQ_URL`; redação de credenciais.
+- [x] 2.2 `storage/clients.py`: endpoint por serviço (`S3_ENDPOINT_URL`, `DYNAMODB_ENDPOINT_URL`), estilo *path* no S3; remover `sqs_client` e `rekognition_client`.
+- [x] 2.3 Atualizar `test_config.py` (incluindo a propriedade "toda variável faltante é reportada").
 
 ### Fase 3 — Transporte RabbitMQ
-- [ ] 3.1 `pyproject.toml`: adicionar `pika`; `uv lock`.
-- [ ] 3.2 `worker/consumer.py`: conexão, `prefetch=1`, callback, mapa Outcome → ação, publicação na fila de espera e na DLQ com confirmação.
-- [ ] 3.3 Reconexão com back-off e parada graciosa (4.3 e 4.4).
-- [ ] 3.4 `worker.py`: `main()` monta `MessageProcessor` + `RabbitConsumer`; remover o laço do SQS (`_receive`, `_delete`, `_release`, `_Interrupted`).
-- [ ] 3.5 Testes com canal falso (`tests/fakes.py`), substituindo `test_shutdown.py`: ack no sucesso; fila de espera com `x-attempt` incrementado; DLQ + auditoria + `UNREADABLE` na 3ª falha; parada com mensagem em andamento; reconexão.
+- [x] 3.1 `pyproject.toml`: adicionar `pika`; `uv lock`.
+- [x] 3.2 `worker/consumer.py`: conexão, `prefetch=1`, callback, mapa Outcome → ação, publicação na fila de espera e na DLQ com confirmação.
+- [x] 3.3 Reconexão com back-off e parada graciosa (4.3 e 4.4).
+- [x] 3.4 `worker.py`: `main()` monta `MessageProcessor` + `RabbitConsumer`; remover o laço do SQS (`_receive`, `_delete`, `_release`, `_Interrupted`).
+- [x] 3.5 Testes com canal falso (`tests/fakes.py`), substituindo `test_shutdown.py`: ack no sucesso; fila de espera com `x-attempt` incrementado; DLQ + auditoria + `UNREADABLE` na 3ª falha; parada com mensagem em andamento; reconexão.
 
 ### Fase 4 — Remover o Rekognition
-- [ ] 4.1 Apagar `ocr/rekognition.py` e `tests/test_rekognition.py`; `ocr = extract_text` fixo.
-- [ ] 4.2 Confirmar D-W4 e ajustar os testes do normalizador se a política mudar.
-- [ ] 4.3 Remover `OCR_ENGINE` de scripts e documentos (`scripts/`, `Taskfile.yaml`).
+- [x] 4.1 Apagar `ocr/rekognition.py` e `tests/test_rekognition.py`; `ocr = extract_text` fixo.
+- [x] 4.2 Confirmar D-W4 e ajustar os testes do normalizador se a política mudar. *Nada a ajustar: a política restritiva (só leitura exata) vivia no `HybridOcr`, que foi removido; o normalizador padrão já é o completo.*
+- [x] 4.3 Remover `OCR_ENGINE` de scripts e documentos (`scripts/`, `Taskfile.yaml`). *`scripts/ocr_local.py` perdeu o `--engine` e a task `ocr:dataset` perdeu o `ENGINE`. `scripts/analise-ocr/rek_dump*.py` importam o módulo removido; o README da pasta diz como recuperá-lo do histórico. O `user_data` do Terraform (`infra/`) ainda exporta `SQS_QUEUE_URL` e `OCR_ENGINE`: o deploy na AWS do TP1 não funciona mais com esta imagem do worker (ver seção 6).*
 
 ### Fase 5 — Imagem e compose
-- [ ] 5.1 `Dockerfile`: copiar `processor.py` e `consumer.py` (o `COPY` lista os arquivos um a um) e trocar o comentário do `STOPSIGNAL`, que ainda fala do long poll do SQS.
-- [ ] 5.2 `infra/rabbitmq/definitions.json` com as 3 filas; montar no serviço `rabbitmq` (D-W2).
-- [ ] 5.3 Serviço `worker` no compose: `build: ../worker`, variáveis, `depends_on` com `condition: service_healthy` para `postgres`, `rabbitmq`, storage e `dynamodb-local` (**sem `redis`**), e `service_completed_successfully` para `createbuckets` e `createtables`; `stop_grace_period: 30s`; `restart: unless-stopped`.
-- [ ] 5.4 Apagar `worker/floci.env`.
+- [x] 5.1 `Dockerfile`: copiar `processor.py` e `consumer.py` (o `COPY` lista os arquivos um a um) e trocar o comentário do `STOPSIGNAL`, que ainda fala do long poll do SQS.
+- [x] 5.2 `infra/rabbitmq/definitions.json` com as 3 filas; montar no serviço `rabbitmq` (D-W2). *O arquivo também declara o vhost `/` e o usuário `guest`: o broker aborta a subida ("Please create virtual host "/" prior to importing definitions") se o vhost não estiver nas definições. O `load_definitions` entra por `infra/rabbitmq/rabbitmq.conf`.*
+- [x] 5.3 Serviço `worker` no compose: `build: ../worker`, variáveis, `depends_on` com `condition: service_healthy` para `postgres`, `rabbitmq`, storage e `dynamodb-local` (**sem `redis`**), e `service_completed_successfully` para `createbuckets` e `createtables`; `stop_grace_period: 30s`; `restart: unless-stopped`.
+- [x] 5.4 Apagar `worker/floci.env`.
 
 ### Fase 6 — Verificação
-- [ ] 6.1 `uv run pytest`, `ruff check`, `ruff format --check`.
-- [ ] 6.2 Suíte dentro da imagem (testes que precisam do binário do Tesseract).
-- [ ] 6.3 Ponta a ponta no compose: publicar uma mensagem para uma sessão `PARKED` com `plate_status=PENDING` e conferir `license_plate` gravada, `plate_status=READ`, `status` ainda `PARKED`, `spots:available` **inalterado**, auditoria `OCR_PROCESSING`, fila vazia. Enquanto a API não estiver migrada, ver a seção 6 para como criar a sessão.
-- [ ] 6.4 Falha transitória: parar o container do `dynamodb-local`, publicar uma mensagem, ver a placa continuar `PENDING` e a mensagem na fila de espera; religar e ver o processamento concluir sozinho, com uma única auditoria.
-- [ ] 6.5 DLQ: manter o storage parado por 3 tentativas e conferir a mensagem na DLQ, a auditoria `POISON_MESSAGE` e a sessão com `plate_status=UNREADABLE`, ainda `PARKED`.
-- [ ] 6.6 Parada: `docker compose stop worker` durante um processamento; a mensagem termina ou é reentregue, nunca se perde.
-- [ ] 6.7 Placa ilegível: `plate_status=UNREADABLE`, `status` ainda `PARKED`, auditoria `OCR_FAILED`, mensagem confirmada (sem nova tentativa).
-- [ ] 6.8 Idempotência: publicar a mesma mensagem duas vezes (uma auditoria só) e publicar para uma sessão com placa `MANUAL` (confirmada sem efeito; a placa digitada não é sobrescrita).
+- [x] 6.1 `uv run pytest`, `ruff check`, `ruff format --check`.
+- [x] 6.2 Suíte dentro da imagem (testes que precisam do binário do Tesseract).
+- [x] 6.3 Ponta a ponta no compose: publicar uma mensagem para uma sessão `PARKED` com `plate_status=PENDING` e conferir `license_plate` gravada, `plate_status=READ`, `status` ainda `PARKED`, `spots:available` **inalterado**, auditoria `OCR_PROCESSING`, fila vazia. Enquanto a API não estiver migrada, ver a seção 6 para como criar a sessão.
+- [x] 6.4 Falha transitória: parar o container do `dynamodb-local`, publicar uma mensagem, ver a placa continuar `PENDING` e a mensagem na fila de espera; religar e ver o processamento concluir sozinho, com uma única auditoria.
+- [x] 6.5 DLQ: manter o storage parado por 3 tentativas e conferir a mensagem na DLQ, a auditoria `POISON_MESSAGE` e a sessão com `plate_status=UNREADABLE`, ainda `PARKED`.
+- [x] 6.6 Parada: `docker compose stop worker` durante um processamento; a mensagem termina ou é reentregue, nunca se perde.
+- [x] 6.7 Placa ilegível: `plate_status=UNREADABLE`, `status` ainda `PARKED`, auditoria `OCR_FAILED`, mensagem confirmada (sem nova tentativa).
+- [x] 6.8 Idempotência: publicar a mesma mensagem duas vezes (uma auditoria só) e publicar para uma sessão com placa `MANUAL` (confirmada sem efeito; a placa digitada não é sobrescrita).
 
 ### Fase 7 — Documentação
-- [ ] 7.1 `worker/README.md` e `worker/AGENTS.md`: RabbitMQ, variáveis e comandos do compose.
-- [ ] 7.2 `.kiro/specs/python-ocr-worker`: requisitos 1, 9, 12, 13 e 16 (SQS → RabbitMQ), 14 e 15 (variáveis e endpoint por serviço) e o design do transporte. Os requisitos 6, 7 e 10 já foram atualizados pela D20.
+- [x] 7.1 `worker/README.md` e `worker/AGENTS.md`: RabbitMQ, variáveis e comandos do compose.
+- [x] 7.2 `.kiro/specs/python-ocr-worker`: requisitos 1, 9, 12, 13 e 16 (SQS → RabbitMQ), 14 e 15 (variáveis e endpoint por serviço) e o design do transporte. Os requisitos 6, 7 e 10 já foram atualizados pela D20.
 - [ ] 7.3 Prints para o README do projeto: fila no painel do RabbitMQ e log do worker (evidência da rubrica).
+
+### Resultado da verificação (2026-11-16)
+
+Feita com `docker compose up -d --build worker` em `infra/`, contra RabbitMQ, RustFS, Postgres (migrations da API aplicadas à mão) e DynamoDB Local reais, com fotos de `examples/fotos`:
+
+| Item | Resultado |
+|---|---|
+| 6.1 | `uv run pytest`: 143 passaram, 3 puladas. `ruff check` e `ruff format --check` limpos |
+| 6.2 | Suíte dentro da imagem (com o binário do Tesseract): 146 passaram, 0 puladas |
+| 6.3 | Foto legível → `PARKED`, `plate_status=READ`, placa `LSN4I49`, auditoria `OCR_PROCESSING`, filas vazias. O contador de vagas não foi exercitado: o compose ainda não tem a API nem o Redis |
+| 6.4 | Storage parado: a tentativa 1 falhou (`S3 download failed: unavailable`), a mensagem foi para a fila de espera e a placa ficou `PENDING`; com o storage de volta, a mensagem voltou após o TTL e concluiu com uma única auditoria. Com o DynamoDB parado a própria escrita da auditoria se recuperou dentro da mesma tentativa (retentativas do `AuditLogger`) |
+| 6.5 | Objeto inexistente (falha rápida): tentativas 1 e 2 na fila de espera, a 3ª na DLQ com `x-attempt=3` e `x-failure-reason`; auditorias `POISON_MESSAGE` e `OCR_FAILED`; sessão `UNREADABLE` e ainda `PARKED` |
+| 6.6 | `docker stop` com 6 mensagens na fila: saiu em 1 s com código 0, 4 já processadas e 2 intactas na fila; ao religar, as 6 ficaram `READ` |
+| 6.7 | Foto sem placa legível → `UNREADABLE`, `status` `PARKED`, auditoria `OCR_FAILED`, mensagem confirmada sem nova tentativa |
+| 6.8 | A mesma mensagem publicada duas vezes gerou uma auditoria só; sessão `MANUAL` ficou intacta |
+
+Com o storage inteiro parado, uma tentativa leva ~95 s (3 tentativas de download com timeout dentro do `S3Connector`); com a espera de 30 s, a mensagem chega à DLQ em alguns minutos, não em 90 s.
 
 ## 6. Dependências e riscos
 
@@ -183,6 +200,7 @@ Cliente S3 com `Config(s3={"addressing_style": "path"})`: storage local não res
 | Mensagem duplicada (reentrega) | Efeito duplo | Já coberto: `UPDATE ... WHERE plate_status='PENDING'` |
 | Publicação na DLQ falha depois de a sessão virar `UNREADABLE` | A reentrega é confirmada como idempotente e a mensagem não chega à DLQ | Aceito: a auditoria `POISON_MESSAGE` já registra o motivo e nada fica pendente na sessão |
 | Tesseract sozinho lê ~52% das fotos reais | Mais sessões sem placa | Deixou de bloquear o fluxo (D20): a sessão segue `PARKED` e o ticket paga; só a busca e a saída por placa ficam indisponíveis para essas sessões |
+| Deploy na AWS do TP1 (`infra/`, `user_data`) ainda exporta `SQS_QUEUE_URL`/`OCR_ENGINE` e a API ainda publica no SQS | A imagem nova do worker não consome SQS: o deploy do TP1 com ela deixa de processar fotos | Aceito: o TP2 substitui o TP1; até a API migrar, o worker só é exercitado publicando no RabbitMQ. Quem precisar do TP1 usa as imagens antigas (commit `1a63463`) |
 | Plano geral ([PLANO-TP2.md](PLANO-TP2.md)) ainda descreve o worker com `PARKED`/`FAILED`/`DECR` e `REDIS_URL` | Quem seguir o plano geral reintroduz o Redis no worker | Vale a D20 e este documento; atualizar o Componente 3 do plano geral |
 
 ## 7. Fora do escopo

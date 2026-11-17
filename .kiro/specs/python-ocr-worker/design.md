@@ -1,5 +1,40 @@
 # Design Document: Python OCR Worker
 
+> **Revision 2026-11-16 (Trabalho 2) — read this section first.** The transport moved from Amazon SQS to RabbitMQ, the Worker only enriches the session (D20: no Redis, no `status` change, `plate_status` `PENDING` -> `READ` | `UNREADABLE`) and Amazon Rekognition was removed. The sections below were written for the SQS/Redis design; where they mention the `Poller`, SQS long polling, `ApproximateReceiveCount`, the redrive policy, the visibility timeout, `Spots_Counter`/Redis, `PROCESSING` or `OCR_ENGINE`, **this section and `requirements.md` prevail**. Detailed rationale: `docs/PLANO-TP2-WORKER.md`.
+
+## Transport Design (RabbitMQ)
+
+### Components
+
+| Module | Role |
+|---|---|
+| `worker.py` | `main()`: loads configuration, builds the clients and connectors, wires the processor and the consumer, installs the signal handlers |
+| `processor.py` | `MessageProcessor.handle(body, attempt) -> Result(outcome, reason)`: parse -> session lookup -> idempotency gate -> photo download -> OCR -> normalization -> plate recording + audit in one RDS transaction. It knows nothing about the broker. `Outcome` is `DELETE` (acknowledge), `RETAIN` (retry) or `POISON` (dead-letter). On the last attempt a failure is audited as `POISON_MESSAGE` and the plate reading is closed as `UNREADABLE` |
+| `consumer.py` | `RabbitConsumer`: `pika.BlockingConnection`, `prefetch_count=1`, publisher confirms, outcome -> broker action, reconnection with back-off, graceful stop |
+| `config.py`, `storage/clients.py` | One endpoint per service: `S3_ENDPOINT_URL` (path-style addressing) and `DYNAMODB_ENDPOINT_URL`; empty means real AWS |
+
+### Topology
+
+```mermaid
+graph LR
+    API["API (producer)"] -->|publish, persistent| Q["ocr-processamento-fila"]
+    Q --> W["Worker"]
+    W -->|"transient failure: x-attempt = n + 1"| R["ocr-processamento-fila-retry (TTL 30 s)"]
+    R -->|TTL expires, dead-letters| Q
+    W -->|"failure on the 3rd attempt"| D["ocr-processamento-fila-dlq"]
+    Q -.->|"rejected without requeue (safety net)"| D
+```
+
+The three durable queues are declared by `infra/rabbitmq/definitions.json` (loaded by the broker at boot); the Worker and the API only check that they exist (passive declarations), so the arguments live in one file and `PRECONDITION_FAILED` cannot happen.
+
+### Delivery semantics
+
+- **At-least-once.** A message is acknowledged only after its outcome is safe: plate + audit committed, or the retry/DLQ copy confirmed by the broker. A crash in between causes a redelivery, absorbed by the idempotent `UPDATE ... WHERE plate_status = 'PENDING'`.
+- **Attempt counting is the Worker's job.** The header `x-attempt` (absent = 1) travels with the message through the retry queue; `MAX_ATTEMPTS = 3`. The 30 s TTL replaces the SQS visibility timeout as the pause between attempts and avoids the hot loop that `requeue=True` would create while a dependency is down.
+- **One message at a time per instance** (`prefetch_count=1`); scale by adding replicas. The connection heartbeat (120 s) is larger than the worst case of one message because processing blocks the connection thread.
+- **Graceful stop.** SIGTERM/SIGINT set a flag and schedule `stop_consuming` on the connection thread. The message in progress finishes and is acknowledged; a delivery that races the stop is `nack`ed with requeue; unacknowledged messages simply return to the queue. No batch to release, no abandoned long poll.
+- **Reconnection.** `AMQPError` -> close, back off 1 s doubling up to 30 s, reconnect. A missing queue is fatal (exit code 2): nothing here creates the topology.
+
 ## Overview
 
 The Python OCR Worker is the asynchronous processing stage of the AWS parking-lot system. It long-polls the Amazon SQS queue `ocr-processamento-fila`, downloads the vehicle photo from S3, extracts the license plate via image pre-processing plus Tesseract OCR, normalizes it, and then advances the parking session by applying an ordered set of side effects: update RDS, decrement the Redis spots counter, write a DynamoDB audit entry, and finally delete the SQS message.
