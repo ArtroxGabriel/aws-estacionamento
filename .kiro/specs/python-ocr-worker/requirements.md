@@ -2,14 +2,18 @@
 
 ## Introduction
 
-The Python OCR Worker is the asynchronous background component of the AWS parking-lot management system (Trabalho Prático de Cloud da UFC). It continuously consumes vehicle-entry events from an Amazon SQS queue, downloads the corresponding vehicle photo from Amazon S3, extracts the license plate through image pre-processing and Tesseract OCR, and then transitions the parking session forward. On successful extraction the Worker updates the relational session record in Amazon RDS (PostgreSQL), atomically decrements the available-spots counter in Amazon ElastiCache (Redis), writes an immutable audit entry to Amazon DynamoDB, and finally removes the processed message from SQS.
+The Python OCR Worker is the asynchronous background component of the parking-lot management system (Trabalho Prático de Cloud da UFC). It continuously consumes vehicle-entry events from a RabbitMQ queue, downloads the corresponding vehicle photo from an S3-compatible object storage, extracts the license plate through image pre-processing and Tesseract OCR, records the plate in the relational session record (PostgreSQL) and writes an immutable audit entry to DynamoDB. The Worker only *enriches* the session: the car is already parked and holding its spot when the message arrives (`docs/DECISOES.md`, D20).
 
-The Worker must operate identically against a local emulated environment (Floci at `http://localhost:4566`) and against real AWS Academy infrastructure, driven exclusively by environment variables. It must be resilient to OCR failures, unreadable plates, message redelivery, poison messages, downstream connection failures, and process shutdown signals, while preserving the exactness of the shared data contracts defined by the API component.
+> Revised 2026-11-16 for Trabalho 2: the transport moved from Amazon SQS to RabbitMQ, the S3 and DynamoDB endpoints became independent (local containers or real AWS) and the Amazon Rekognition engine was removed (`docs/PLANO-TP2-WORKER.md`).
+
+Each backing service has its own endpoint, driven exclusively by environment variables. The Worker must be resilient to OCR failures, unreadable plates, message redelivery, poison messages, downstream connection failures, and process shutdown signals, while preserving the exactness of the shared data contracts defined by the API component.
 
 ## Glossary
 
-- **Worker**: The Python 3.14 asynchronous process consuming the SQS queue and orchestrating the OCR pipeline.
-- **Poller**: The component of the Worker responsible for the continuous SQS long-polling loop (`worker.py`).
+- **Worker**: The Python 3.14 asynchronous process consuming the RabbitMQ queue and orchestrating the OCR pipeline.
+- **Consumer**: The component of the Worker that owns the RabbitMQ transport: connection, consumption, acknowledgement, retry queue, dead-letter queue, reconnection and shutdown (`consumer.py`).
+- **Message_Processor**: The component that applies the business rules to one message body and delivery attempt and reports an outcome (`processor.py`).
+- **Poller**: Name kept by older text for the Worker's message handling as a whole, i.e. the Consumer together with the Message_Processor.
 - **OCR_Processor**: The component that pre-processes images and extracts raw text via Tesseract (`ocr/processor.py`).
 - **Plate_Normalizer**: The component that normalizes raw OCR text into a valid plate format (`ocr/clean.py`).
 - **S3_Connector**: The storage component that downloads vehicle photos from Amazon S3 (`storage/`).
@@ -17,8 +21,11 @@ The Worker must operate identically against a local emulated environment (Floci 
 - **Spots_Counter**: The storage component that mutates the available-spots counter in Amazon ElastiCache (Redis) (`storage/`).
 - **Audit_Logger**: The storage component that writes immutable audit entries to Amazon DynamoDB (`storage/`).
 - **Config_Loader**: The component that loads and validates environment-driven configuration at startup.
-- **SQS_Queue**: The Amazon SQS queue named `ocr-processamento-fila`.
-- **Session_Message**: The JSON payload carried in the SQS message body, of shape `{"session_id": "<hex_32_chars>", "s3_key": "photos/{session_id}_{filename}"}`.
+- **OCR_Queue** (called `SQS_Queue` in older text): The RabbitMQ durable queue `ocr-processamento-fila`.
+- **Retry_Queue**: The durable queue `ocr-processamento-fila-retry` (message TTL 30 s, dead-letters back into the OCR_Queue); messages wait there between attempts.
+- **Dead_Letter_Queue**: The durable queue `ocr-processamento-fila-dlq`, without consumers.
+- **Attempt**: The 1-based delivery attempt of a message, carried in the `x-attempt` header (absent means 1).
+- **Session_Message**: The JSON payload carried in the RabbitMQ message body, of shape `{"session_id": "<hex_32_chars>", "s3_key": "photos/{session_id}_{filename}"}`.
 - **Session_Record**: A row in the `sessions` table (`id`, `license_plate`, `status`, `s3_photo_key`, `entered_at`, `exited_at`, `amount_paid`).
 - **Spots_Key**: The Redis key `spots:available` holding the integer count of available parking spots.
 - **Audit_Table**: The DynamoDB table `AuditoriaEstacionamento`.
@@ -32,19 +39,20 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 ## Requirements
 
-### Requirement 1: Continuous SQS Long-Polling Consumption
+### Requirement 1: Continuous RabbitMQ Consumption
 
-**User Story:** As a system operator, I want the Worker to continuously consume entry events from the SQS queue, so that vehicle photos are processed automatically without manual intervention.
+**User Story:** As a system operator, I want the Worker to continuously consume entry events from the RabbitMQ queue, so that vehicle photos are processed automatically without manual intervention.
 
 #### Acceptance Criteria
 
-1. WHILE the Worker is running, THE Poller SHALL request messages from the SQS_Queue using long polling with a `WaitTimeSeconds` value of 20 seconds and a maximum of 10 messages per receive request.
-2. WHEN a receive request returns zero messages, THE Poller SHALL issue a subsequent receive request against the SQS_Queue within 1 second.
-3. WHEN a receive request returns one or more messages, THE Poller SHALL process each returned message through the OCR pipeline.
-4. WHEN a message has been processed successfully through the OCR pipeline, THE Poller SHALL delete that message from the SQS_Queue.
-5. IF a receive request fails due to an SQS_Queue connection or authorization error, THEN THE Poller SHALL retry the receive request after a delay of no more than 30 seconds and SHALL continue running without terminating.
-6. THE Poller SHALL read the SQS_Queue URL from the `SQS_QUEUE_URL` environment variable.
-7. IF the `SQS_QUEUE_URL` environment variable is absent or empty at startup, THEN THE Poller SHALL terminate startup and produce an error indication identifying the missing configuration.
+1. WHILE the Worker is running, THE Consumer SHALL consume the OCR_Queue with manual acknowledgements and `prefetch_count` 1, so that each Worker instance holds at most one unacknowledged message.
+2. WHEN a message is delivered, THE Consumer SHALL hand its body and Attempt to the Message_Processor and apply the returned outcome.
+3. WHEN a message has been processed successfully (or is terminal/idempotent), THE Consumer SHALL acknowledge it (`basic_ack`).
+4. IF the connection to the broker is lost or cannot be established, THEN THE Consumer SHALL reconnect with an exponential back-off of 1 second doubling up to no more than 30 seconds, SHALL continue running without terminating, and SHALL leave unacknowledged messages for the broker to redeliver.
+5. THE Consumer SHALL read the broker URL from `RABBITMQ_URL` and the queue name from `RABBITMQ_QUEUE_NAME` (default `ocr-processamento-fila`); the Retry_Queue and Dead_Letter_Queue names are that name followed by `-retry` and `-dlq`.
+6. IF `RABBITMQ_URL` is absent, empty or not an `amqp`/`amqps` URL at startup, THEN THE Worker SHALL terminate startup and produce an error indication identifying the configuration.
+7. WHEN the Consumer connects, THE Consumer SHALL check with passive declarations that the OCR_Queue, the Retry_Queue and the Dead_Letter_Queue exist, and IF any is missing THEN THE Worker SHALL exit with status 2 and an error naming the queue. The queues are declared by `infra/rabbitmq/definitions.json`; the Worker never declares them.
+8. THE Consumer SHALL use a connection heartbeat of 120 seconds, larger than the worst-case processing time of one message.
 
 ### Requirement 2: Message Parsing and Validation
 
@@ -52,7 +60,7 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN a message is received, THE Poller SHALL parse the SQS message body, whose size SHALL NOT exceed 256 KB, as a Session_Message JSON object without unwrapping any SNS envelope.
+1. WHEN a message is received, THE Poller SHALL parse the RabbitMQ message body, whose size SHALL NOT exceed 256 KB, as a Session_Message JSON object without unwrapping any SNS envelope.
 2. WHEN a Session_Message is parsed successfully, THE Poller SHALL extract the `session_id` and `s3_key` field values as UTF-8 strings.
 3. IF the message body is not valid JSON, THEN THE Poller SHALL classify the message as a Poison_Message, record a parsing error indicating malformed JSON, and leave the original message body unmodified.
 4. IF the parsed Session_Message is missing the `session_id` field, is missing the `s3_key` field, or contains either field as an empty string, THEN THE Poller SHALL classify the message as a Poison_Message and record a validation error indicating the specific missing or empty field.
@@ -141,16 +149,17 @@ The Worker must operate identically against a local emulated environment (Floci 
 5. IF the write of an Audit_Entry to the Audit_Table fails, THEN THE Audit_Logger SHALL retry the write up to a maximum of 3 attempts and, if all attempts fail, record an error indication identifying the affected `session_id` without altering the Session_Record.
 6. THE Audit_Logger SHALL read the DynamoDB table name from the `DYNAMODB_TABLE_NAME` environment variable, and IF the `DYNAMODB_TABLE_NAME` environment variable is unset or empty, THEN THE Audit_Logger SHALL fail initialization with an error indication that the table name is missing.
 
-### Requirement 9: Message Deletion After Successful Processing
+### Requirement 9: Message Acknowledgement After Processing
 
-**User Story:** As a system operator, I want messages removed from the queue only after full successful processing, so that failures are safely retried.
+**User Story:** As a system operator, I want messages removed from the queue only after their outcome is safely recorded, so that failures are retried and nothing is lost.
 
 #### Acceptance Criteria
 
-1. WHEN the RDS update, the Redis decrement, and the DynamoDB audit write all complete successfully for a message, THE Poller SHALL delete that message from the SQS_Queue within 5 seconds of the final step completing.
-2. IF any step in the OCR pipeline returns an error for a message, THEN THE Poller SHALL leave that message in the SQS_Queue, preserve the message body unchanged, and log an error entry indicating which processing step failed.
-3. IF a message fails processing on the delivery whose receive count equals the configured maximum receive count of 3, THEN THE Poller SHALL record an audit entry indicating the message exhausted retries, and the SQS redrive policy SHALL route that message to the dead-letter queue.
-4. WHILE a message is being processed, THE Poller SHALL retain the message with a visibility timeout of 300 seconds so that no other consumer receives it before processing completes or fails.
+1. WHEN the RDS plate update and the DynamoDB audit write both complete successfully for a message, THE Consumer SHALL acknowledge that message.
+2. IF any step of the pipeline fails for a message and the Attempt is lower than 3, THEN THE Consumer SHALL publish an unchanged copy of the body to the Retry_Queue with the header `x-attempt` set to the Attempt plus one, as a persistent message, wait for the broker's publisher confirmation, and only then acknowledge the original; THE Worker SHALL log an error entry indicating which step failed.
+3. IF a message fails processing on Attempt 3, THEN THE Message_Processor SHALL record an audit entry indicating the message exhausted its retries, and THE Consumer SHALL publish the body to the Dead_Letter_Queue with the headers `x-attempt` and `x-failure-reason`, wait for the confirmation, and then acknowledge the original.
+4. IF publishing to the Retry_Queue or the Dead_Letter_Queue is not confirmed (unroutable, refused, connection lost), THEN THE Consumer SHALL NOT acknowledge the original, so that the broker redelivers it.
+5. IF the Worker dies between a confirmed publication and the acknowledgement, THEN THE broker redelivers the original and the idempotent processing of Requirement 11 SHALL absorb the duplicate.
 
 ### Requirement 10: Unreadable Plate Handling
 
@@ -162,21 +171,21 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 1. IF the Plate_Normalizer returns an unreadable-plate result for a message, THEN THE Poller SHALL set the Session_Record `plate_status` to `UNREADABLE`, only if it is still `PENDING`, and SHALL NOT write a plate value nor change `status`.
 2. IF the Poller sets `plate_status` to `UNREADABLE`, THEN THE Poller SHALL record an `OCR_FAILED` Audit_Entry that includes the `session_id`, `plate_status` and a reason indicating the plate was unreadable.
-3. IF the Plate_Normalizer returns an unreadable-plate result, THEN THE Poller SHALL delete the SQS message on that same delivery, because the OCR is deterministic and a redelivery would produce the same result.
+3. IF the Plate_Normalizer returns an unreadable-plate result, THEN THE Consumer SHALL acknowledge the message on that same delivery, because the OCR is deterministic and a redelivery would produce the same result.
 4. IF recording `UNREADABLE` fails due to an RDS error, THEN THE Poller SHALL leave the message available for redelivery.
 5. WHEN the Poller classifies a message as a Poison_Message, THE Poller SHALL record a Poison_Message error entry identifying the `session_id` and SHALL set `plate_status` to `UNREADABLE` if it is still `PENDING`, whatever the failure was, so that no session waits for a reading that will not come.
 
 ### Requirement 11: Idempotent Message Processing
 
-**User Story:** As a developer, I want redelivered messages handled idempotently, so that duplicate processing does not double-count spots or duplicate side effects.
+**User Story:** As a developer, I want redelivered messages handled idempotently, so that duplicate processing does not duplicate side effects.
 
 #### Acceptance Criteria
 
-1. WHEN a message is received whose Session_Record already has status `PARKED`, THE Poller SHALL delete the message from the SQS_Queue within 5 seconds, SHALL NOT decrement the Spots_Key value, and SHALL NOT write any additional side-effect records.
-2. WHEN a message is received whose Session_Record already has status `PAID`, THE Poller SHALL delete the message from the SQS_Queue within 5 seconds, SHALL NOT decrement the Spots_Key value, and SHALL NOT write any additional side-effect records.
-3. WHEN a message is received whose Session_Record does not exist (no matching session identifier), THE Poller SHALL delete the message from the SQS_Queue within 5 seconds and SHALL NOT decrement the Spots_Key value.
-4. IF the Poller cannot determine the Session_Record status because the datastore lookup fails, THEN THE Poller SHALL NOT delete the message from the SQS_Queue, SHALL NOT decrement the Spots_Key value, SHALL leave the message available for redelivery after the SQS visibility timeout expires, and SHALL record an error indication identifying the failed lookup.
-5. WHEN the Poller processes a message whose Session_Record has status `PROCESSING`, THE Poller SHALL decrement the Spots_Key value exactly once per session identifier regardless of the number of times that message is redelivered.
+1. WHEN a message is received whose Session_Record `plate_status` is no longer `PENDING` (`READ`, `UNREADABLE` or `MANUAL`), THE Message_Processor SHALL report the message as terminal (acknowledged) without writing any record, whatever the session `status` is.
+2. WHEN a message is received whose Session_Record does not exist (no matching session identifier), THE Message_Processor SHALL report the message as terminal (acknowledged).
+3. IF the Message_Processor cannot read the Session_Record because the datastore lookup fails, THEN it SHALL NOT report the message as terminal, SHALL record an error indication identifying the failed lookup, and the message SHALL follow the retry path of Requirement 9.
+4. WHEN the same message is delivered several times, THE Worker SHALL record the plate and the `OCR_PROCESSING` Audit_Entry at most once per session, because the plate is written only by `UPDATE ... WHERE plate_status = 'PENDING'`.
+5. THE Worker SHALL NOT read the session `status`, nor use a spots counter: a car that has already paid still gets its plate recorded as evidence.
 
 ### Requirement 12: Poison Message Handling
 
@@ -184,23 +193,23 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN a message is classified as a Poison_Message, THE Poller SHALL record the message identifier and a failure reason describing the classification cause in the DynamoDB audit trail.
-2. IF a message fails processing on a delivery whose receive count is equal to or greater than the configured maximum receive count of 3, THEN THE Poller SHALL classify the message as a Poison_Message; a message whose receive count exceeds the maximum SHALL NOT be reprocessed nor audited again.
-3. WHERE a dead-letter queue is configured for the SQS_Queue, THE Poller SHALL rely on the SQS redrive policy to move a Poison_Message to the dead-letter queue after the message reaches the configured maximum receive count of 3.
-4. WHEN a message is classified as a Poison_Message, THE Poller SHALL continue consuming subsequent messages from the SQS_Queue within 1 second without terminating the polling loop.
-5. IF recording the Poison_Message identifier and failure reason fails, THEN THE Poller SHALL retry the record operation up to 3 times and, if all attempts fail, continue consuming subsequent messages without blocking the SQS_Queue.
+1. WHEN a message is classified as a Poison_Message, THE Message_Processor SHALL record the session identifier and a failure reason describing the classification cause in the DynamoDB audit trail.
+2. IF a message fails processing on an Attempt equal to or greater than the maximum of 3, THEN THE Message_Processor SHALL classify it as a Poison_Message and THE Consumer SHALL move it to the Dead_Letter_Queue (Requirement 9.3). A failing message that carries `x-attempt` greater than 3 is classified the same way.
+3. THE Worker, not the broker, counts the Attempts (header `x-attempt`, absent or invalid meaning 1) and moves the message; THE OCR_Queue is additionally configured to dead-letter into the Dead_Letter_Queue as a safety net when a message is rejected without requeue.
+4. WHEN a message is classified as a Poison_Message, THE Consumer SHALL continue consuming subsequent messages without terminating.
+5. IF recording the Poison_Message entry fails, THEN THE Audit_Logger SHALL retry the write up to 3 times and, if all attempts fail, THE Worker SHALL log the error and still move the message to the Dead_Letter_Queue.
 
 ### Requirement 13: Downstream Connection Failure Resilience
 
-**User Story:** As a system operator, I want the Worker to survive transient failures of S3, RDS, Redis, and DynamoDB, so that processing resumes when dependencies recover.
+**User Story:** As a system operator, I want the Worker to survive transient failures of S3, RDS, DynamoDB and RabbitMQ, so that processing resumes when dependencies recover.
 
 #### Acceptance Criteria
 
-1. IF the S3_Connector, Session_Repository, Spots_Counter, or Audit_Logger raises a connection error while processing a message, THEN THE Poller SHALL record the error with an indication identifying the failed dependency and SHALL NOT delete the message from the SQS_Queue.
-2. IF a connection error occurs while processing a message, THEN THE Poller SHALL leave the message in the SQS_Queue so that it becomes available for redelivery after the SQS visibility timeout of 300 seconds elapses.
-3. IF a connection error occurs while processing a message, THEN THE Poller SHALL roll back the RDS transition and compensate any Redis decrement already applied, leaving the affected records unchanged from their pre-processing values.
-4. WHEN a connection error occurs while processing a message, THE Poller SHALL continue the polling loop for subsequent messages within 1 second of recording the error.
-5. WHILE a downstream dependency remains unreachable, THE Poller SHALL retry each affected message up to 3 delivery attempts before the SQS_Queue routes the message to the dead-letter queue.
+1. IF the S3_Connector, Session_Repository or Audit_Logger raises a connection error while processing a message, THEN THE Message_Processor SHALL record the error with an indication identifying the failed dependency and SHALL report the message for retry.
+2. IF a connection error occurs while processing a message, THEN THE Consumer SHALL send the message to the Retry_Queue (Requirement 9.2) so that it is redelivered after the 30-second TTL.
+3. IF a connection error occurs after the RDS plate transition began, THEN THE Message_Processor SHALL roll back the RDS transition, leaving the record unchanged from its pre-processing value (`plate_status` back to `PENDING`).
+4. WHEN a connection error occurs while processing a message, THE Consumer SHALL continue consuming subsequent messages.
+5. WHILE a downstream dependency remains unreachable, THE Worker SHALL retry each affected message up to 3 attempts before moving it to the Dead_Letter_Queue; a processing error that reaches the Message_Processor unhandled SHALL be treated as a retry, never as a crash.
 
 ### Requirement 14: Environment-Driven Configuration
 
@@ -208,24 +217,25 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN the Worker starts, THE Config_Loader SHALL read the following environment variables: `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, and `DYNAMODB_TABLE_NAME`.
-2. IF any of the required environment variables `AWS_REGION`, `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, `S3_BUCKET_NAME`, or `DYNAMODB_TABLE_NAME` is absent or is an empty string when the Worker starts, THEN THE Config_Loader SHALL write an error indication naming each missing variable, SHALL prevent the polling loop from starting, and SHALL terminate the startup with a non-success exit status.
-3. WHERE `AWS_ENDPOINT_URL` is absent or an empty string, THE Config_Loader SHALL treat it as optional and proceed with startup using the default AWS service endpoints without reporting a missing-variable error.
-4. IF a supplied value for `SQS_QUEUE_URL`, `DATABASE_URL`, `REDIS_URL`, or `AWS_ENDPOINT_URL` does not conform to the expected URL or connection-string structure for that variable, THEN THE Config_Loader SHALL write an error indication naming the invalid variable, SHALL prevent the polling loop from starting, and SHALL terminate the startup with a non-success exit status.
-5. WHEN the Config_Loader writes any log output, THE Config_Loader SHALL exclude the values of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and any credential embedded in `DATABASE_URL` or `REDIS_URL`, substituting a fixed redaction marker in place of each such value.
+1. WHEN the Worker starts, THE Config_Loader SHALL read the following environment variables: `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `RABBITMQ_URL`, `RABBITMQ_QUEUE_NAME`, `DATABASE_URL`, `S3_ENDPOINT_URL`, `S3_BUCKET_NAME`, `DYNAMODB_ENDPOINT_URL` and `DYNAMODB_TABLE_NAME`.
+2. IF any of the required environment variables `AWS_REGION`, `RABBITMQ_URL`, `DATABASE_URL`, `S3_BUCKET_NAME` or `DYNAMODB_TABLE_NAME` is absent or an empty string when the Worker starts, THEN THE Config_Loader SHALL write an error indication naming each missing variable, SHALL prevent consumption from starting, and SHALL terminate the startup with a non-success exit status.
+3. WHERE `S3_ENDPOINT_URL` or `DYNAMODB_ENDPOINT_URL` is absent or an empty string, THE Config_Loader SHALL treat it as optional and the corresponding client SHALL use the default AWS endpoint for `AWS_REGION`.
+4. IF a supplied value for `RABBITMQ_URL` (scheme other than `amqp`/`amqps`), `DATABASE_URL`, `S3_ENDPOINT_URL` or `DYNAMODB_ENDPOINT_URL` (scheme other than `http`/`https`) does not conform to the expected structure, THEN THE Config_Loader SHALL write an error indication naming the invalid variable, SHALL prevent consumption from starting, and SHALL terminate the startup with a non-success exit status.
+5. WHEN the Worker writes log output about the broker, it SHALL describe it as `host:port/vhost` only, excluding the credentials embedded in `RABBITMQ_URL`; the values of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and the credentials in `DATABASE_URL` SHALL never be logged.
 6. WHERE `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are both absent, THE Config_Loader SHALL proceed with startup and the Worker SHALL resolve AWS credentials through the default credential chain (e.g. the EC2 instance profile); IF only one of them is supplied, THEN THE Config_Loader SHALL report the other as missing. WHERE `AWS_SESSION_TOKEN` is supplied, THE Worker SHALL use it together with the static keys.
+7. THE Worker SHALL ignore the variables of the previous design (`SQS_QUEUE_URL`, `AWS_ENDPOINT_URL`, `OCR_ENGINE`, `REDIS_URL`) without failing.
 
-### Requirement 15: Dual-Mode AWS Endpoint Support
+### Requirement 15: Independent Service Endpoints
 
-**User Story:** As a developer, I want the Worker to target either the local emulator or real AWS, so that the same code runs in development and in AWS Academy.
+**User Story:** As a developer, I want each backing service to be reachable at its own endpoint, so that the same code runs against local containers (S3-compatible storage, DynamoDB Local) and against real AWS.
 
 #### Acceptance Criteria
 
-1. WHERE the `AWS_ENDPOINT_URL` environment variable is set to a non-empty value, THE Worker SHALL direct all AWS service requests (S3, SQS, DynamoDB) to that endpoint URL.
-2. WHERE the `AWS_ENDPOINT_URL` environment variable is absent or set to an empty string, THE Worker SHALL direct all AWS service requests (S3, SQS, DynamoDB) to the default AWS endpoints for the region named in `AWS_REGION`.
-3. IF the `AWS_ENDPOINT_URL` environment variable is set to a value that is not a syntactically valid URL with an `http` or `https` scheme, THEN THE Worker SHALL abort startup before consuming any SQS message and SHALL emit an error indication identifying the invalid `AWS_ENDPOINT_URL` value.
-4. IF the `AWS_ENDPOINT_URL` environment variable is absent or empty AND the `AWS_REGION` environment variable is absent or empty, THEN THE Worker SHALL abort startup before consuming any SQS message and SHALL emit an error indication identifying the missing region configuration.
-5. WHEN the Worker resolves its AWS endpoint configuration at startup, THE Worker SHALL apply the identical endpoint resolution to every AWS service client (S3, SQS, DynamoDB) so that no service client targets a different endpoint than the others.
+1. WHERE `S3_ENDPOINT_URL` is set to a non-empty value, THE Worker SHALL direct all S3 requests to that endpoint using path-style addressing (`host/bucket/key`), because a local S3-compatible storage does not resolve `bucket.host`.
+2. WHERE `DYNAMODB_ENDPOINT_URL` is set to a non-empty value, THE Worker SHALL direct all DynamoDB requests to that endpoint.
+3. WHERE either variable is absent or empty, THE Worker SHALL direct that service's requests to the default AWS endpoint for the region named in `AWS_REGION`, independently of the other service.
+4. IF either variable is set to a value that is not a syntactically valid URL with an `http` or `https` scheme, THEN THE Worker SHALL abort startup before consuming any message and SHALL emit an error indication identifying the invalid variable.
+5. THE Worker SHALL use no Amazon Rekognition or other proprietary vision service: plate reading is local (OpenCV + Tesseract).
 
 ### Requirement 16: Graceful Shutdown
 
@@ -233,8 +243,9 @@ The Worker must operate identically against a local emulated environment (Floci 
 
 #### Acceptance Criteria
 
-1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Poller SHALL stop requesting new messages, SHALL end a receive back-off in progress within 1 second, and SHALL let an SQS long poll in progress run to its end (at most 20 seconds) and release every message it returns with a visibility timeout of 0, because a long poll abandoned client-side can still take a message on the SQS side and hide it for the whole visibility timeout.
-2. WHILE a message is being processed at the time a termination signal is received, THE Poller SHALL complete or fail that message before the process exits, without interrupting it.
-3. WHEN a termination signal is received while a batch still has messages not yet started, THE Poller SHALL release those messages back to the SQS_Queue with a visibility timeout of 0 so another consumer receives them immediately.
-4. WHEN the Worker exits, THE Worker SHALL close its RDS, Redis, and AWS client connections and SHALL exit with a success status code (0). A process killed externally mid-message leaves the RDS transaction uncommitted and the message for redelivery.
-5. IF closing any RDS, Redis, or AWS client connection fails during exit, THEN THE Worker SHALL record an error indication identifying the failed connection and SHALL continue closing the remaining connections before exiting.
+1. WHEN the Worker receives a SIGTERM or SIGINT termination signal, THE Consumer SHALL stop consuming new messages and SHALL end a reconnection back-off in progress within 1 second.
+2. WHILE a message is being processed at the time a termination signal is received, THE Consumer SHALL complete or fail that message (including its retry/DLQ publication and acknowledgement) before the process exits, without interrupting it.
+3. WHEN a message is delivered after the stop was requested, THE Consumer SHALL hand it back to the broker (`basic_nack` with requeue) without processing it; with `prefetch_count` 1 there is no batch to release, and the broker redelivers every message that was not acknowledged to another consumer.
+4. WHEN the Worker exits, THE Worker SHALL close its RabbitMQ, RDS and AWS client connections and SHALL exit with a success status code (0). A process killed externally mid-message leaves the RDS transaction uncommitted and the message for redelivery.
+5. IF closing any RabbitMQ, RDS or AWS client connection fails during exit, THEN THE Worker SHALL record an error indication identifying the failed connection and SHALL continue closing the remaining connections before exiting.
+

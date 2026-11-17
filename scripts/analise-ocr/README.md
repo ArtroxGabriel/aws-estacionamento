@@ -12,6 +12,8 @@ Cada pasta de `examples/dataset/` com gabarito guarda as respostas brutas dos mo
 | `rek_dump_framed.py <pastas>` | `rekognition_framed.json`: Rekognition com a foto numa moldura, só onde a 1ª chamada não achou placa | idem |
 | `tess_dump.py <pastas>` | `tesseract.json`: pipeline Tesseract do worker. Roda no container do worker, com `OMP_THREAD_LIMIT=1` | grátis |
 
+> **Trabalho 2:** o worker deixou de usar o Rekognition e o módulo `worker/ocr/rekognition.py` foi removido. `rek_dump.py` e `rek_dump_framed.py` importam `prepare`/`framed` dele; para rodá-los de novo, recupere o arquivo do histórico (`git show 1a63463:worker/ocr/rekognition.py > worker/ocr/rekognition.py`). As simulações offline não dependem dele.
+
 Os scripts do Rekognition precisam de credenciais AWS no ambiente:
 
 ```bash
