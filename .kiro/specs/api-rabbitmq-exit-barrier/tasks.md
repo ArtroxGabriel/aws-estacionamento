@@ -78,14 +78,17 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
     - `/saida` redirects to `/pagamento`; paying shows "Siga para a cancela de saída" with `paid_at`; the dashboard lists 7 cars inside (1 paid) and 43 free spots; the exit totem refuses an unpaid ticket typed by its 8-character prefix ("Pagamento não localizado"), opens for the paid car's plate while three unpaid sessions share it; the audit page shows "Saída pela cancela · Cancela aberta pela placa"
     - The exit totem resolves the 8-character prefix printed on the ticket to the full ID through `GET /sessions?status=ALL` (unique match only), because the API takes the full ID
 
-- [ ] 5. Compose, automation and verification
-  - [ ] 5.1 Services `api` and `web` in `infra/docker-compose.yaml`
+- [x] 5. Compose, automation and verification
+  - [x] 5.1 Services `api` and `web` in `infra/docker-compose.yaml`
     - _Requirements: 11.1, 11.2_
-  - [ ] 5.2 Tasks `up`, `down`, `logs`, `test`; keep `dev:api` working
+  - [x] 5.2 Tasks `up`, `down`, `logs`, `test`; keep `dev:api` working
     - _Requirements: 11.4, 11.5_
-  - [ ] 5.3 End-to-end verification (`docs/PLANO-TP2.md`, section 4.2)
+    - `infra:up` now starts only the dependencies (for `dev:api`/`dev:worker`); `up` starts everything with `--build`. `dev:api` and the compose `api` both use port 8080: stop the container before running `dev:api`
+  - [x] 5.3 End-to-end verification (`docs/PLANO-TP2.md`, section 4.2)
     - Entry with photo; OCR by the Worker; payment keeps the counter; exit by plate frees one spot; exit by ticket with an unreadable plate; unpaid car refused; audit trail complete; full lot answers 409
     - _Requirements: 11.3, 9.2_
+    - Done 2026-11-17 on a fresh stack (`docker compose -p tp2fresh`, new volumes): every service up, the API created the schema on an empty database, `http://localhost:3000` and its SPA routes answer 200; the 18 checks of the flow passed through the web's nginx (`/api/`); with `spots:available` at 0 the entry answered 409
+    - Found and fixed: the RabbitMQ healthcheck (`rabbitmq-diagnostics ping`) turned healthy before port 5672 accepted connections, so the Worker logged "connection refused" at boot and the API's first entry could lose its plate. It is now `check_port_connectivity`; after the change neither logs a connection error on boot
   - [x] 5.4 Broker outage check
     - Stop `rabbitmq`, create an entry, confirm HTTP 201 and plate `UNREADABLE`; start it again and confirm the next entry is queued
     - Done 2026-11-16: with the broker stopped the entry answered 201 in 5.2 s, `UNREADABLE`, `ENTRY` audit with `ocr_queued: false`; once the broker listened again the next entry was queued and read
