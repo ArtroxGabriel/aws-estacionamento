@@ -47,6 +47,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /spots/available", h.HandleGetAvailableSpots)
 	mux.HandleFunc("POST /entries", h.HandleCreateEntry)
 	mux.HandleFunc("POST /exits/{id}/pay", h.HandlePayExit)
+	mux.HandleFunc("POST /barrier/exit/ticket", h.HandleExitByTicket)
+	mux.HandleFunc("POST /barrier/exit/plate", h.HandleExitByPlate)
 	mux.HandleFunc("GET /sessions", h.HandleGetSessions)
 	mux.HandleFunc("GET /sessions/{id}/photo", h.HandleGetSessionPhoto)
 	mux.HandleFunc("PATCH /sessions/{id}", h.HandleUpdatePlate)
@@ -63,6 +65,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError always emits valid JSON, whatever characters the message holds.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeCodedError adds a stable, machine-readable code next to the message,
+// so the exit totem reacts to the outcome without parsing text.
+func writeCodedError(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +140,55 @@ func (h *Handler) HandlePayExit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, paidSession)
+}
+
+// HandleExitByTicket receives {"ticket_id": "..."} from the exit totem.
+func (h *Handler) HandleExitByTicket(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TicketID string `json:"ticket_id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+		return
+	}
+	session, err := h.svc.ExitBarrierByTicket(r.Context(), body.TicketID)
+	h.writeExitResult(w, session, err)
+}
+
+// HandleExitByPlate receives {"plate": "..."} recognized by the exit camera.
+func (h *Handler) HandleExitByPlate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Plate string `json:"plate"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "invalid_body", "invalid JSON body")
+		return
+	}
+	session, err := h.svc.ExitBarrierByPlate(r.Context(), body.Plate)
+	h.writeExitResult(w, session, err)
+}
+
+func (h *Handler) writeExitResult(w http.ResponseWriter, session any, err error) {
+	switch {
+	case errors.Is(err, service.ErrInvalidTicket):
+		writeCodedError(w, http.StatusBadRequest, "invalid_ticket", err.Error())
+	case errors.Is(err, service.ErrInvalidPlate):
+		writeCodedError(w, http.StatusBadRequest, "invalid_plate", "invalid license plate (expected ABC1D23, ABC1234, AB123CD, ABC123 or ABCD123)")
+	case errors.Is(err, service.ErrSessionNotFound):
+		writeCodedError(w, http.StatusNotFound, "session_not_found", "ticket not found")
+	case errors.Is(err, service.ErrPlateNotFound):
+		writeCodedError(w, http.StatusNotFound, "plate_not_found", err.Error())
+	case errors.Is(err, service.ErrPaymentPending):
+		writeCodedError(w, http.StatusConflict, "payment_pending", err.Error())
+	case errors.Is(err, service.ErrAlreadyExited):
+		writeCodedError(w, http.StatusConflict, "already_exited", err.Error())
+	case err != nil:
+		writeCodedError(w, http.StatusInternalServerError, "internal_error", err.Error())
+	default:
+		writeJSON(w, http.StatusOK, session)
+	}
 }
 
 // HandleUpdatePlate receives {"license_plate": "..."} typed by the cashier.

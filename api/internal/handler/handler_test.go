@@ -43,20 +43,40 @@ func (f *FakeSessionRepo) GetByID(ctx context.Context, id string) (*model.Sessio
 	return s, nil
 }
 
-func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error) {
+func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, paidAt time.Time, amount float64) (*model.Session, error) {
 	s, ok := f.sessions[id]
 	if !ok || s.Status != model.StatusParked {
 		return nil, nil
 	}
 	s.Status = model.StatusPaid
-	s.ExitedAt = &exitedAt
+	s.PaidAt = &paidAt
 	s.AmountPaid = &amount
 	return s, nil
 }
 
+func (f *FakeSessionRepo) MarkAsExited(ctx context.Context, id string, exitedAt time.Time) (*model.Session, error) {
+	s, ok := f.sessions[id]
+	if !ok || s.Status != model.StatusPaid {
+		return nil, nil
+	}
+	s.Status = model.StatusExited
+	s.ExitedAt = &exitedAt
+	return s, nil
+}
+
+func (f *FakeSessionRepo) FindOccupyingByPlate(ctx context.Context, plate string) ([]*model.Session, error) {
+	var res []*model.Session
+	for _, s := range f.sessions {
+		if known, ok := s.KnownPlate(); ok && known == plate && s.Occupying() {
+			res = append(res, s)
+		}
+	}
+	return res, nil
+}
+
 func (f *FakeSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error) {
 	s, ok := f.sessions[id]
-	if !ok || s.Status != model.StatusParked {
+	if !ok || !s.Occupying() {
 		return nil, nil
 	}
 	s.LicensePlate = &plate
@@ -99,7 +119,7 @@ func (f *FakeSessionRepo) FindAll(ctx context.Context, filter repository.Session
 func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	var count int64
 	for _, s := range f.sessions {
-		if s.Status == model.StatusParked {
+		if s.Occupying() {
 			count++
 		}
 	}
@@ -406,8 +426,9 @@ func TestPayExit_Success(t *testing.T) {
 		t.Fatalf("expected status PAID, got %v", res["status"])
 	}
 
-	if spotsRepo.spots != 11 {
-		t.Fatalf("expected spots to increment to 11, got %d", spotsRepo.spots)
+	// Paying keeps the spot: the car is still inside until the exit barrier.
+	if spotsRepo.spots != 10 {
+		t.Fatalf("expected spots unchanged (10), got %d", spotsRepo.spots)
 	}
 
 	if len(audit.events) == 0 {
@@ -430,8 +451,8 @@ func TestPayExit_UnreadablePlate(t *testing.T) {
 	if res["status"] != "PAID" || res["plate_status"] != "UNREADABLE" {
 		t.Fatalf("expected PAID/UNREADABLE, got %v", res)
 	}
-	if spots.spots != 11 {
-		t.Fatalf("expected spots 11, got %d", spots.spots)
+	if spots.spots != 10 {
+		t.Fatalf("expected spots unchanged (10), got %d", spots.spots)
 	}
 }
 
@@ -505,7 +526,8 @@ func TestUpdatePlate_Errors(t *testing.T) {
 	}{
 		{"invalid plate", model.StatusParked, "/sessions/s1", `{"license_plate":"12"}`, http.StatusBadRequest},
 		{"invalid json", model.StatusParked, "/sessions/s1", `{`, http.StatusBadRequest},
-		{"not editable", model.StatusPaid, "/sessions/s1", `{"license_plate":"ABC1D23"}`, http.StatusConflict},
+		{"paid is editable", model.StatusPaid, "/sessions/s1", `{"license_plate":"ABC1D23"}`, http.StatusOK},
+		{"not editable", model.StatusExited, "/sessions/s1", `{"license_plate":"ABC1D23"}`, http.StatusConflict},
 		{"not found", model.StatusParked, "/sessions/missing", `{"license_plate":"ABC1D23"}`, http.StatusNotFound},
 	}
 	for _, tc := range cases {
@@ -680,5 +702,95 @@ func TestCORS_AllowsPatchAndDelete(t *testing.T) {
 	allowed := rec.Header().Get("Access-Control-Allow-Methods")
 	if !strings.Contains(allowed, "PATCH") || !strings.Contains(allowed, "DELETE") {
 		t.Fatalf("expected PATCH and DELETE in %q", allowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exit barrier
+// ---------------------------------------------------------------------------
+
+// newExitTestMux serves "s1" in the given status with plate ABC1D23 (READ).
+func newExitTestMux(status string) (*http.ServeMux, *FakeSessionRepo, *FakeSpotsRepo) {
+	mux, repo, spots := newSessionTestMux(status, model.PlateRead)
+	plate := "ABC1D23"
+	repo.sessions["s1"].LicensePlate = &plate
+	return mux, repo, spots
+}
+
+func postJSON(mux *http.ServeMux, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestExitBarrier_OpensForAPaidCar(t *testing.T) {
+	for path, body := range map[string]string{
+		"/barrier/exit/ticket": `{"ticket_id": "s1"}`,
+		"/barrier/exit/plate":  `{"plate": "abc-1d23"}`,
+	} {
+		mux, repo, spots := newExitTestMux(model.StatusPaid)
+		rec := postJSON(mux, path, body)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+		res := decode(t, rec)
+		if res["status"] != "EXITED" || res["exited_at"] == nil {
+			t.Fatalf("%s: expected EXITED with exited_at, got %v", path, res)
+		}
+		if repo.sessions["s1"].Status != model.StatusExited || spots.spots != 11 {
+			t.Fatalf("%s: expected EXITED and 11 spots, got %s and %d", path, repo.sessions["s1"].Status, spots.spots)
+		}
+	}
+}
+
+func TestExitBarrier_ErrorCodes(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		path   string
+		body   string
+		code   int
+		errKey string
+	}{
+		{"ticket unpaid", model.StatusParked, "/barrier/exit/ticket", `{"ticket_id": "s1"}`, http.StatusConflict, "payment_pending"},
+		{"ticket already left", model.StatusExited, "/barrier/exit/ticket", `{"ticket_id": "s1"}`, http.StatusConflict, "already_exited"},
+		{"ticket unknown", model.StatusPaid, "/barrier/exit/ticket", `{"ticket_id": "nope"}`, http.StatusNotFound, "session_not_found"},
+		{"ticket missing", model.StatusPaid, "/barrier/exit/ticket", `{}`, http.StatusBadRequest, "invalid_ticket"},
+		{"ticket bad JSON", model.StatusPaid, "/barrier/exit/ticket", `{`, http.StatusBadRequest, "invalid_body"},
+		{"plate unpaid", model.StatusParked, "/barrier/exit/plate", `{"plate": "ABC1D23"}`, http.StatusConflict, "payment_pending"},
+		{"plate already left", model.StatusExited, "/barrier/exit/plate", `{"plate": "ABC1D23"}`, http.StatusNotFound, "plate_not_found"},
+		{"plate unknown", model.StatusPaid, "/barrier/exit/plate", `{"plate": "LSN4I49"}`, http.StatusNotFound, "plate_not_found"},
+		{"plate invalid", model.StatusPaid, "/barrier/exit/plate", `{"plate": "12"}`, http.StatusBadRequest, "invalid_plate"},
+		{"plate bad JSON", model.StatusPaid, "/barrier/exit/plate", `nope`, http.StatusBadRequest, "invalid_body"},
+	}
+	for _, tc := range cases {
+		mux, repo, spots := newExitTestMux(tc.status)
+		rec := postJSON(mux, tc.path, tc.body)
+
+		if rec.Code != tc.code {
+			t.Fatalf("%s: expected %d, got %d: %s", tc.name, tc.code, rec.Code, rec.Body.String())
+		}
+		res := decode(t, rec)
+		if res["code"] != tc.errKey || res["error"] == nil {
+			t.Fatalf("%s: expected code %s with a message, got %v", tc.name, tc.errKey, res)
+		}
+		if repo.sessions["s1"].Status != tc.status || spots.spots != 10 {
+			t.Fatalf("%s: expected nothing changed, got %s and %d spots", tc.name, repo.sessions["s1"].Status, spots.spots)
+		}
+	}
+}
+
+func TestGetSessions_FiltersExited(t *testing.T) {
+	mux, _, _ := newExitTestMux(model.StatusExited)
+	req := httptest.NewRequest("GET", "/sessions?status=EXITED", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	var sessions []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&sessions); err != nil || len(sessions) != 1 || sessions[0]["status"] != "EXITED" {
+		t.Fatalf("expected the EXITED session, got %v, %v", sessions, err)
 	}
 }

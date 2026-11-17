@@ -33,34 +33,37 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
     - Send a photo through `POST /entries`; the session reaches `plate_status = READ`; the queues end empty
     - Done 2026-11-16 with the API image running on the compose network (no local Go toolchain): readable photo -> `READ` `LSN4I49`, covered plate -> `UNREADABLE`, counter 50 -> 48, the three queues empty
 
-- [ ] 2. Status model and persistence
-  - [ ] 2.1 Migration `000003_exit_barrier` (up and down)
+- [x] 2. Status model and persistence
+  - [x] 2.1 Migration `000003_exit_barrier` (up and down)
     - `paid_at`, legacy `PAID` -> `EXITED`, partial index on `license_plate`
     - _Requirements: 8.1, 8.2, 8.3, 8.4_
-  - [ ] 2.2 Model: `StatusExited`, `PaidAt`
+  - [x] 2.2 Model: `StatusExited`, `PaidAt`
     - _Requirements: 8.5_
-  - [ ] 2.3 Repository
+  - [x] 2.3 Repository
     - `MarkAsPaid` writes `paid_at`; new `MarkAsExited` and `FindOccupyingByPlate`; `UpdatePlate` and `CountActive` include `PAID`; `sessionColumns` gains `paid_at`
     - _Requirements: 4.1, 4.2, 6.3, 7.1, 7.3, 9.4_
-  - [ ] 2.4 Repository tests
+  - [x] 2.4 Repository tests
     - Migration over legacy rows, conditional updates, plate lookup ordering
     - _Requirements: 8.2, 7.1, 12.1_
 
-- [ ] 3. Exit barrier in the service and the handlers
-  - [ ] 3.1 `PayExit` stops incrementing the counter
+- [x] 3. Exit barrier in the service and the handlers
+  - [x] 3.1 `PayExit` stops incrementing the counter
     - _Requirements: 4.1, 4.3, 4.4, 4.5_
-  - [ ] 3.2 `ExitBarrierByTicket`, `ExitBarrierByPlate`, `openBarrier` and the new errors
+  - [x] 3.2 `ExitBarrierByTicket`, `ExitBarrierByPlate`, `openBarrier` and the new errors
     - _Requirements: 5.2, 5.3, 5.4, 5.5, 5.7, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 7.1, 7.2, 9.3_
-  - [ ] 3.3 `DeleteSession` and `UpdatePlate` rules for `PAID` and `EXITED`
+  - [x] 3.3 `DeleteSession` and `UpdatePlate` rules for `PAID` and `EXITED`
     - _Requirements: 7.4, 9.4_
-  - [ ] 3.4 Handlers `POST /barrier/exit/ticket` and `POST /barrier/exit/plate` with error codes
+  - [x] 3.4 Handlers `POST /barrier/exit/ticket` and `POST /barrier/exit/plate` with error codes
     - _Requirements: 5.1, 5.6, 6.1, 6.2, 9.1_
-  - [ ] 3.5 Service and handler tests
+  - [x] 3.5 Service and handler tests
     - Every status for both routes, repeated plates, plate statuses `PENDING`/`UNREADABLE`, body validation
     - _Requirements: 12.1_
-  - [ ]* 3.6 Property tests
+  - [x]* 3.6 Property tests
     - Spot conservation over random operation sequences (Property 1); single release under concurrent exits (Property 2); no exit without payment (Property 3); plate never opens the wrong car (Property 5)
     - _Requirements: 7.1, 7.2, 7.5_
+    - Done 2026-11-17: 200 seeded sequences of 60 operations (`TestSpotConservation_RandomSequences`), 20 concurrent exits (`TestExit_ConcurrentRequestsReleaseTheSpotOnce`, also under `-race`), and table tests for Property 5 (`TestExitByPlate_NotFound`, `TestExitByPlate_RepeatedPlate`)
+  - [x] 3.7 Checkpoint on the compose (API image on the compose network, migration 000003 applied over the phase 1 data)
+    - Two entries reserve two spots; the Worker reads one plate and marks the other `UNREADABLE`; both refused at the barrier before paying (`payment_pending`); payment keeps the counter; exit by plate frees one spot and a second exit answers `already_exited`; an unknown plate answers `plate_not_found`; the unreadable car leaves by ticket; the counter is back where it started; audit `ENTRY` -> `OCR_*` -> `EXIT_PAYMENT` -> `EXIT_BARRIER_OPENED` with `method` `plate`/`ticket`
 
 - [ ] 4. Frontend
   - [ ] 4.1 Types and API client (`EXITED`, `paid_at`, `EXIT_BARRIER_OPENED`, `exitByPlate`, `exitByTicket`, error `code`)
