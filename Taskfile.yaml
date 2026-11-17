@@ -234,20 +234,13 @@ tasks:
           estacionamento-worker:local gerar_sinteticas.py examples/dataset/sintetico {{.N}}
 
   ocr:dataset:
-    desc: "Mede o OCR em todo o dataset, listando só os erros (ENGINE=rekognition usa a AWS como em produção)"
+    desc: "Mede o OCR (OpenCV + Tesseract) em todo o dataset, listando só os erros"
     vars:
-      ENGINE: '{{.ENGINE | default "tesseract"}}'
       DIRS: '{{.DIRS | default "examples/fotos examples/dataset/openalpr-br examples/dataset/sintetico"}}'
     cmds:
       - docker build -q -t estacionamento-worker:local ./worker
       - |
-        {{.AWS_REAL}}
-        ENV_FILE=$(mktemp)
-        if [ "{{.ENGINE}}" != "tesseract" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
-        docker run --rm --entrypoint python --env-file "$ENV_FILE" -e OMP_THREAD_LIMIT=1 \
-          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
-          estacionamento-worker:local ocr_local.py --erros --engine {{.ENGINE}} {{.DIRS}}
-        rm -f "$ENV_FILE"
+        docker run --rm --entrypoint python -e OMP_THREAD_LIMIT=1           -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro"           estacionamento-worker:local ocr_local.py --erros {{.DIRS}}
 
   load:aws:
     desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"

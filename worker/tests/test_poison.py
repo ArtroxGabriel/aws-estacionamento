@@ -1,9 +1,9 @@
-"""Poison classification driven by ApproximateReceiveCount.
+"""Poison classification driven by the delivery attempt.
 
-Feature: python-ocr-worker, Property 8: Poison classification is driven by
-receive count. The SQS redrive policy moves a message to the DLQ once it has
-been received MAX_RECEIVE_COUNT times, so the Worker must record the poison
-audit entry on that *last* delivery — it never sees a later one.
+Feature: python-ocr-worker, Property 8: Poison classification is driven by the
+attempt number. The Worker itself counts the attempts (``x-attempt`` header), so
+a failure on attempt ``MAX_ATTEMPTS`` is the last chance: the poison audit entry
+is recorded then and the consumer moves the message to the DLQ.
 
 Giving up on a message also closes the plate reading (``PENDING`` ->
 ``UNREADABLE``); the session itself stays ``PARKED`` and its ticket pays.
@@ -13,26 +13,25 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from fakes import SESSION_ID, FakeSessionRepository, make_message, make_poller, pending_row
+from fakes import SESSION_ID, FakeSessionRepository, make_body, make_processor, pending_row
 from hypothesis import given
 from hypothesis import strategies as st
 
 from ocr.processor import OcrResult
-from worker import MAX_RECEIVE_COUNT, Outcome
+from processor import MAX_ATTEMPTS, Outcome
 
 
 def failing_ocr(_image: bytes) -> OcrResult:
     return OcrResult(ok=False, raw_text=None, error="decode")
 
 
-def test_last_delivery_that_fails_records_poison():
-    """Regression: the check was ``count > 3``, which never fires when the
-    redrive policy already moved the message after the 3rd receive."""
-    poller, sessions, audit, sqs = make_poller(ocr=failing_ocr)
+def test_last_attempt_that_fails_records_poison():
+    processor, sessions, audit = make_processor(ocr=failing_ocr)
 
-    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT))
+    result = processor.handle(make_body(), MAX_ATTEMPTS)
 
-    assert outcome is Outcome.POISON
+    assert result.outcome is Outcome.POISON
+    assert "OCR failed" in (result.reason or "")
     assert len(audit.poison_entries) == 1
     session_id, reason = audit.poison_entries[0]
     assert session_id == SESSION_ID
@@ -44,12 +43,12 @@ def test_last_delivery_that_fails_records_poison():
     assert audit.failed_entries[0][0] == SESSION_ID
 
 
-def test_failure_before_the_last_delivery_keeps_the_plate_pending():
-    poller, sessions, audit, _ = make_poller(ocr=failing_ocr)
+def test_failure_before_the_last_attempt_keeps_the_plate_pending():
+    processor, sessions, audit = make_processor(ocr=failing_ocr)
 
-    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT - 1))
+    result = processor.handle(make_body(), MAX_ATTEMPTS - 1)
 
-    assert outcome is Outcome.RETAIN
+    assert result.outcome is Outcome.RETAIN
     assert sessions.rows[SESSION_ID].plate_status == "PENDING"
     assert audit.poison_entries == [] and audit.failed_entries == []
 
@@ -59,15 +58,15 @@ class ErrorS3:
         raise RuntimeError("network timeout to S3")
 
 
-def test_outage_on_last_delivery_also_closes_the_plate_reading():
-    """An outage that outlasts the 3 deliveries must not leave the session
-    showing "reading the plate" forever: nothing will read that photo again.
-    The session stays PARKED; only the plate is given up on."""
-    poller, sessions, audit, _ = make_poller(s3=ErrorS3())
+def test_outage_on_last_attempt_also_closes_the_plate_reading():
+    """An outage that outlasts the attempts must not leave the session showing
+    "reading the plate" forever: nothing will read that photo again. The session
+    stays PARKED; only the plate is given up on."""
+    processor, sessions, audit = make_processor(s3=ErrorS3())
 
-    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT))
+    result = processor.handle(make_body(), MAX_ATTEMPTS)
 
-    assert outcome is Outcome.POISON
+    assert result.outcome is Outcome.POISON
     assert len(audit.poison_entries) == 1
     assert "S3 download failed" in audit.poison_entries[0][1]
     row = sessions.rows[SESSION_ID]
@@ -78,7 +77,7 @@ def test_outage_on_last_delivery_also_closes_the_plate_reading():
 
 def test_poison_survives_rds_being_down():
     """With RDS down the plate cannot be closed; the poison is still audited
-    and the loop goes on."""
+    and the consumer goes on."""
 
     class DownRds(FakeSessionRepository):
         def get(self, session_id):
@@ -88,11 +87,11 @@ def test_poison_survives_rds_being_down():
             raise ConnectionError("RDS unreachable")
 
     sessions = DownRds({SESSION_ID: pending_row()})
-    poller, _, audit, _ = make_poller(sessions=sessions)
+    processor, _, audit = make_processor(sessions=sessions)
 
-    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT))
+    result = processor.handle(make_body(), MAX_ATTEMPTS)
 
-    assert outcome is Outcome.POISON
+    assert result.outcome is Outcome.POISON
     assert len(audit.poison_entries) == 1
     assert sessions.rows[SESSION_ID].plate_status == "PENDING"
     assert audit.failed_entries == []
@@ -102,58 +101,45 @@ def test_plate_already_unreadable_is_terminal_delete():
     sessions = FakeSessionRepository(
         {SESSION_ID: replace(pending_row(), plate_status="UNREADABLE")}
     )
-    poller, _, audit, _ = make_poller(sessions=sessions)
+    processor, _, audit = make_processor(sessions=sessions)
 
-    outcome = poller._handle(make_message(receive_count=1))
+    result = processor.handle(make_body(), 1)
 
-    assert outcome is Outcome.DELETE
+    assert result.outcome is Outcome.DELETE
     assert audit.ocr_entries == []
     assert audit.failed_entries == []
     assert audit.poison_entries == []
 
 
-def test_last_delivery_that_succeeds_is_not_poison():
-    poller, sessions, audit, _ = make_poller()
+def test_last_attempt_that_succeeds_is_not_poison():
+    processor, sessions, audit = make_processor()
 
-    assert poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT)) is Outcome.DELETE
+    assert processor.handle(make_body(), MAX_ATTEMPTS).outcome is Outcome.DELETE
     assert audit.poison_entries == []
     assert sessions.rows[SESSION_ID].plate_status == "READ"
 
 
-def test_malformed_body_records_poison_only_on_last_delivery():
-    poller, sessions, audit, _ = make_poller()
+def test_malformed_body_records_poison_only_on_last_attempt():
+    processor, sessions, audit = make_processor()
 
-    assert poller._handle(make_message(body="not json", receive_count=1)) is Outcome.RETAIN
+    assert processor.handle("not json", 1).outcome is Outcome.RETAIN
     assert audit.poison_entries == []
 
-    outcome = poller._handle(make_message(body="not json", receive_count=MAX_RECEIVE_COUNT))
-    assert outcome is Outcome.POISON
+    assert processor.handle("not json", MAX_ATTEMPTS).outcome is Outcome.POISON
     assert audit.poison_entries == [("unknown", "malformed JSON")]
     # No session can be told from a malformed body: nothing is touched.
     assert sessions.rows[SESSION_ID].plate_status == "PENDING"
     assert audit.failed_entries == []
 
 
-def test_beyond_threshold_is_not_reprocessed_nor_re_audited():
-    """Without a working redrive the message keeps coming back; it must not
-    be reprocessed nor spam the audit table on every delivery."""
-    poller, sessions, audit, _ = make_poller()
-
-    outcome = poller._handle(make_message(receive_count=MAX_RECEIVE_COUNT + 1))
-
-    assert outcome is Outcome.POISON
-    assert sessions.rows[SESSION_ID].plate_status == "PENDING"
-    assert audit.poison_entries == [] and audit.ocr_entries == []
-
-
 @given(st.integers(min_value=1, max_value=50))
-def test_failing_message_is_poison_iff_count_reaches_threshold(count):
-    poller, _, audit, _ = make_poller(ocr=failing_ocr)
+def test_failing_message_is_poison_iff_attempt_reaches_the_limit(attempt):
+    processor, _, audit = make_processor(ocr=failing_ocr)
 
-    outcome = poller._handle(make_message(receive_count=count))
+    outcome = processor.handle(make_body(), attempt).outcome
 
-    if count >= MAX_RECEIVE_COUNT:
+    if attempt >= MAX_ATTEMPTS:
         assert outcome is Outcome.POISON
     else:
         assert outcome is Outcome.RETAIN
-    assert len(audit.poison_entries) == (1 if count == MAX_RECEIVE_COUNT else 0)
+    assert len(audit.poison_entries) == (1 if attempt >= MAX_ATTEMPTS else 0)
