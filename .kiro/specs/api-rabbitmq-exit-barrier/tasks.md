@@ -65,15 +65,18 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
   - [x] 3.7 Checkpoint on the compose (API image on the compose network, migration 000003 applied over the phase 1 data)
     - Two entries reserve two spots; the Worker reads one plate and marks the other `UNREADABLE`; both refused at the barrier before paying (`payment_pending`); payment keeps the counter; exit by plate frees one spot and a second exit answers `already_exited`; an unknown plate answers `plate_not_found`; the unreadable car leaves by ticket; the counter is back where it started; audit `ENTRY` -> `OCR_*` -> `EXIT_PAYMENT` -> `EXIT_BARRIER_OPENED` with `method` `plate`/`ticket`
 
-- [ ] 4. Frontend
-  - [ ] 4.1 Types and API client (`EXITED`, `paid_at`, `EXIT_BARRIER_OPENED`, `exitByPlate`, `exitByTicket`, error `code`)
+- [x] 4. Frontend
+  - [x] 4.1 Types and API client (`EXITED`, `paid_at`, `EXIT_BARRIER_OPENED`, `exitByPlate`, `exitByTicket`, error `code`)
     - _Requirements: 10.7_
-  - [ ] 4.2 `ExitBarrierPage` with its tests
+  - [x] 4.2 `ExitBarrierPage` with its tests
     - _Requirements: 10.3, 12.2_
-  - [ ] 4.3 Routes, redirects and navigation
+  - [x] 4.3 Routes, redirects and navigation
     - _Requirements: 10.1, 10.2_
-  - [ ] 4.4 Payment message, dashboard listing with the paid badge, audit label
+  - [x] 4.4 Payment message, dashboard listing with the paid badge, audit label
     - _Requirements: 10.4, 10.5, 10.6_
+  - [x] 4.5 Checkpoint in the browser (Vite dev server against the API on the compose)
+    - `/saida` redirects to `/pagamento`; paying shows "Siga para a cancela de saída" with `paid_at`; the dashboard lists 7 cars inside (1 paid) and 43 free spots; the exit totem refuses an unpaid ticket typed by its 8-character prefix ("Pagamento não localizado"), opens for the paid car's plate while three unpaid sessions share it; the audit page shows "Saída pela cancela · Cancela aberta pela placa"
+    - The exit totem resolves the 8-character prefix printed on the ticket to the full ID through `GET /sessions?status=ALL` (unique match only), because the API takes the full ID
 
 - [ ] 5. Compose, automation and verification
   - [ ] 5.1 Services `api` and `web` in `infra/docker-compose.yaml`

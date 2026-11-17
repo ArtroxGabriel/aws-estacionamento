@@ -2,8 +2,9 @@ import { Link, NavLink, Outlet } from "react-router";
 
 const links = [
   { to: "/", label: "Painel", end: true },
-  { to: "/entrada", label: "Entrada", end: false },
-  { to: "/saida", label: "Saída", end: false },
+  { to: "/cancela-entrada", label: "Cancela de entrada", end: false },
+  { to: "/pagamento", label: "Pagamento", end: false },
+  { to: "/cancela-saida", label: "Cancela de saída", end: false },
   { to: "/auditoria", label: "Auditoria", end: false },
 ];
 

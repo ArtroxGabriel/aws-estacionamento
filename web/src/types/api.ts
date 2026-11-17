@@ -1,6 +1,10 @@
 // Onde o carro está. O ticket (id da sessão) é o que identifica o carro: a sessão já
-// nasce PARKED, com a vaga reservada, e a foto nunca bloqueia a saída.
-export type SessionStatus = "PARKED" | "PAID";
+// nasce PARKED, com a vaga reservada, e a foto nunca bloqueia a saída. Pagar não libera a
+// vaga: o carro PAID continua no pátio até passar pela cancela de saída (EXITED).
+export type SessionStatus =
+  | "PARKED" // no pátio, não pago
+  | "PAID" // no pátio, pago, liberado para sair
+  | "EXITED"; // passou pela cancela de saída
 
 // Como foi a leitura da placa na foto de entrada. É só evidência (auditoria) e um atalho
 // para achar o ticket no caixa.
@@ -20,7 +24,8 @@ export interface Session {
   plate_status: PlateStatus;
   s3_photo_key: string;
   entered_at: string; // ISO 8601 (UTC)
-  exited_at?: string;
+  paid_at?: string; // pagamento no caixa
+  exited_at?: string; // passagem pela cancela de saída
   amount_paid?: number;
 }
 
@@ -31,7 +36,8 @@ export interface AvailableSpotsResponse {
 export type AuditAction =
   | "ENTRY"
   | "OCR_PROCESSING"
-  | "EXIT_PAYMENT"
+  | "EXIT_PAYMENT" // API: pagamento no caixa (a vaga continua ocupada)
+  | "EXIT_BARRIER_OPENED" // API: cancela de saída aberta (a vaga volta ao contador)
   | "OCR_FAILED" // worker: placa não identificada (plate_status UNREADABLE; o ticket segue válido)
   | "POISON_MESSAGE" // worker: mensagem falhou na última entrega da fila
   | "ENTRY_FAILED" // legado: a API não emite mais (fila fora do ar não derruba a entrada)
@@ -45,6 +51,7 @@ export interface AuditEvent {
   timestamp: string; // RFC3339Nano
   details: Record<string, unknown>; // ENTRY: status, s3_photo_key, ocr_queued, queue_error
   // OCR_PROCESSING: license_plate | EXIT_PAYMENT: status, amount_paid
+  // EXIT_BARRIER_OPENED: status, method (plate | ticket), license_plate
   // OCR_FAILED: plate_status, reason | POISON_MESSAGE: reason
   // PLATE_CORRECTION: license_plate, previous_plate, previous_plate_status, status
   // SESSION_DELETE: status, license_plate, s3_photo_key

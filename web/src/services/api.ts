@@ -14,12 +14,14 @@ export const INVALID_PLATE_MESSAGE =
 export class ApiError extends Error {
   status: number; // 0 = falha de rede
   message: string;
+  code?: string; // código estável das rotas da cancela (ex.: payment_pending)
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.message = message;
+    this.code = code;
   }
 }
 
@@ -29,6 +31,14 @@ function parseJson(text: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function codeFromBody(body: unknown): string | undefined {
+  if (typeof body === "object" && body !== null && "code" in body) {
+    const { code } = body;
+    if (typeof code === "string" && code !== "") return code;
+  }
+  return undefined;
 }
 
 // A API responde erros com `{"error":"..."}`, mas com Content-Type text/plain (http.Error),
@@ -55,7 +65,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const message = errorFromBody(body) ?? (text.trim() || res.statusText);
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, codeFromBody(body));
   }
   if (body === undefined) {
     throw new ApiError(res.status, "Resposta inválida da API.");
@@ -90,6 +100,24 @@ export async function getSession(id: string): Promise<Session> {
 
 export function payExit(id: string): Promise<Session> {
   return request<Session>(`/exits/${encodeURIComponent(id)}/pay`, { method: "POST" });
+}
+
+// Cancela de saída: abre para um carro PAID. Erros trazem `code`: payment_pending,
+// already_exited, plate_not_found, session_not_found, invalid_plate, invalid_ticket.
+export function exitByPlate(plate: string): Promise<Session> {
+  return request<Session>("/barrier/exit/plate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plate }),
+  });
+}
+
+export function exitByTicket(ticketId: string): Promise<Session> {
+  return request<Session>("/barrier/exit/ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket_id: ticketId }),
+  });
 }
 
 // Foto de entrada da sessão, servida pela API a partir do armazenamento de objetos.
@@ -134,7 +162,7 @@ export function errorMessage(
   if (err.status === 0) return NETWORK_ERROR_MESSAGE;
   if (context === "plate" && err.status === 400) return INVALID_PLATE_MESSAGE;
   if (context === "plate" && err.status === 409) {
-    return "Só é possível alterar a placa de veículos estacionados.";
+    return "Só é possível alterar a placa de veículos que ainda estão no pátio.";
   }
   if (context === "entry" && err.status === 409) {
     return "Estacionamento lotado. Não há vagas disponíveis no momento.";

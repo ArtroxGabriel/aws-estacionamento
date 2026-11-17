@@ -51,6 +51,7 @@ export function isValidPlate(value: string): boolean {
 const statusLabels: Record<SessionStatus, string> = {
   PARKED: "Estacionado",
   PAID: "Pago",
+  EXITED: "Saiu",
 };
 
 export function statusLabel(status: SessionStatus): string {
@@ -71,7 +72,8 @@ export function plateStatusLabel(status: PlateStatus): string {
 const actionLabels: Record<string, string> = {
   ENTRY: "Entrada",
   OCR_PROCESSING: "Leitura de placa",
-  EXIT_PAYMENT: "Pagamento/Saída",
+  EXIT_PAYMENT: "Pagamento",
+  EXIT_BARRIER_OPENED: "Saída pela cancela",
   POISON_MESSAGE: "Falha no processamento",
   OCR_FAILED: "Placa não lida",
   ENTRY_FAILED: "Falha na entrada",

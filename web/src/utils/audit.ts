@@ -1,7 +1,7 @@
 import type { AuditEvent, PlateStatus, Session, SessionStatus } from "../types/api";
 import { formatCurrency, statusLabel } from "./format";
 
-const SESSION_STATUSES: readonly string[] = ["PARKED", "PAID"];
+const SESSION_STATUSES: readonly string[] = ["PARKED", "PAID", "EXITED"];
 
 function isSessionStatus(value: string): value is SessionStatus {
   return SESSION_STATUSES.includes(value);
@@ -135,6 +135,12 @@ export function describeEvent(event: AuditEvent, info: SessionInfo | undefined):
     return status ? `Registro excluído · estava ${anyStatusLabel(status)}` : "Registro excluído";
   }
   if (event.action === "ENTRY") return entryOutcome(event, info);
+  if (event.action === "EXIT_BARRIER_OPENED") {
+    const method = stringField(event.details, "method");
+    const by = method === "plate" ? "pela placa" : method === "ticket" ? "pelo ticket" : undefined;
+    const plate = plateOf(event.details);
+    return [by ? `Cancela aberta ${by}` : "Cancela aberta", plate].filter(Boolean).join(" · ");
+  }
   if (isFailureAction(event.action)) {
     // O rótulo da ação já diz que houve falha: os detalhes mostram só o motivo.
     const reason = stringField(event.details, "reason") ?? stringField(event.details, "error");

@@ -68,7 +68,7 @@ describe("AuditPage", () => {
     await renderPage();
     expect(mockedListAuditEvents).toHaveBeenCalledTimes(1);
     expect(rows().map((r) => within(r).getAllByRole("cell")[1].textContent)).toEqual([
-      "Pagamento/Saída",
+      "Pagamento",
       "Leitura de placa",
       "Entrada",
       "NEW_ACTION",
@@ -76,11 +76,11 @@ describe("AuditPage", () => {
     expect(screen.getByText(/^Exibindo 4 eventos/)).toBeInTheDocument();
   });
 
-  it("filtra por ação Pagamento/Saída", async () => {
+  it("filtra por ação Pagamento", async () => {
     const { user } = await renderPage();
-    await user.selectOptions(screen.getByLabelText("Ação"), "Pagamento/Saída");
+    await user.selectOptions(screen.getByLabelText("Ação"), "Pagamento");
     expect(rows()).toHaveLength(1);
-    expect(within(rows()[0]).getByText("Pagamento/Saída")).toBeInTheDocument();
+    expect(within(rows()[0]).getByText("Pagamento")).toBeInTheDocument();
   });
 
   it("filtra por placa e por prefixo da sessão", async () => {

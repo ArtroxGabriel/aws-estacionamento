@@ -6,6 +6,7 @@ const badgeBase = "inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold
 const statusClasses: Record<SessionStatus, string> = {
   PARKED: "bg-blue-100 text-blue-800",
   PAID: "bg-green-100 text-green-800",
+  EXITED: "bg-slate-200 text-slate-700",
 };
 
 export default function StatusBadge({ status }: { status: SessionStatus }) {

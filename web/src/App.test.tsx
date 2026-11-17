@@ -32,8 +32,9 @@ describe("App", () => {
     const nav = screen.getByRole("navigation", { name: "Navegação principal" });
 
     const cases = [
-      { link: "Entrada", heading: "Totem de Entrada" },
-      { link: "Saída", heading: "Caixa / Saída" },
+      { link: "Cancela de entrada", heading: "Totem de Entrada" },
+      { link: "Pagamento", heading: "Caixa / Pagamento" },
+      { link: "Cancela de saída", heading: "Cancela de Saída" },
       { link: "Auditoria", heading: "Auditoria" },
       { link: "Painel", heading: "Painel" },
     ];
@@ -44,6 +45,16 @@ describe("App", () => {
       expect(screen.getByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
       expect(anchor).toHaveAttribute("aria-current", "page");
     }
+  });
+
+  it("redireciona os endereços antigos", () => {
+    renderAt("/entrada");
+    expect(screen.getByRole("heading", { level: 1, name: "Totem de Entrada" })).toBeInTheDocument();
+  });
+
+  it("redireciona /saida para o caixa", () => {
+    renderAt("/saida");
+    expect(screen.getByRole("heading", { level: 1, name: "Caixa / Pagamento" })).toBeInTheDocument();
   });
 
   it("exibe a página 404 para rotas desconhecidas", () => {
