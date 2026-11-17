@@ -87,7 +87,7 @@ flowchart TD
 
 ### Componente 1: Infraestrutura e Orquestração Local (`infra/docker-compose.yaml` e `Taskfile.yaml`)
 
-> **Estado:** parcial. O arquivo real é `infra/docker-compose.yaml` (não há compose na raiz) e já tem `rustfs`, `postgres`, `rabbitmq` (filas carregadas de `infra/rabbitmq/definitions.json`), `dynamodb-local`, `createbuckets`, `createtables` e `worker`. Faltam `redis`, `api` e `web`, e as tasks abaixo.
+> **Estado:** parcial. O arquivo real é `infra/docker-compose.yaml` (não há compose na raiz) e já tem `rustfs`, `postgres`, `rabbitmq` (filas carregadas de `infra/rabbitmq/definitions.json`), `redis` (já existia no compose, mas nada o usa enquanto a API não está lá), `dynamodb-local`, `createbuckets`, `createtables` e `worker`. Faltam `api` e `web`, e as tasks abaixo.
 
 #### [NEW] `infra/docker-compose.yaml` (completar)
 Substitui a dependência do Floci por containers oficiais e especializados:
@@ -288,7 +288,7 @@ curl -I http://localhost:30080
 
 | Componente | Estado |
 |---|---|
-| 1. Compose / Taskfile | **Parcial.** Feitos: `rustfs`, `postgres`, `rabbitmq` (+ `definitions.json`), `dynamodb-local`, `createbuckets`, `createtables`, `worker`. Faltam: `redis`, `api`, `web`, e as tasks `up`/`down`/`logs`/`test`/`k8s:*` |
+| 1. Compose / Taskfile | **Parcial.** Feitos: `rustfs`, `postgres`, `rabbitmq` (+ `definitions.json`), `redis`, `dynamodb-local`, `createbuckets`, `createtables`, `worker`. Faltam: `api`, `web`, e as tasks `up`/`down`/`logs`/`test`/`k8s:*` |
 | 2. API Go | **Não iniciado** (ainda publica no SQS, usa os endpoints do Floci e libera a vaga no pagamento) |
 | 3. Worker | **Feito e verificado** (`PLANO-TP2-WORKER.md`). Pendente só o item 7.3 (prints para o README) |
 | 4. Frontend | **Não iniciado** (as páginas atuais são painel, totem de entrada, caixa e auditoria) |
@@ -303,7 +303,7 @@ curl -I http://localhost:30080
 | 3 | **Saída por placa com foto da cancela** | O plano manda aceitar multipart com foto, mas a regra de arquitetura proíbe OCR síncrono na entrada. Opções: (a) a saída só aceita placa digitada ou lida do banco (`plate_status` `READ`/`MANUAL`) e o ticket de papel é o fallback; (b) a saída publica uma tarefa de OCR própria. Placas repetidas entre sessões ativas também precisam de regra |
 | 4 | **Nomes de contrato** | Pagamento: manter `POST /exits/{id}/pay` ou renomear para `/sessions/{id}/pay`. Auditoria: manter `EXIT_PAYMENT` ou usar `PAYMENT_RECEIVED`. Mudar quebra o web e os docs |
 | 5 | **Páginas do frontend** | Criar `/cancela-entrada`, `/pagamento`, `/cancela-saida` como rotas novas ou renomear as páginas atuais (totem, caixa) |
-| 6 | **Redis no compose** | Entra junto com a `api`. Definir se a API recria o contador no start (hoje a chave ausente é reconstruída na primeira leitura de `GET /spots/available`) |
+| 6 | **Contador de vagas na subida** | O `redis` já está no compose; a `api` ainda precisa entrar com `depends_on` dele. Definir se a API recria o contador no start (hoje a chave ausente é reconstruída na primeira leitura de `GET /spots/available`) |
 | 7 | **Quem é dono da topologia do RabbitMQ** | Já decidido para o worker: `infra/rabbitmq/definitions.json`, declaração passiva. A API precisa seguir a mesma regra (ver Componente 2) |
 | 8 | **Deploy do TP1 na AWS** | O `user_data` ainda exporta `SQS_QUEUE_URL` e `OCR_ENGINE`, e a imagem nova do worker não consome SQS. Decidir: abandonar o deploy do TP1 (o TP2 o substitui) ou manter um segundo caminho |
 | 9 | **Bônus Kubernetes** | Fazer ou não (+1 ponto). O worker já não depende de Redis. Cada manifesto precisa seguir as variáveis novas |
