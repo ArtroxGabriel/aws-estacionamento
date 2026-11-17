@@ -296,6 +296,8 @@ curl -I http://localhost:30080
 
 ### 5.2. Decisões em aberto
 
+> **Atualização (2026-11-16):** a especificação `.kiro/specs/api-rabbitmq-exit-barrier/` (branch `feat/api-rabbitmq-exit-barrier`) cobre os Componentes 1, 2 e 4 e fecha as decisões 1 a 7 desta tabela (ver a tabela "Decisions" do `design.md`, D-A1 a D-A12): as duas cancelas ficam, o pagamento mantém `POST /exits/{id}/pay` e `EXIT_PAYMENT`, e a saída por placa recebe a placa em JSON, sem OCR. Continuam abertas a 8 (deploy do TP1), a 9 (Kubernetes) e a 10 (docs).
+
 | # | O que definir | Opções e impacto |
 |---|---|---|
 | 1 | **Manter as duas cancelas (`PAID` retém a vaga, `EXITED` libera)?** É escopo extra, fora da rubrica de avaliação | **Cortar:** o pagamento continua liberando a vaga, a API só migra para RabbitMQ/RustFS/DynamoDB Local e o plano encolhe (itens 2, 3, 4, 7, 8 abaixo caem). **Manter:** exige novo status `EXITED`, rotas `/barrier/exit/*`, página `/cancela-saida` e mudanças no contador |
