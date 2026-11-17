@@ -116,6 +116,16 @@ describe("describeEvent", () => {
     details: { status: "PARKED", s3_photo_key: "x", ocr_queued: true },
   };
 
+  it("saída pela cancela mostra o método e a placa", () => {
+    const exit = { ...entry, action: "EXIT_BARRIER_OPENED" };
+    expect(describeEvent({ ...exit, details: { status: "EXITED", method: "plate", license_plate: "ABC1D23" } }, undefined)).toBe(
+      "Cancela aberta pela placa · ABC1D23",
+    );
+    expect(describeEvent({ ...exit, details: { status: "EXITED", method: "ticket", license_plate: null } }, undefined)).toBe(
+      "Cancela aberta pelo ticket",
+    );
+  });
+
   it("entrada é sempre Estacionado: o ticket vale desde a emissão", () => {
     expect(describeEvent(entry, undefined)).toBe("Estacionado");
     expect(describeEvent(entry, { plate: "ABC1D23", status: "PARKED", plateStatus: "READ" })).toBe(

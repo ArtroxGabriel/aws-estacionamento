@@ -20,7 +20,7 @@ func NewPostgresSessionRepo(db *sql.DB) *PostgresSessionRepo {
 	return &PostgresSessionRepo{db: db}
 }
 
-const sessionColumns = `id, license_plate, status, plate_status, s3_photo_key, entered_at, exited_at, amount_paid`
+const sessionColumns = `id, license_plate, status, plate_status, s3_photo_key, entered_at, paid_at, exited_at, amount_paid`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -35,6 +35,7 @@ func scanSession(row rowScanner) (*model.Session, error) {
 		&s.PlateStatus,
 		&s.S3PhotoKey,
 		&s.EnteredAt,
+		&s.PaidAt,
 		&s.ExitedAt,
 		&s.AmountPaid,
 	)
@@ -68,20 +69,40 @@ func (r *PostgresSessionRepo) GetByID(ctx context.Context, id string) (*model.Se
 	return scanOptionalSession(r.db.QueryRowContext(ctx, query, id))
 }
 
-func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error) {
+func (r *PostgresSessionRepo) MarkAsPaid(ctx context.Context, id string, paidAt time.Time, amount float64) (*model.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'PAID', exited_at = $2, amount_paid = $3
+		SET status = 'PAID', paid_at = $2, amount_paid = $3
 		WHERE id = $1 AND status = 'PARKED'
 		RETURNING ` + sessionColumns
-	return scanOptionalSession(r.db.QueryRowContext(ctx, query, id, exitedAt, amount))
+	return scanOptionalSession(r.db.QueryRowContext(ctx, query, id, paidAt, amount))
+}
+
+// MarkAsExited is the only way a spot leaves the lot through the barrier:
+// the WHERE makes two racing exits for the same car change one row only.
+func (r *PostgresSessionRepo) MarkAsExited(ctx context.Context, id string, exitedAt time.Time) (*model.Session, error) {
+	query := `
+		UPDATE sessions
+		SET status = 'EXITED', exited_at = $2
+		WHERE id = $1 AND status = 'PAID'
+		RETURNING ` + sessionColumns
+	return scanOptionalSession(r.db.QueryRowContext(ctx, query, id, exitedAt))
+}
+
+func (r *PostgresSessionRepo) FindOccupyingByPlate(ctx context.Context, plate string) ([]*model.Session, error) {
+	query := `SELECT ` + sessionColumns + ` FROM sessions
+		WHERE license_plate = $1
+		  AND plate_status IN ('READ', 'MANUAL')
+		  AND status IN ('PARKED', 'PAID')
+		ORDER BY paid_at ASC NULLS LAST, entered_at ASC`
+	return r.querySessions(ctx, query, plate)
 }
 
 func (r *PostgresSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error) {
 	query := `
 		UPDATE sessions
 		SET license_plate = $2, plate_status = 'MANUAL'
-		WHERE id = $1 AND status = 'PARKED'
+		WHERE id = $1 AND status IN ('PARKED', 'PAID')
 		RETURNING ` + sessionColumns
 	return scanOptionalSession(r.db.QueryRowContext(ctx, query, id, plate))
 }
@@ -110,9 +131,9 @@ func (r *PostgresSessionRepo) MarkPlateUnreadable(ctx context.Context, id string
 
 // CountActive counts the sessions that hold a spot in the Redis counter. A
 // spot is taken at the entry (every session starts PARKED) and given back at
-// the payment, so only PARKED sessions hold one.
+// the exit barrier, so PARKED and PAID sessions hold one.
 func (r *PostgresSessionRepo) CountActive(ctx context.Context) (int64, error) {
-	query := `SELECT COUNT(*) FROM sessions WHERE status = 'PARKED'`
+	query := `SELECT COUNT(*) FROM sessions WHERE status IN ('PARKED', 'PAID')`
 	var count int64
 	err := r.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
@@ -136,7 +157,10 @@ func (r *PostgresSessionRepo) FindAll(ctx context.Context, filter SessionFilter)
 		query += fmt.Sprintf(` AND %s = $%d`, cond.column, len(args))
 	}
 	query += ` ORDER BY entered_at DESC`
+	return r.querySessions(ctx, query, args...)
+}
 
+func (r *PostgresSessionRepo) querySessions(ctx context.Context, query string, args ...any) ([]*model.Session, error) {
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

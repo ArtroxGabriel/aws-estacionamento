@@ -1,8 +1,73 @@
 # Arquitetura
 
-Como o sistema funciona hoje e o que mudou em relação à `main` (até o PR #5, do frontend). O porquê de cada mudança está em [DECISOES.md](DECISOES.md).
+Como o sistema funciona no Trabalho 2 (Docker Compose) e, mais abaixo, como era no Trabalho 1 (AWS). O porquê de cada mudança está em [DECISOES.md](DECISOES.md).
 
-## Visão geral
+## Trabalho 2: Docker Compose
+
+```
+                      Navegador (painel, cancelas, caixa, auditoria)
+                                          │
+                                 ┌────────▼────────┐
+                                 │  web  :3000     │  nginx + React; /api/ → api:8080
+                                 └────────┬────────┘
+                                 ┌────────▼────────┐
+                                 │  api  :8080     │  Go
+                                 └─┬──┬──┬──┬──┬───┘
+            ┌──────────────────────┘  │  │  │  └──────────────────────┐
+            ▼                ┌────────┘  │  └────────┐                ▼
+        RustFS :9000     PostgreSQL   Redis      RabbitMQ :5672     DynamoDB Local :8000
+        fotos            sessões      vagas      fila OCR (+ retry   auditoria
+            ▲                ▲        livres      30 s, + DLQ)          ▲
+            │                │                       │                  │
+            └────────────────┴──── worker (Python, OpenCV + Tesseract) ─┘
+```
+
+Tudo sobe com `docker compose up -d --build` em `infra/`. A API espera as dependências ficarem saudáveis e o bucket e a tabela serem criados; o worker também. A API aplica as migrações do Postgres na subida.
+
+### Fluxos
+
+**Cancela de entrada** (`/cancela-entrada`).
+1. O totem envia a foto (`POST /entries`).
+2. A API reserva a vaga no **Redis** (pátio lotado → 409, a cancela não abre).
+3. A foto vai para o **RustFS** e a sessão nasce `PARKED`, com `plate_status` `PENDING`, no **PostgreSQL**.
+4. A API publica `{"session_id", "s3_key"}` no **RabbitMQ** e grava `ENTRY` no **DynamoDB**. Se a fila estiver fora, a entrada continua e a placa fica `UNREADABLE`.
+5. O ticket volta na hora, já válido para pagar e sair.
+
+**Leitura da placa (worker).**
+1. O worker pega uma mensagem por vez e baixa a foto do RustFS.
+2. Placa lida: `plate_status` `READ` e `OCR_PROCESSING`. Ilegível: `UNREADABLE` e `OCR_FAILED`. Nenhum dos dois muda o `status` nem o contador.
+3. Falha de infraestrutura: a mensagem vai para a fila de espera (`-retry`, 30 s) com `x-attempt + 1`; na 3ª falha, para a DLQ, com `POISON_MESSAGE`.
+
+**Painel** (`/`). Vagas livres pelo Redis (se a chave sumir, a API recalcula pelo Postgres) e a lista de carros no pátio.
+
+**Caixa** (`/pagamento`).
+- **Pagar:** `POST /exits/{id}/pay` marca `PAID` e `paid_at` e grava `EXIT_PAYMENT`. **A vaga continua ocupada**: o carro ainda está no pátio.
+- **Informar ou corrigir a placa:** `PATCH /sessions/{id}` (`MANUAL`, `PLATE_CORRECTION`), para carros `PARKED` ou `PAID`.
+- **Excluir:** `DELETE /sessions/{id}`, devolvendo a vaga se o carro estava no pátio.
+
+**Cancela de saída** (`/cancela-saida`).
+1. A câmera reconhece a placa (no sistema, o totem envia a placa): `POST /barrier/exit/plate`. Só casa com uma placa lida pelo OCR ou digitada no caixa, de um carro no pátio.
+2. Se a placa não resolver, o motorista digita o ticket: `POST /barrier/exit/ticket`. Funciona para qualquer carro pago, com ou sem placa.
+3. Carro `PAID`: a sessão vira `EXITED`, a vaga volta ao Redis e `EXIT_BARRIER_OPENED` é gravado. Carro não pago: `payment_pending`, a cancela não abre.
+
+**Estados:** `PARKED` → `PAID` → `EXITED`. `PARKED` e `PAID` ocupam vaga. A liberação é um `UPDATE ... WHERE status = 'PAID'`, então a vaga volta uma vez só, mesmo com pedidos simultâneos.
+
+**Placas aceitas:** os 4 países do Mercosul, com as regras da [D8](DECISOES.md#d8-placas-dos-4-países-do-mercosul).
+
+| País | Formatos |
+|---|---|
+| Brasil | `ABC1D23`, `ABC1234` |
+| Argentina | `AB123CD`, `ABC123` |
+| Paraguai | `ABCD123` |
+| Uruguai | `ABC1234` |
+
+---
+
+## Trabalho 1: AWS (histórico)
+
+O deploy abaixo não funciona com as imagens atuais da API e do worker, que não usam mais o SQS.
+
+### Visão geral
 
 ```
                           Navegador (totem, painel, caixa, auditoria)
@@ -33,7 +98,7 @@ Como o sistema funciona hoje e o que mudou em relação à `main` (até o PR #5,
 
 As instâncias não guardam estado: sessões, vagas, fotos, fila e auditoria ficam nos serviços gerenciados. Qualquer instância atende qualquer requisição, e o Auto Scaling pode criar ou destruir instâncias à vontade.
 
-## Fluxos
+### Fluxos
 
 **Entrada do carro.**
 1. O totem envia a foto (`POST /entries`).
@@ -58,16 +123,7 @@ As instâncias não guardam estado: sessões, vagas, fotos, fila e auditoria fic
 - **Informar ou corrigir a placa:** `PATCH /sessions/{id}`. Uma sessão `FAILED` vira `PARKED` e ocupa a vaga. Grava `PLATE_CORRECTION`.
 - **Excluir:** `DELETE /sessions/{id}` apaga a sessão e a foto do S3 e devolve a vaga se estava `PARKED`. Grava `SESSION_DELETE`.
 
-**Placas aceitas:** os 4 países do Mercosul, com as regras da [D8](DECISOES.md#d8-placas-dos-4-países-do-mercosul).
-
-| País | Formatos |
-|---|---|
-| Brasil | `ABC1D23`, `ABC1234` |
-| Argentina | `AB123CD`, `ABC123` |
-| Paraguai | `ABCD123` |
-| Uruguai | `ABC1234` |
-
-## Segurança
+### Segurança
 
 - Só o CloudFront e o ALB recebem tráfego da internet.
 - As instâncias aceitam tráfego só do ALB; RDS e Redis aceitam conexão só das instâncias.
@@ -75,7 +131,7 @@ As instâncias não guardam estado: sessões, vagas, fotos, fila e auditoria fic
 - As instâncias acessam S3, SQS, DynamoDB e Rekognition por uma role IAM, sem chave em código, e usam IMDSv2.
 - O deploy pelo GitHub usa OIDC, sem chave salva no GitHub. A role de deploy só aceita o environment `aws` deste repositório e não consegue alterar as próprias permissões.
 
-## Deploy
+### Deploy
 
 ```
 GitHub Actions "Deploy AWS" (ou task deploy:aws)
@@ -87,7 +143,7 @@ GitHub Actions "Deploy AWS" (ou task deploy:aws)
 
 Para desenvolver localmente, o **Floci** emula S3, SQS, DynamoDB, RDS e Redis (`task bootstrap:local`), com o state do OpenTofu local em `infra/`. O worker usa só o Tesseract, porque o Floci não tem Rekognition.
 
-## O que mudou em relação à `main`
+### O que mudou em relação à `main`
 
 | Área | Antes (`main`) | Agora (`feat/aws-deploy`) | Decisão |
 |---|---|---|---|
@@ -106,7 +162,7 @@ Para desenvolver localmente, o **Floci** emula S3, SQS, DynamoDB, RDS e Redis (`
 | **Testes do OCR** | 0 fotos com gabarito | 1.520 fotos com gabarito (reais, Roboflow e sintéticas) + scripts de medição | [D9](DECISOES.md#d9-datasets-de-teste-e-licenças) |
 | **Serviços AWS** | 6 (só no emulador) | 6 obrigatórios + Rekognition, CloudFront, ECR, CloudWatch, IAM | [tabela](DECISOES.md#serviços-aws-usados) |
 
-## Mapa do repositório
+### Mapa do repositório
 
 ```
 api/                 API REST em Go (handler → service → repository)

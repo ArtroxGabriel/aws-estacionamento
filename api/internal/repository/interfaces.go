@@ -23,15 +23,25 @@ type SessionRepository interface {
 	Create(ctx context.Context, session *model.Session) error
 	GetByID(ctx context.Context, id string) (*model.Session, error)
 	// MarkAsPaid moves a PARKED session to PAID; nil when the session is
-	// missing or in another status.
-	MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error)
+	// missing or in another status. The car keeps its spot.
+	MarkAsPaid(ctx context.Context, id string, paidAt time.Time, amount float64) (*model.Session, error)
+	// MarkAsExited moves a PAID session to EXITED in one conditional update;
+	// nil when the session is missing or not PAID (unpaid, or another request
+	// already opened the barrier).
+	MarkAsExited(ctx context.Context, id string, exitedAt time.Time) (*model.Session, error)
+	// FindOccupyingByPlate lists the sessions inside the lot (PARKED or PAID)
+	// whose plate was read or typed (READ/MANUAL) and equals plate, the
+	// oldest payment first and the unpaid ones last.
+	FindOccupyingByPlate(ctx context.Context, plate string) ([]*model.Session, error)
 	// MarkPlateUnreadable records that no OCR result will come for a session
 	// still waiting for one (plate_status PENDING).
 	MarkPlateUnreadable(ctx context.Context, id string) error
-	// UpdatePlate sets the plate typed by the cashier on a PARKED session
-	// (plate_status MANUAL); nil when the session is missing or not PARKED.
+	// UpdatePlate sets the plate typed by the cashier on a session still
+	// inside the lot (PARKED or PAID, plate_status MANUAL); nil when the
+	// session is missing or already EXITED.
 	UpdatePlate(ctx context.Context, id, plate string) (*model.Session, error)
 	Delete(ctx context.Context, id string) (bool, error)
+	// CountActive counts the sessions holding a spot (PARKED and PAID).
 	CountActive(ctx context.Context) (int64, error)
 	FindAll(ctx context.Context, filter SessionFilter) ([]*model.Session, error)
 }

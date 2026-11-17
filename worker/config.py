@@ -1,10 +1,14 @@
 """Configuration loading and validation for the Python OCR Worker.
 
-The Config_Loader (Req 14, Req 15) reads all configuration from environment
-variables at startup and fails fast — before the polling loop begins — when a
-required variable is missing/empty or a URL-shaped variable is malformed. It
-never embeds secrets in code and never emits credential values in logs
-(``redact`` provides a fixed marker for that purpose).
+The Config_Loader reads all configuration from environment variables at startup
+and fails fast — before the consumer starts — when a required variable is
+missing/empty or a URL-shaped variable is malformed. It never embeds secrets in
+code and never emits credential values in logs (``redact`` and
+``redact_url`` hide them).
+
+Each backing service has its own endpoint: the S3-compatible storage
+(``S3_ENDPOINT_URL``) and DynamoDB (``DYNAMODB_ENDPOINT_URL``) may point at local
+containers, while an empty value means the real AWS endpoint.
 """
 
 from __future__ import annotations
@@ -13,18 +17,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-__all__ = ["Config", "ConfigError", "load_config", "redact", "REDACTED"]
+__all__ = [
+    "Config",
+    "ConfigError",
+    "DEFAULT_QUEUE_NAME",
+    "REDACTED",
+    "load_config",
+    "redact",
+    "redact_url",
+]
 
-# Fixed redaction marker substituted for any secret value in log output (Req 14.5).
+# Fixed redaction marker substituted for any secret value in log output.
 REDACTED = "***REDACTED***"
 
-# Required environment variables that must be present and non-empty (Req 14.2).
+DEFAULT_QUEUE_NAME = "ocr-processamento-fila"
+
+# Required environment variables that must be present and non-empty.
 # Static AWS credentials are optional: without them boto3 falls back to its
 # default credential chain (e.g. the EC2 instance profile / LabRole in AWS
 # Academy). When supplied, the key id and secret must come as a pair.
 _REQUIRED_VARS = (
     "AWS_REGION",
-    "SQS_QUEUE_URL",
+    "RABBITMQ_URL",
     "DATABASE_URL",
     "S3_BUCKET_NAME",
     "DYNAMODB_TABLE_NAME",
@@ -34,38 +48,47 @@ _REQUIRED_VARS = (
 # Each maps to the set of acceptable URL schemes.
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _DB_SCHEMES = frozenset({"postgres", "postgresql"})
-
-# OCR engines: Tesseract everywhere; Amazon Rekognition only on real AWS (the
-# local emulator does not implement it), always with Tesseract as fallback.
-_OCR_ENGINES = frozenset({"tesseract", "rekognition"})
+_AMQP_SCHEMES = frozenset({"amqp", "amqps"})
 
 
 @dataclass(frozen=True)
 class Config:
     """Validated, immutable runtime configuration.
 
-    ``aws_endpoint_url`` is ``None`` when unset/empty, which directs the AWS
-    clients to the default AWS endpoints for ``aws_region`` (Req 15.2).
+    ``s3_endpoint_url`` and ``dynamodb_endpoint_url`` are ``None`` when
+    unset/empty, which directs the client to the default AWS endpoint for
+    ``aws_region``.
     """
 
-    aws_endpoint_url: str | None  # None => default AWS endpoints
     aws_region: str
     aws_access_key_id: str | None  # None => default boto3 credential chain
     aws_secret_access_key: str | None
     aws_session_token: str | None  # temporary credentials (AWS Academy)
-    sqs_queue_url: str
-    database_url: str
+    s3_endpoint_url: str | None  # None => real AWS S3
     s3_bucket_name: str
+    dynamodb_endpoint_url: str | None  # None => real AWS DynamoDB
     dynamodb_table_name: str
-    ocr_engine: str = "tesseract"  # "tesseract" | "rekognition" (AWS only)
+    rabbitmq_url: str
+    rabbitmq_queue_name: str
+    database_url: str
+
+    @property
+    def retry_queue_name(self) -> str:
+        """Holding queue: messages wait here (TTL) before returning to the main queue."""
+        return f"{self.rabbitmq_queue_name}-retry"
+
+    @property
+    def dlq_name(self) -> str:
+        """Dead-letter queue for messages the Worker gave up on."""
+        return f"{self.rabbitmq_queue_name}-dlq"
 
 
 class ConfigError(Exception):
     """Raised at startup when configuration is missing/empty or malformed.
 
     Collects *every* problem rather than failing on the first one, so the
-    operator sees the full list of missing variables (Req 14.2, Property 10)
-    and every invalid URL/connection string (Req 14.4, 15.3, 15.4) at once.
+    operator sees the full list of missing variables and every invalid
+    URL/connection string at once.
     """
 
     def __init__(
@@ -87,15 +110,25 @@ class ConfigError(Exception):
 
 
 def redact(value: str) -> str:
-    """Return a fixed redaction marker in place of a secret value (Req 14.5).
+    """Return a fixed redaction marker in place of a secret value.
 
-    Used whenever credentials (``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``,
-    or credentials embedded in ``DATABASE_URL``) might otherwise
-    appear in log output. The marker is a constant, so the original secret
-    substring can never leak through.
+    The marker is a constant, so the original secret substring can never leak
+    through.
     """
 
     return REDACTED
+
+
+def redact_url(url: str) -> str:
+    """Describe a connection URL without its credentials (``host:port/vhost``)."""
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:
+        return REDACTED
+    return f"{host}{port}{parsed.path}"
 
 
 def _clean(raw: str | None) -> str:
@@ -120,36 +153,35 @@ def _has_scheme(value: str, allowed: frozenset[str]) -> bool:
 
 
 def load_config(env: Mapping[str, str]) -> Config:
-    """Read and validate configuration from ``env`` (Req 14.1).
+    """Read and validate configuration from ``env``.
 
-    Reads every variable listed in Req 14.1. ``AWS_ENDPOINT_URL`` is optional
-    (absent/empty => default AWS endpoints, Req 14.3/15.2). Raises
-    :class:`ConfigError` listing every missing/empty required variable
-    (Req 14.2) and every malformed URL/connection string (Req 14.4, 15.3), and
-    aborts when both the endpoint and the region are absent (Req 15.4). On
-    success the loop may start; on failure the caller must exit non-zero.
+    ``S3_ENDPOINT_URL`` and ``DYNAMODB_ENDPOINT_URL`` are optional (absent/empty
+    => real AWS endpoints). Raises :class:`ConfigError` listing every
+    missing/empty required variable and every malformed URL/connection string.
+    On success the consumer may start; on failure the caller must exit non-zero.
     """
 
-    # Read all Req 14.1 variables.
-    endpoint = _clean(env.get("AWS_ENDPOINT_URL"))
     region = _clean(env.get("AWS_REGION"))
     access_key = _clean(env.get("AWS_ACCESS_KEY_ID"))
     secret_key = _clean(env.get("AWS_SECRET_ACCESS_KEY"))
     session_token = _clean(env.get("AWS_SESSION_TOKEN"))
-    sqs_queue_url = _clean(env.get("SQS_QUEUE_URL"))
+    rabbitmq_url = _clean(env.get("RABBITMQ_URL"))
+    queue_name = _clean(env.get("RABBITMQ_QUEUE_NAME")) or DEFAULT_QUEUE_NAME
     database_url = _clean(env.get("DATABASE_URL"))
+    s3_endpoint = _clean(env.get("S3_ENDPOINT_URL"))
     s3_bucket_name = _clean(env.get("S3_BUCKET_NAME"))
+    dynamodb_endpoint = _clean(env.get("DYNAMODB_ENDPOINT_URL"))
     dynamodb_table_name = _clean(env.get("DYNAMODB_TABLE_NAME"))
 
     values = {
         "AWS_REGION": region,
-        "SQS_QUEUE_URL": sqs_queue_url,
+        "RABBITMQ_URL": rabbitmq_url,
         "DATABASE_URL": database_url,
         "S3_BUCKET_NAME": s3_bucket_name,
         "DYNAMODB_TABLE_NAME": dynamodb_table_name,
     }
 
-    # Collect every missing/empty required variable (not first-fail, Req 14.2).
+    # Collect every missing/empty required variable (not first-fail).
     missing = [name for name in _REQUIRED_VARS if not values[name]]
     # Half a key pair is a misconfiguration: report the absent half.
     if access_key and not secret_key:
@@ -157,35 +189,32 @@ def load_config(env: Mapping[str, str]) -> Config:
     if secret_key and not access_key:
         missing.append("AWS_ACCESS_KEY_ID")
 
-    # Collect every malformed URL/connection string among the present values
-    # (Req 14.4, 15.3). Only validate a value when it is non-empty so a missing
-    # var is reported once (as missing) rather than twice.
+    # Collect every malformed URL/connection string among the present values.
+    # Only validate a value when it is non-empty so a missing var is reported
+    # once (as missing) rather than twice.
     invalid: list[str] = []
-    if sqs_queue_url and not _has_scheme(sqs_queue_url, _HTTP_SCHEMES):
-        invalid.append("SQS_QUEUE_URL")
+    if rabbitmq_url and not _has_scheme(rabbitmq_url, _AMQP_SCHEMES):
+        invalid.append("RABBITMQ_URL")
     if database_url and not _has_scheme(database_url, _DB_SCHEMES):
         invalid.append("DATABASE_URL")
-    # AWS_ENDPOINT_URL is optional, but when present it must be http/https
-    # (Req 15.3).
-    if endpoint and not _has_scheme(endpoint, _HTTP_SCHEMES):
-        invalid.append("AWS_ENDPOINT_URL")
-
-    ocr_engine = _clean(env.get("OCR_ENGINE")).lower() or "tesseract"
-    if ocr_engine not in _OCR_ENGINES:
-        invalid.append("OCR_ENGINE")
+    if s3_endpoint and not _has_scheme(s3_endpoint, _HTTP_SCHEMES):
+        invalid.append("S3_ENDPOINT_URL")
+    if dynamodb_endpoint and not _has_scheme(dynamodb_endpoint, _HTTP_SCHEMES):
+        invalid.append("DYNAMODB_ENDPOINT_URL")
 
     if missing or invalid:
         raise ConfigError(missing=missing, invalid=invalid)
 
     return Config(
-        aws_endpoint_url=endpoint or None,
         aws_region=region,
         aws_access_key_id=access_key or None,
         aws_secret_access_key=secret_key or None,
         aws_session_token=session_token or None,
-        sqs_queue_url=sqs_queue_url,
-        database_url=database_url,
+        s3_endpoint_url=s3_endpoint or None,
         s3_bucket_name=s3_bucket_name,
+        dynamodb_endpoint_url=dynamodb_endpoint or None,
         dynamodb_table_name=dynamodb_table_name,
-        ocr_engine=ocr_engine,
+        rabbitmq_url=rabbitmq_url,
+        rabbitmq_queue_name=queue_name,
+        database_url=database_url,
     )

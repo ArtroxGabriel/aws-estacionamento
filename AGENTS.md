@@ -2,132 +2,140 @@
 
 ## Project Overview
 
-- **Objetivo**: Sistema de Gestão de Vagas de Estacionamento integrando 6 serviços centrais da AWS (EC2, S3, RDS, ElastiCache, DynamoDB, SNS/SQS) com auto-recuperação e elasticidade horizontal (ALB + Auto Scaling Group de 1 a 3 instâncias).
-- **Contexto**: Trabalho Prático 1 da disciplina de Desenvolvimento de Software para Nuvem (UFC - Profs. Dr. Paulo A. L. Rego e Dr. Fernando Antonio Mota Trinta).
-- **Estágio**: Fase inicial de implementação com suporte a emulação local via Floci/Docker Compose e provisionamento real na AWS Academy.
+- **Objetivo**: Sistema de Gestão de Vagas de Estacionamento com duas cancelas (entrada e saída), caixa de pagamento, leitura assíncrona de placas por OCR e trilha de auditoria.
+- **Contexto**: Trabalhos Práticos 1 (AWS) e 2 (Docker Compose com alternativas open source) da disciplina de Desenvolvimento de Software para Nuvem (UFC - Profs. Dr. Paulo A. L. Rego e Dr. Fernando Antonio Mota Trinta).
+- **Estágio**: TP2. O sistema inteiro sobe com um `docker compose` (`infra/docker-compose.yaml`). O deploy do TP1 na AWS (`infra/*.tf`, `infra/aws`) ficou como histórico e não funciona com as imagens atuais (a API e o worker não usam mais SQS).
 
-## Mapeamento de Serviços AWS
+## Mapeamento de Serviços (TP1 → TP2)
 
-1. **EC2**: Instâncias (`t2.micro`/`t3.micro`) executando a API e o painel Web servido via container Docker, sob Application Load Balancer e Auto Scaling Group (1 a 3 réplicas).
-2. **Amazon RDS**: PostgreSQL (`db.t3.micro`, Single-AZ) para persistência transacional de vagas, sessões de permanência (`status`: `PARKED`, `PAID`; `plate_status`: `PENDING`, `READ`, `UNREADABLE`, `MANUAL`) e cálculo de tarifas.
-3. **Amazon S3**: Bucket para arquivos binários (fotos dos veículos capturadas na entrada).
-4. **Amazon ElastiCache**: Cluster Redis nó único (`cache.t3.micro`) mantendo em memória o mapa de vagas disponíveis para leituras de alta frequência e baixa latência.
-5. **Amazon DynamoDB**: Tabela em modo *Pay-Per-Request* para trilha de auditoria e log imutável de todas as ações de CRUD (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
-6. **Amazon SQS**: Desacoplamento assíncrono: API publica mensagem diretamente na fila SQS (`ocr-processamento-fila`, visibility timeout 300 s); o worker Python consome a fila, localiza a placa (OpenCV) e extrai o texto via OCR (Tesseract). Após 3 recebimentos sem sucesso a mensagem vai para a DLQ `ocr-processamento-fila-dlq`.
+| Papel | TP1 (AWS) | TP2 (Docker Compose) |
+|---|---|---|
+| Fotos dos veículos | Amazon S3 | **RustFS** (API S3, `:9000`, console `:9001`) |
+| Sessões e tarifas | Amazon RDS (PostgreSQL) | **PostgreSQL 16** (`:5432`) |
+| Vagas livres | ElastiCache (Redis) | **Redis 7** (`:6379`, chave `spots:available`) |
+| Fila de OCR | Amazon SQS + DLQ | **RabbitMQ** (`:5672`, painel `:15672`): `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` |
+| Auditoria | Amazon DynamoDB | **DynamoDB** (exigência 1.a), local com DynamoDB Local (`:8000`) |
+| OCR | Rekognition + Tesseract | **OpenCV + Tesseract** (sem AWS) |
+| Execução | EC2 + ALB + ASG | Containers `api` (`:8080`), `worker` e `web` (`:3000`) |
+
+Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pago) → `EXITED` (passou pela cancela de saída). `PARKED` e `PAID` ocupam vaga. A leitura da placa fica em `plate_status`: `PENDING` → `READ` | `UNREADABLE` (worker) ou `MANUAL` (caixa).
 
 ## Pipeline da Solução
 
 ```text
-[Totem/Web: React + Vite] ──> POST /entries (com foto)
-    ├── 1. API (Go) reserva a vaga no ElastiCache (lotado → 409)
-    ├── 2. Salva a imagem original no S3
-    ├── 3. Registra a sessão no RDS (status: "PARKED", plate_status: "PENDING")
-    ├── 4. Envia evento direto na fila SQS (fila fora do ar não derruba a entrada)
-    ├── 5. Grava log de auditoria no DynamoDB (ação: "ENTRY")
-    └── 6. Retorna o ticket, já válido para a saída
+[Cancela de entrada: /cancela-entrada] ──> POST /entries (com foto)
+    ├── 1. API (Go) reserva a vaga no Redis (lotado → 409)
+    ├── 2. Salva a foto no RustFS
+    ├── 3. Registra a sessão no Postgres (status "PARKED", plate_status "PENDING")
+    ├── 4. Publica {"session_id", "s3_key"} no RabbitMQ (fila fora do ar não derruba a entrada)
+    ├── 5. Grava auditoria no DynamoDB (ação "ENTRY")
+    └── 6. Retorna o ticket, já válido para pagar e sair
 
-[Worker Assíncrono: Python]  (só enriquece a sessão; não muda status nem vagas)
-    ├── Consome mensagens da fila SQS
-    ├── Baixa a foto do S3, redimensiona a imagem e roda o OCR (Tesseract)
-    ├── Grava a placa no RDS (plate_status "PENDING" → "READ")
-    └── Grava log de auditoria da placa processada no DynamoDB (ação: "OCR_PROCESSING")
+[Worker: Python]  (só enriquece a sessão; não muda status nem vagas)
+    ├── Consome ocr-processamento-fila (prefetch 1, ack manual)
+    ├── Baixa a foto do RustFS e roda o OCR (OpenCV + Tesseract)
+    ├── Grava a placa no Postgres (plate_status "PENDING" → "READ" ou "UNREADABLE")
+    ├── Grava auditoria "OCR_PROCESSING" ou "OCR_FAILED"
+    └── Falha transitória → fila -retry (x-attempt + 1); 3ª falha → -dlq ("POISON_MESSAGE")
 
-[Consulta de Vagas] ──> GET /spots/available
-    └── Responde instantaneamente direto da memória do ElastiCache
+[Painel: /] ──> GET /spots/available (Redis) e carros no pátio (PARKED e PAID)
 
-[Placa ilegível] ──> Worker grava plate_status "UNREADABLE" na 1ª entrega (auditoria "OCR_FAILED")
-    ├── A sessão continua "PARKED" e o ticket paga normalmente, sem ação do operador
-    └── Opcional: caixa digita a placa em PATCH /sessions/:id (plate_status "MANUAL", auditoria "PLATE_CORRECTION")
+[Caixa: /pagamento] ──> POST /exits/{id}/pay
+    ├── Tarifa fixa; status "PAID" e paid_at
+    ├── A vaga continua ocupada (o carro ainda está no pátio)
+    └── Auditoria "EXIT_PAYMENT"
+    Opcional: PATCH /sessions/{id} (placa digitada, "MANUAL", auditoria "PLATE_CORRECTION")
 
-[Foto de entrada] ──> GET /sessions/:id/photo (evidência exibida no caixa e na auditoria)
+[Cancela de saída: /cancela-saida]
+    ├── POST /barrier/exit/plate {"plate"}: só placa READ/MANUAL de carro no pátio, sem OCR na hora
+    ├── POST /barrier/exit/ticket {"ticket_id"}: funciona com qualquer plate_status
+    ├── PAID → "EXITED", exited_at, INCR spots:available, auditoria "EXIT_BARRIER_OPENED" (method plate|ticket)
+    └── Recusas com code: payment_pending (409), already_exited (409), plate_not_found / session_not_found (404)
 
-[Exclusão] ──> DELETE /sessions/:id (remove a sessão e a foto do S3, INCR se estava "PARKED", auditoria "SESSION_DELETE")
-
-[Saída/Pagamento] ──> POST /exits/:id/pay
-    ├── Calcula valor com base no tempo de permanência ou tarifa fixa no RDS
-    ├── Atualiza registro para "PAID" e libera a vaga no RDS
-    ├── Incrementa a contagem de vagas no ElastiCache
-    └── Grava log de auditoria da finalização no DynamoDB (ação: "EXIT_PAYMENT")
+[Foto de entrada] ──> GET /sessions/{id}/photo
+[Exclusão] ──> DELETE /sessions/{id} (apaga sessão e foto; INCR se PARKED ou PAID; auditoria "SESSION_DELETE")
 ```
 
 ## Tech Stack
 
-- **Orquestração e Ferramentas**: Taskfile (`task 3.53`), mise (Go 1.27, Python 3.14, Node 26, OpenTofu latest, UV 0.12)
-- **API Backend**: Go 1.27 (REST, AWS SDK v2, drivers Postgres e Redis)
-- **Worker Assíncrono**: Python 3.14 + `uv` (Boto3, Tesseract OCR, Pillow/OpenCV, driver PostgreSQL)
-- **Frontend**: React + Vite (Node 26)
-- **Infraestrutura**: OpenTofu + Docker Compose (Floci 4566 com emulação de S3, SQS, DynamoDB, RDS PostgreSQL 5432 e ElastiCache Redis 6379 via Docker socket)
+- **Orquestração e Ferramentas**: Docker Compose, Taskfile (`task 3.53`), mise (Go 1.27, Python 3.14, Node 26, OpenTofu latest, UV 0.12)
+- **API Backend**: Go 1.27 (REST, Uber Fx, AWS SDK v2 para S3/DynamoDB, `amqp091-go`, drivers Postgres e Redis)
+- **Worker Assíncrono**: Python 3.14 + `uv` (`pika`, Boto3, Tesseract OCR, Pillow/OpenCV, psycopg)
+- **Frontend**: React + Vite (Node 26), servido por nginx com proxy `/api/` → API
+- **Infraestrutura**: `infra/docker-compose.yaml` (TP2); OpenTofu em `infra/` e `infra/aws` (TP1, histórico)
 
 ## File Structure
 
 ```text
 .
-├── Taskfile.yaml           # Automação de tarefas (infra, dev, build)
+├── Taskfile.yaml           # Automação de tarefas (up/down/test, dev, AWS do TP1)
 ├── mise.toml               # Configuração de versões das ferramentas
 ├── api/                    # API REST em Go
 ├── worker/                 # Worker assíncrono OCR em Python
 ├── web/                    # Frontend React + Vite
-├── infra/                  # OpenTofu (módulo + Floci); aws/ = root da AWS; bootstrap/ = OIDC + state
-├── .github/                # Workflow "Deploy AWS" (OIDC)
+├── infra/                  # docker-compose.yaml + rabbitmq/ (TP2); OpenTofu do TP1 (aws/, bootstrap/)
+├── .kiro/specs/            # Especificações (requirements, design, tasks) do worker e da API/cancela
+├── .github/                # Workflow "Deploy AWS" (OIDC, TP1)
 ├── examples/               # Fotos, vídeo e datasets com gabarito (examples/README.md)
 ├── scripts/                # Smoke, avaliação de OCR, datasets; analise-ocr/ = simulações das decisões
-└── docs/                   # Especificação, GOAL, ARQUITETURA, DECISOES, DEPLOY-AWS, CHECKLIST-AWS
+└── docs/                   # Especificações, PLANO-TP2, ARQUITETURA, DECISOES, DEPLOY-AWS (TP1)
 ```
 
-- `api/`: API REST responsável pelas rotas `/entries`, `/spots/available`, `/sessions` e `/exits/{id}/pay`.
-- `worker/`: Worker consumidor da fila SQS para processar a foto no S3, rodar OCR e gravar a placa no RDS.
-- `web/`: Interface para o operador e totem de entrada.
-- `infra/`: Definições IaC (OpenTofu) e ambiente local (Docker Compose com Floci).
+- `api/`: rotas `/entries`, `/spots/available`, `/sessions`, `/exits/{id}/pay`, `/barrier/exit/plate`, `/barrier/exit/ticket`, `/audit`, `/health`.
+- `worker/`: consumidor da fila RabbitMQ `ocr-processamento-fila`; lê a placa e grava em `plate_status`.
+- `web/`: painel, cancela de entrada, caixa, cancela de saída e auditoria.
+- `infra/`: compose do TP2 e OpenTofu do TP1.
 
 ## Common Commands
 
-- **Ambiente Local Completo**:
-  - `task bootstrap:local`: Sobe containers e provisiona recursos no Floci
-  - `task infra:up` / `task infra:down` / `task infra:logs`
-- **OpenTofu**:
-  - `task tf:init`: Inicializa diretório OpenTofu
-  - `task tf:apply:local`: Provisiona no Floci (`use_localstack=true`)
-  - `task tf:apply:aws`: Provisiona recursos na AWS Academy
-  - `task tf:destroy:aws`: Destrói recursos na AWS Academy
-  - `task deploy:aws`: Deploy completo na AWS (ECR, imagens, infra, URL do ALB). Ver `docs/DEPLOY-AWS.md`
-  - GitHub Actions → *Deploy AWS* (apply/plan/destroy via OIDC). Pré-requisito: `task aws:bootstrap` + environment `aws` com `AWS_ROLE_ARN`
-- **Execução dos Serviços**:
-  - `task dev:api`: Executa a API Go
-  - `task dev:worker`: Executa o Worker Python
-  - `docker build -t estacionamento-worker ./worker` + `docker run --network container:floci_aws --env-file worker/floci.env estacionamento-worker`: Worker em container com Tesseract (ver `worker/README.md`)
-  - `task dev:web`: Inicia servidor local Vite (proxy `/api` → `localhost:8080`)
-  - `task install:web` / `task test:web` / `task lint:web`: Dependências, testes (Vitest) e lint do frontend
-  - `task build:web`: Gera bundle estático do frontend
-  - `docker build -t estacionamento-web ./web`: Frontend em nginx com proxy `/api/` → `API_UPSTREAM` (ver `web/AGENTS.md`)
+- **Sistema inteiro (TP2)**:
+  - `task up` (`cd infra && docker compose up -d --build`): sobe tudo; web em `http://localhost:3000`, API em `:8080`, RabbitMQ em `:15672` (guest/guest), RustFS em `:9001` (minioadmin/minioadmin)
+  - `task down` / `task logs`: encerra (os volumes ficam) / acompanha os logs
+  - `task test`: testes da API, do worker e do web
+- **Desenvolvimento fora dos containers**:
+  - `task infra:up`: sobe só as dependências (Postgres, Redis, RabbitMQ, RustFS, DynamoDB Local)
+  - `task dev:api` / `task dev:worker` / `task dev:web` (Vite em `:5173`, proxy `/api` → `:8080`)
+  - `task test:api` / `task test:worker` / `task test:web` / `task lint:web` / `task build:web`
+- **AWS (TP1, histórico)**: `task tf:apply:aws`, `task deploy:aws`, `task tf:destroy:aws` (ver `docs/DEPLOY-AWS.md`). Não funcionam com as imagens do TP2.
 
 ## Environment / Setup
 
-Configurar variáveis locais no `.env`:
+O compose já define todas as variáveis. Para `task dev:*`, o Taskfile aponta para os serviços do compose em `localhost`:
 
-- `AWS_ENDPOINT_URL=http://localhost:4566`
 - `DATABASE_URL=postgres://app_user:app_password@localhost:5432/estacionamento?sslmode=disable`
 - `REDIS_URL=localhost:6379`
-- `AWS_DEFAULT_REGION=us-east-1`
+- `RABBITMQ_URL=amqp://guest:guest@localhost:5672/`, `RABBITMQ_QUEUE_NAME=ocr-processamento-fila`
+- `S3_ENDPOINT_URL=http://localhost:9000`, `S3_BUCKET_NAME=estacionamento-fotos-veiculos-local`
+- `DYNAMODB_ENDPOINT_URL=http://localhost:8000`, `DYNAMODB_TABLE_NAME=AuditoriaEstacionamento`
+- `AWS_REGION=us-east-1`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=minioadmin`
+
+Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `REDIS_URL` (no worker) não são mais lidos.
 
 ## Architecture Conventions
 
-- **O ticket identifica o carro** (`docs/DECISOES.md`, D20): a sessão nasce `PARKED`, com a vaga reservada, e é pagável pelo ticket (ID da sessão) desde a emissão. A foto e a placa são evidência para a auditoria e atalho para achar o ticket; nenhuma regra pode exigir placa lida para o carro pagar ou sair.
-- **Desacoplamento Assíncrono**: O upload e entrada do veículo **nunca** executam OCR de forma síncrona. A API grava no S3, publica na fila SQS e libera a requisição HTTP.
-- **Auditoria Imutável**: Toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `EXIT_PAYMENT`).
-- **Cache de Alta Frequência**: A consulta de vagas disponíveis bate exclusivamente no ElastiCache (Redis).
-- **Consistência de Contadores**: Só a API mexe em `spots:available`: reserva atômica na entrada (`POST /entries`) e incremento na liberação da vaga após o pagamento. O worker não usa Redis.
+- **O ticket identifica o carro** (`docs/DECISOES.md`, D20): a sessão nasce `PARKED`, com a vaga reservada, e é pagável pelo ticket (ID da sessão) desde a emissão. A foto e a placa são evidência para a auditoria e atalho na cancela de saída; nenhuma regra pode exigir placa lida para o carro pagar ou sair. A saída pelo ticket sempre funciona para um carro `PAID`.
+- **Duas cancelas** (`docs/DECISOES.md`, D15 e D21): pagar não libera a vaga; ela volta quando o carro passa pela cancela de saída (`PAID` → `EXITED`). A transição é um `UPDATE ... WHERE status = 'PAID'`, e só quem mudou a linha incrementa o contador: a vaga sai uma vez só.
+- **Desacoplamento Assíncrono**: entrada e saída **nunca** executam OCR de forma síncrona. A API grava a foto, publica na fila e libera a requisição; a cancela de saída recebe a placa já reconhecida.
+- **Topologia do RabbitMQ**: declarada só em `infra/rabbitmq/definitions.json`. API e worker fazem declaração passiva; declarar com outros argumentos causa `PRECONDITION_FAILED`.
+- **Auditoria Imutável**: toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `OCR_FAILED`, `POISON_MESSAGE`, `EXIT_PAYMENT`, `EXIT_BARRIER_OPENED`, `PLATE_CORRECTION`, `SESSION_DELETE`).
+- **Cache de Alta Frequência**: a consulta de vagas disponíveis bate no Redis. Sem a chave, a API recalcula pelo Postgres (`total - COUNT(status IN ('PARKED','PAID'))`).
+- **Consistência de Contadores**: só a API mexe em `spots:available`: reserva atômica na entrada (`POST /entries`) e incremento na cancela de saída (ou na exclusão de um carro no pátio). O worker não usa Redis.
 
 ## Known Gotchas
 
-- **Local x AWS no OpenTofu**: o Floci usa o state local em `infra/`; a AWS usa `infra/aws`, com state remoto no S3 compartilhado com o GitHub Actions. Use sempre as tasks `tf:*:local` / `tf:*:aws`.
-- **Créditos AWS Academy**: Sempre executar `task tf:destroy:aws` ao encerrar os testes em nuvem.
-- **Ordem de Inicialização**: Executar `task bootstrap:local` antes de rodar API ou Worker localmente.
-- **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432` e o RDS do Floci recusa a senha. Pare o serviço ou rode API/Worker em containers com `--network container:floci_aws` (ver `worker/README.md`).
-- **Parar o Worker**: use `docker stop -t 30`; o worker espera o long poll do SQS em andamento terminar (até 20 s) para não perder mensagens.
-- **Redis após reiniciar o Docker**: o Floci recupera os metadados do ElastiCache mas não religa o proxy da 6379 (`Connection closed by server`). Recrie o recurso: `tofu apply -var="use_localstack=true" -replace=aws_elasticache_replication_group.redis`.
+- **Porta 8080**: a API do compose e o `task dev:api` usam a mesma porta. Pare o container `estacionamento_api` antes de rodar a API fora dele.
+- **Postgres local na porta 5432**: um PostgreSQL instalado no Windows intercepta `localhost:5432`. Pare o serviço ou use o sistema todo em containers (`task up`).
+- **Parar o Worker**: use `docker stop -t 30` (o compose já define `stop_grace_period: 30s`); o worker termina a mensagem em andamento, confirma (`ack`) e sai. O que o broker não entregou continua na fila.
+- **Fila do RabbitMQ**: as filas `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` vêm de `infra/rabbitmq/definitions.json`; o worker sai com código 2 se faltar alguma. Sem o broker, a API continua aceitando entradas e a placa fica `UNREADABLE`.
+- **Healthcheck do RabbitMQ**: usa `check_port_connectivity`. O `ping` fica saudável antes de a porta 5672 aceitar conexões, e API e worker tomavam "connection refused" na subida.
+- **Migrações com dados antigos**: a `000003` converte sessões `PAID` antigas em `EXITED` (pela regra anterior, já tinham saído). O rollback (`down`) faz o caminho inverso; depois dele, apague `spots:available` para a API recalcular.
+- **Deploy do TP1**: o `user_data` do OpenTofu ainda exporta `SQS_QUEUE_URL`/`OCR_ENGINE`. As imagens atuais da API e do worker não processam fotos nesse deploy. Se for usá-lo, `task tf:destroy:aws` ao terminar (créditos da AWS Academy).
 
 ## Changelog
 
+- 2026-11-17: API e cancela de saída do TP2 (`.kiro/specs/api-rabbitmq-exit-barrier`): status `EXITED` e `paid_at` (migração 000003), pagamento sem liberar a vaga, `POST /barrier/exit/plate` e `/ticket`, páginas `/cancela-entrada`, `/pagamento` e `/cancela-saida`, serviços `api` e `web` no compose, `task up/down/logs/test`, healthcheck do RabbitMQ por porta. Este arquivo passou a descrever o TP2.
+- 2026-11-16: API migrada para o TP2, fase 1 (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ no lugar do SQS e usa `S3_ENDPOINT_URL`/`DYNAMODB_ENDPOINT_URL`. O fluxo foto → API → fila → worker → placa volta a fechar no compose. O deploy do TP1 na AWS (`infra/*.tf`) não funciona com as imagens novas.
+- 2026-11-16: Worker migrado para o TP2 (`docs/PLANO-TP2-WORKER.md`): consome o RabbitMQ (`prefetch=1`, fila de espera com TTL e DLQ, `x-attempt`), S3 e DynamoDB com endpoints próprios, sem Rekognition (`OCR_ENGINE` e `worker/floci.env` removidos), serviço `worker` no `infra/docker-compose.yaml`.
 - 2026-11-16: O ticket passa a identificar o carro: sessão `PARKED` e vaga reservada na entrada, `plate_status` separado do `status`, pátio lotado devolve 409, foto servida em `GET /sessions/{id}/photo`, worker sem Redis (`docs/DECISOES.md`, D20).
 
 - 2026-10-04: Datasets versionados (1.000 recortes do Roboflow + 400 sintéticas, com respostas guardadas), scripts de análise em `scripts/analise-ocr/`, `docs/ARQUITETURA.md` com o antes × depois.

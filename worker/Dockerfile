@@ -33,7 +33,7 @@ RUN apt-get update && \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY config.py parser.py worker.py ./
+COPY config.py parser.py processor.py consumer.py worker.py ./
 COPY ocr ./ocr
 COPY storage ./storage
 
@@ -43,9 +43,9 @@ ENV PATH="/opt/venv/bin:${PATH}" \
 
 USER 10001:10001
 
-# O Poller trata SIGTERM/SIGINT (Req 16): espera o long poll do SQS terminar
-# (até 20 s), termina a mensagem em processamento e devolve o resto à fila.
-# Pare com um timeout maior que isso: `docker stop -t 30`.
+# O consumidor trata SIGTERM/SIGINT: termina a mensagem em processamento, confirma
+# (ack) e sai; o que o broker ainda não entregou continua na fila. O tempo máximo
+# é o de uma mensagem (S3 + OCR + bancos), então pare com `docker stop -t 30`.
 STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["tini", "--", "python", "worker.py"]

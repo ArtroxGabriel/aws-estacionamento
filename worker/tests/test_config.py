@@ -1,8 +1,7 @@
 """Config_Loader and AWS client factory tests.
 
 Feature: python-ocr-worker, Property 10: Missing-variable reporting is complete.
-Feature: python-ocr-worker, Property 12: Uniform endpoint resolution across AWS
-clients.
+Feature: python-ocr-worker, Property 12: Each service client resolves its own endpoint.
 """
 
 from __future__ import annotations
@@ -12,12 +11,12 @@ from fakes import BASE_ENV
 from hypothesis import given
 from hypothesis import strategies as st
 
-from config import ConfigError, load_config
+from config import REDACTED, ConfigError, load_config, redact_url
 from storage import clients
 
 ALWAYS_REQUIRED = (
     "AWS_REGION",
-    "SQS_QUEUE_URL",
+    "RABBITMQ_URL",
     "DATABASE_URL",
     "S3_BUCKET_NAME",
     "DYNAMODB_TABLE_NAME",
@@ -71,9 +70,11 @@ def test_every_missing_variable_is_reported(missing):
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("AWS_ENDPOINT_URL", "localhost:4566"),
+        ("S3_ENDPOINT_URL", "localhost:9000"),
+        ("DYNAMODB_ENDPOINT_URL", "dynamodb-local:8000"),
         ("DATABASE_URL", "mysql://u:p@h/db"),
-        ("SQS_QUEUE_URL", "ocr-processamento-fila"),
+        ("RABBITMQ_URL", "http://localhost:5672"),
+        ("RABBITMQ_URL", "rabbitmq:5672"),
     ],
 )
 def test_malformed_urls_are_rejected(name, value):
@@ -82,49 +83,71 @@ def test_malformed_urls_are_rejected(name, value):
     assert err.value.invalid == [name]
 
 
-def build_all(cfg):
-    return [clients.s3_client(cfg), clients.sqs_client(cfg), clients.dynamodb_client(cfg)]
+@pytest.mark.parametrize("url", ["amqp://u:p@rabbitmq:5672/", "amqps://u:p@broker.example/vh"])
+def test_amqp_and_amqps_are_accepted(url):
+    assert load_config({**BASE_ENV, "RABBITMQ_URL": url}).rabbitmq_url == url
 
 
-def test_all_clients_share_the_custom_endpoint():
+def test_queue_names_derive_from_the_main_queue():
     cfg = load_config(BASE_ENV)
 
-    assert {c.meta.endpoint_url for c in build_all(cfg)} == {"http://localhost:4566"}
+    assert cfg.rabbitmq_queue_name == "ocr-processamento-fila"
+    assert cfg.retry_queue_name == "ocr-processamento-fila-retry"
+    assert cfg.dlq_name == "ocr-processamento-fila-dlq"
+
+    renamed = load_config({**BASE_ENV, "RABBITMQ_QUEUE_NAME": "fila-x"})
+    assert (renamed.retry_queue_name, renamed.dlq_name) == ("fila-x-retry", "fila-x-dlq")
 
 
-def test_all_clients_use_default_aws_endpoints_without_override(monkeypatch):
+def test_broker_credentials_never_reach_the_logs():
+    cfg = load_config({**BASE_ENV, "RABBITMQ_URL": "amqp://admin:s3cr3t@rabbitmq:5672/vh"})
+
+    described = redact_url(cfg.rabbitmq_url)
+
+    assert described == "rabbitmq:5672/vh"
+    assert "s3cr3t" not in described and "admin" not in described
+    assert redact_url("amqp://u:p@h:notaport/") == REDACTED
+
+
+def test_each_service_has_its_own_endpoint():
+    cfg = load_config(BASE_ENV)
+
+    assert clients.s3_client(cfg).meta.endpoint_url == "http://localhost:9000"
+    assert clients.dynamodb_client(cfg).meta.endpoint_url == "http://localhost:8000"
+
+
+def test_s3_uses_path_style_addressing_for_local_storage():
+    """A local S3-compatible storage does not resolve ``bucket.host``."""
+    cfg = load_config(BASE_ENV)
+
+    assert clients.s3_client(cfg).meta.config.s3["addressing_style"] == "path"
+
+
+def test_services_fall_back_to_real_aws_independently(monkeypatch):
     # boto3 itself honors AWS_ENDPOINT_URL from the process environment.
     monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
-    cfg = load_config({**BASE_ENV, "AWS_ENDPOINT_URL": ""})
+    only_s3_local = load_config({**BASE_ENV, "DYNAMODB_ENDPOINT_URL": ""})
 
-    for client in build_all(cfg):
-        assert client.meta.endpoint_url.endswith(".amazonaws.com")
-        assert client.meta.region_name == "us-east-1"
+    assert clients.s3_client(only_s3_local).meta.endpoint_url == "http://localhost:9000"
+    dynamodb = clients.dynamodb_client(only_s3_local)
+    assert dynamodb.meta.endpoint_url.endswith(".amazonaws.com")
+    assert dynamodb.meta.region_name == "us-east-1"
 
-
-def test_redis_is_not_part_of_the_configuration():
-    """The spot is taken by the API at the entry; the Worker has no counter to
-    touch, so it must start without any Redis setting."""
-    cfg = load_config(BASE_ENV)
-
-    assert "REDIS_URL" not in BASE_ENV
-    assert not hasattr(cfg, "redis_url")
+    only_dynamodb_local = load_config({**BASE_ENV, "S3_ENDPOINT_URL": ""})
+    assert clients.s3_client(only_dynamodb_local).meta.endpoint_url.endswith(".amazonaws.com")
 
 
-def test_leftover_redis_url_is_ignored():
-    """Deployments that still export REDIS_URL keep starting."""
-    load_config({**BASE_ENV, "REDIS_URL": "not-even-a-url"})
+def test_removed_settings_are_ignored_not_required():
+    """Leftovers of the SQS/Rekognition/Redis era must not stop the Worker."""
+    cfg = load_config(
+        {
+            **BASE_ENV,
+            "SQS_QUEUE_URL": "not-a-url",
+            "AWS_ENDPOINT_URL": "not-a-url",
+            "OCR_ENGINE": "rekognition",
+            "REDIS_URL": "not-a-url",
+        }
+    )
 
-
-def test_ocr_engine_defaults_to_tesseract():
-    assert load_config(BASE_ENV).ocr_engine == "tesseract"
-
-
-def test_ocr_engine_accepts_rekognition_case_insensitive():
-    assert load_config({**BASE_ENV, "OCR_ENGINE": " Rekognition "}).ocr_engine == "rekognition"
-
-
-def test_unknown_ocr_engine_is_rejected():
-    with pytest.raises(ConfigError) as excinfo:
-        load_config({**BASE_ENV, "OCR_ENGINE": "bedrock"})
-    assert "OCR_ENGINE" in excinfo.value.invalid
+    for removed in ("sqs_queue_url", "aws_endpoint_url", "ocr_engine", "redis_url"):
+        assert not hasattr(cfg, removed)

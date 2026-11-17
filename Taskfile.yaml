@@ -26,10 +26,32 @@ tasks:
     cmds:
       - task --list
 
-  infra:up:
-    desc: Sobe as dependências locais via Docker Compose (Postgres, Redis, RabbitMQ, RustFS, DynamoDB Local)
+  up:
+    desc: "Sobe o sistema inteiro (API, worker, web e dependências) e reconstrói as imagens. Web em http://localhost:3000"
     cmds:
-      - docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d --build
+
+  down:
+    desc: Encerra o sistema inteiro (os volumes com os dados ficam)
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} down
+
+  logs:
+    desc: Acompanha os logs de todos os serviços
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+
+  test:
+    desc: Executa os testes da API, do worker e do frontend
+    cmds:
+      - task: test:api
+      - task: test:worker
+      - task: test:web
+
+  infra:up:
+    desc: Sobe só as dependências locais (Postgres, Redis, RabbitMQ, RustFS, DynamoDB Local), para rodar API e worker com dev:*
+    cmds:
+      - docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d postgres redis rabbitmq rustfs createbuckets dynamodb-local createtables
 
   infra:down:
     desc: Encerra os containers locais
@@ -234,20 +256,13 @@ tasks:
           estacionamento-worker:local gerar_sinteticas.py examples/dataset/sintetico {{.N}}
 
   ocr:dataset:
-    desc: "Mede o OCR em todo o dataset, listando só os erros (ENGINE=rekognition usa a AWS como em produção)"
+    desc: "Mede o OCR (OpenCV + Tesseract) em todo o dataset, listando só os erros"
     vars:
-      ENGINE: '{{.ENGINE | default "tesseract"}}'
       DIRS: '{{.DIRS | default "examples/fotos examples/dataset/openalpr-br examples/dataset/sintetico"}}'
     cmds:
       - docker build -q -t estacionamento-worker:local ./worker
       - |
-        {{.AWS_REAL}}
-        ENV_FILE=$(mktemp)
-        if [ "{{.ENGINE}}" != "tesseract" ]; then aws configure export-credentials --format env-no-export > "$ENV_FILE"; fi
-        docker run --rm --entrypoint python --env-file "$ENV_FILE" -e OMP_THREAD_LIMIT=1 \
-          -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro" \
-          estacionamento-worker:local ocr_local.py --erros --engine {{.ENGINE}} {{.DIRS}}
-        rm -f "$ENV_FILE"
+        docker run --rm --entrypoint python -e OMP_THREAD_LIMIT=1           -v "$PWD/examples:/app/examples:ro" -v "$PWD/scripts/ocr_local.py:/app/ocr_local.py:ro"           estacionamento-worker:local ocr_local.py --erros {{.DIRS}}
 
   load:aws:
     desc: "Gera carga HTTP no ALB para o vídeo de elasticidade (ex.: task load:aws MINUTES=8 CONCURRENCY=600)"
@@ -323,6 +338,12 @@ tasks:
       DATABASE_URL: postgresql://app_user:app_password@localhost:5432/estacionamento
     cmds:
       - uv run python worker.py
+
+  test:worker:
+    desc: Executa os testes do worker Python
+    dir: "{{.WORKER_DIR}}"
+    cmds:
+      - uv run pytest
 
   install:web:
     desc: Instala as dependências do frontend a partir do package-lock.json

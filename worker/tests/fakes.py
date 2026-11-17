@@ -1,9 +1,9 @@
-"""In-memory fakes for the Poller's connectors.
+"""In-memory fakes for the processor's connectors and for RabbitMQ.
 
-They model only the behavior the Poller relies on: the RDS plate transition
-with commit/rollback semantics, the DynamoDB audit trail, and the SQS delete
-call. Each fake can be told to fail the next N calls so tests can
-inject failures at any step of the pipeline.
+They model only the behavior the Worker relies on: the RDS plate transition with
+commit/rollback semantics, the DynamoDB audit trail, and the pika channel/
+connection used by the consumer. Each fake can be told to fail the next N calls
+so tests can inject failures at any step.
 """
 
 from __future__ import annotations
@@ -11,14 +11,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
+from pika.exceptions import ChannelClosedByBroker, UnroutableError
+
 from config import Config, load_config
+from consumer import RabbitConsumer
 from ocr.clean import PlateResult
 from ocr.processor import OcrResult
+from processor import MessageProcessor
 from storage.audit import AuditWriteError
 from storage.session_repo import SessionRow
-from worker import Poller
 
 SESSION_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
 S3_KEY = f"photos/{SESSION_ID}_frente.jpg"
@@ -92,39 +96,111 @@ class FakeS3:
         return b"image-bytes"
 
 
-class FakeSQS:
-    def __init__(self) -> None:
-        self.deleted: list[str] = []
-        self.released: list[str] = []
-        self.receives = 0
-        # Each receive pops the next batch; ``on_receive`` runs inside the call
-        # (e.g. to deliver a stop signal while the long poll is blocked).
-        self.batches: list[list[dict]] = []
-        self.on_receive = None
+class FakeChannel:
+    """The slice of a pika ``BlockingChannel`` the consumer uses.
 
-    def receive_message(self, **kwargs) -> dict:
-        self.receives += 1
-        if self.on_receive is not None:
-            self.on_receive()
-        return {"Messages": self.batches.pop(0) if self.batches else []}
+    ``start_consuming`` delivers the queued messages to the registered callback,
+    one at a time, like ``prefetch_count=1``, until ``stop_consuming`` is called
+    or the backlog runs out (then it blocks forever in real life; here it returns
+    so tests finish).
+    """
 
-    def delete_message(self, QueueUrl: str, ReceiptHandle: str) -> None:  # noqa: N803
-        self.deleted.append(ReceiptHandle)
+    def __init__(self, existing_queues: set[str] | None = None) -> None:
+        self.existing_queues = existing_queues
+        self.backlog: list[tuple[bytes, dict | None]] = []
+        self.published: list[dict] = []
+        self.acked: list[int] = []
+        self.nacked: list[tuple[int, bool]] = []
+        self.qos: int | None = None
+        self.confirm = False
+        self.consuming = False
+        self.is_open = True
+        self.callback = None
+        self.queue = None
+        self.fail_publish = 0
+        self.on_deliver = None  # runs right before each delivery (e.g. a stop signal)
+        self.on_idle = None  # runs when the backlog is empty (real life: blocks until a stop)
+        self._tag = 0
 
-    def change_message_visibility_batch(self, QueueUrl: str, Entries: list[dict]) -> None:  # noqa: N803
-        assert all(e["VisibilityTimeout"] == 0 for e in Entries)
-        self.released.extend(e["ReceiptHandle"] for e in Entries)
+    def queue_declare(self, queue: str, passive: bool = False, **_kw) -> None:
+        if self.existing_queues is not None and queue not in self.existing_queues:
+            raise ChannelClosedByBroker(404, f"NOT_FOUND - no queue '{queue}'")
+
+    def confirm_delivery(self) -> None:
+        self.confirm = True
+
+    def basic_qos(self, prefetch_count: int) -> None:
+        self.qos = prefetch_count
+
+    def basic_consume(self, queue: str, on_message_callback) -> None:
+        self.queue = queue
+        self.callback = on_message_callback
+
+    def basic_ack(self, delivery_tag: int) -> None:
+        self.acked.append(delivery_tag)
+
+    def basic_nack(self, delivery_tag: int, requeue: bool = True) -> None:
+        self.nacked.append((delivery_tag, requeue))
+
+    def basic_publish(self, exchange, routing_key, body, properties, mandatory=False) -> None:
+        if self.fail_publish:
+            self.fail_publish -= 1
+            raise UnroutableError([])
+        self.published.append(
+            {
+                "queue": routing_key,
+                "body": body,
+                "headers": dict(properties.headers or {}),
+                "delivery_mode": properties.delivery_mode,
+                "mandatory": mandatory,
+            }
+        )
+
+    def start_consuming(self) -> None:
+        self.consuming = True
+        while self.consuming and self.backlog:
+            if self.on_deliver is not None:
+                self.on_deliver()
+            body, headers = self.backlog.pop(0)
+            self._tag += 1
+            method = SimpleNamespace(delivery_tag=self._tag)
+            props = SimpleNamespace(headers=headers, content_type="application/json")
+            self.callback(self, method, props, body)
+        if self.consuming and self.on_idle is not None:
+            self.on_idle()
+        self.consuming = False
+
+    def stop_consuming(self) -> None:
+        self.consuming = False
+
+
+class FakeConnection:
+    def __init__(self, channel: FakeChannel) -> None:
+        self._channel = channel
+        self.is_open = True
+        self.callbacks: list = []
+
+    def channel(self) -> FakeChannel:
+        return self._channel
+
+    def add_callback_threadsafe(self, callback) -> None:
+        self.callbacks.append(callback)
+        callback()  # the real one runs it on the connection thread; same effect here
+
+    def close(self) -> None:
+        self.is_open = False
 
 
 BASE_ENV = {
-    "AWS_ENDPOINT_URL": "http://localhost:4566",
     "AWS_REGION": "us-east-1",
     "AWS_ACCESS_KEY_ID": "test",
     "AWS_SECRET_ACCESS_KEY": "test",
-    "SQS_QUEUE_URL": "http://localhost:4566/000000000000/ocr-processamento-fila",
-    "DATABASE_URL": "postgresql://u:p@localhost:5432/db",
+    "S3_ENDPOINT_URL": "http://localhost:9000",
     "S3_BUCKET_NAME": "bucket",
+    "DYNAMODB_ENDPOINT_URL": "http://localhost:8000",
     "DYNAMODB_TABLE_NAME": "AuditoriaEstacionamento",
+    "RABBITMQ_URL": "amqp://guest:guest@localhost:5672/",
+    "DATABASE_URL": "postgresql://u:p@localhost:5432/db",
 }
 
 
@@ -132,14 +208,8 @@ def make_config(**overrides: str) -> Config:
     return load_config({**BASE_ENV, **overrides})
 
 
-def make_message(body: str | None = None, receive_count: int = 1, handle: str = "rh-1") -> dict:
-    if body is None:
-        body = f'{{"session_id": "{SESSION_ID}", "s3_key": "{S3_KEY}"}}'
-    return {
-        "Body": body,
-        "ReceiptHandle": handle,
-        "Attributes": {"ApproximateReceiveCount": str(receive_count)},
-    }
+def make_body(session_id: str = SESSION_ID, s3_key: str = S3_KEY) -> str:
+    return f'{{"session_id": "{session_id}", "s3_key": "{s3_key}"}}'
 
 
 def pending_row(session_id: str = SESSION_ID, status: str = "PARKED") -> SessionRow:
@@ -153,16 +223,15 @@ def pending_row(session_id: str = SESSION_ID, status: str = "PARKED") -> Session
     )
 
 
-def make_poller(
+def make_processor(
     sessions: FakeSessionRepository | None = None,
     audit: FakeAuditLogger | None = None,
     plate: str | None = "ABC1D23",
     s3: Any = None,
     ocr: Any = None,
-) -> tuple[Poller, FakeSessionRepository, FakeAuditLogger, FakeSQS]:
+) -> tuple[MessageProcessor, FakeSessionRepository, FakeAuditLogger]:
     sessions = sessions or FakeSessionRepository({SESSION_ID: pending_row()})
     audit = audit or FakeAuditLogger()
-    sqs = FakeSQS()
     s3 = s3 or FakeS3()
 
     def fake_ocr(_image: bytes) -> OcrResult:
@@ -173,13 +242,32 @@ def make_poller(
             return PlateResult(ok=False, plate=None, reason="no_match")
         return PlateResult(ok=True, plate=plate, reason=None)
 
-    poller = Poller(
-        cfg=make_config(),
-        sqs=sqs,
+    processor = MessageProcessor(
         s3=s3,
         sessions=sessions,
         audit=audit,
         ocr=ocr or fake_ocr,
         normalizer=fake_normalizer,
     )
-    return poller, sessions, audit, sqs
+    return processor, sessions, audit
+
+
+def make_consumer(
+    processor: MessageProcessor,
+    channel: FakeChannel | None = None,
+    connect=None,
+) -> tuple[RabbitConsumer, FakeChannel, list[float]]:
+    """A consumer wired to a fake broker; ``sleeps`` records the back-off waits."""
+    channel = channel or FakeChannel()
+    sleeps: list[float] = []
+    consumer = RabbitConsumer(
+        make_config(),
+        processor,
+        connect=connect or (lambda: FakeConnection(channel)),
+        sleep=sleeps.append,
+    )
+    # Real consumption blocks until a stop; once the backlog is drained the fake
+    # delivers the "SIGTERM" that ends the run.
+    if channel.on_idle is None:
+        channel.on_idle = consumer.request_stop
+    return consumer, channel, sleeps

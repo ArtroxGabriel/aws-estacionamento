@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -19,7 +20,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
@@ -38,14 +38,13 @@ func main() {
 			// 3. AWS Infrastructure
 			NewAWSConfig,
 			NewS3Client,
-			NewSQSClient,
 			NewDynamoDBClient,
 
 			// 4. Repositories & Adapters (defined in internal/repository)
 			fx.Annotate(repository.NewPostgresSessionRepo, fx.As(new(repository.SessionRepository))),
 			fx.Annotate(repository.NewRedisSpotsRepo, fx.As(new(repository.SpotsRepository))),
 			fx.Annotate(repository.NewS3BlobStorage, fx.As(new(repository.BlobStorage))),
-			fx.Annotate(repository.NewSQSEventPublisher, fx.As(new(repository.EventPublisher))),
+			fx.Annotate(repository.NewRabbitMQEventPublisher, fx.As(new(repository.EventPublisher))),
 			fx.Annotate(repository.NewDynamoDBAuditLogger, fx.As(new(repository.AuditLogger))),
 
 			// 5. Service (defined in internal/service)
@@ -92,26 +91,19 @@ func NewAWSConfig(cfg config.Config) (aws.Config, error) {
 
 func NewS3Client(awsCfg aws.Config, cfg config.Config) *s3.Client {
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		// Path-style only for emulators (Floci); real S3 uses virtual-hosted style.
-		if cfg.AWSEndpointURL != "" {
+		// Path-style only for an S3-compatible storage (RustFS); real S3 uses
+		// virtual-hosted style.
+		if cfg.S3EndpointURL != "" {
 			o.UsePathStyle = true
-			o.BaseEndpoint = &cfg.AWSEndpointURL
-		}
-	})
-}
-
-func NewSQSClient(awsCfg aws.Config, cfg config.Config) *sqs.Client {
-	return sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		if cfg.AWSEndpointURL != "" {
-			o.BaseEndpoint = &cfg.AWSEndpointURL
+			o.BaseEndpoint = &cfg.S3EndpointURL
 		}
 	})
 }
 
 func NewDynamoDBClient(awsCfg aws.Config, cfg config.Config) *dynamodb.Client {
 	return dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) {
-		if cfg.AWSEndpointURL != "" {
-			o.BaseEndpoint = &cfg.AWSEndpointURL
+		if cfg.DynamoDBEndpointURL != "" {
+			o.BaseEndpoint = &cfg.DynamoDBEndpointURL
 		}
 	})
 }
@@ -123,6 +115,8 @@ func RegisterLifecycle(
 	db *sql.DB,
 	rdb *redis.Client,
 	mux *http.ServeMux,
+	storage repository.BlobStorage,
+	publisher repository.EventPublisher,
 	cfg config.Config,
 ) {
 	server := &http.Server{
@@ -146,6 +140,13 @@ func RegisterLifecycle(
 				go retryMigrations(migrateCtx, db)
 			}
 
+			ensureBucket(ctx, storage, cfg)
+			if cfg.RabbitMQURL == "" {
+				log.Println("[WARN] RABBITMQ_URL is not set: photos will not be queued for OCR")
+			} else {
+				log.Printf("[INFO] OCR tasks go to queue %s at %s", cfg.RabbitMQQueueName, repository.RedactURL(cfg.RabbitMQURL))
+			}
+
 			ln, err := net.Listen("tcp", server.Addr)
 			if err != nil {
 				return err
@@ -163,11 +164,35 @@ func RegisterLifecycle(
 			log.Println("[INFO] Shutting down application gracefully...")
 			stopMigrations()
 			_ = server.Shutdown(ctx)
+			if closer, ok := publisher.(io.Closer); ok {
+				_ = closer.Close()
+			}
 			_ = db.Close()
 			_ = rdb.Close()
 			return nil
 		},
 	})
+}
+
+// ensureBucket creates the photo bucket on an S3-compatible storage (RustFS).
+// On real AWS the bucket belongs to the infrastructure code and is not touched.
+// A failure is only logged: the compose also creates the bucket, and the
+// storage may still be starting.
+func ensureBucket(ctx context.Context, storage repository.BlobStorage, cfg config.Config) {
+	if cfg.S3EndpointURL == "" {
+		return
+	}
+	ensurer, ok := storage.(interface {
+		EnsureBucket(ctx context.Context) error
+	})
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := ensurer.EnsureBucket(ctx); err != nil {
+		log.Printf("[WARN] Bucket %s not ensured: %v", cfg.S3BucketName, err)
+	}
 }
 
 // --- Migrations ---

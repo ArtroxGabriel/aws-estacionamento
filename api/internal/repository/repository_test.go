@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"api/internal/config"
 	"api/internal/model"
 	"api/internal/repository"
 
@@ -53,7 +52,8 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 
 	// 2. Legacy data, as the previous model left it: the table of migration
 	// 000001 with sessions in PROCESSING/FAILED. Migration 000002 must turn
-	// them into the ticket-first model.
+	// them into the ticket-first model, and 000003 must mark the cars that
+	// already paid (and therefore left, under the old rule) as EXITED.
 	legacySchema, err := os.ReadFile("migrations/000001_create_sessions_table.up.sql")
 	if err != nil {
 		t.Fatalf("failed to read migration 000001: %v", err)
@@ -70,6 +70,11 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 			('legacy-paid-blind', NULL,      'PAID',       'photos/e.jpg')
 	`); err != nil {
 		t.Fatalf("failed to insert legacy sessions: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE sessions SET exited_at = '2026-10-01T12:00:00Z', amount_paid = 10 WHERE status = 'PAID'
+	`); err != nil {
+		t.Fatalf("failed to set legacy payments: %v", err)
 	}
 
 	// 3. Test Migrations (Up)
@@ -99,8 +104,8 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 			"legacy-processing": {"PARKED", "PENDING"},
 			"legacy-failed":     {"PARKED", "UNREADABLE"},
 			"legacy-parked":     {"PARKED", "READ"},
-			"legacy-paid":       {"PAID", "READ"},
-			"legacy-paid-blind": {"PAID", "UNREADABLE"},
+			"legacy-paid":       {"EXITED", "READ"},
+			"legacy-paid-blind": {"EXITED", "UNREADABLE"},
 		}
 		for id, expected := range want {
 			s, err := repo.GetByID(ctx, id)
@@ -111,7 +116,12 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 				t.Fatalf("%s: expected %s/%s, got %s/%s", id, expected[0], expected[1], s.Status, s.PlateStatus)
 			}
 		}
-		// Every car that was inside now holds a spot.
+		// A legacy payment keeps its time as paid_at and its exit time.
+		paid, _ := repo.GetByID(ctx, "legacy-paid")
+		if paid.PaidAt == nil || paid.ExitedAt == nil || !paid.PaidAt.Equal(*paid.ExitedAt) {
+			t.Fatalf("expected paid_at = exited_at for a legacy payment, got %v / %v", paid.PaidAt, paid.ExitedAt)
+		}
+		// Every car that was inside now holds a spot; the ones that paid had left.
 		if count, _ := repo.CountActive(ctx); count != 3 {
 			t.Fatalf("expected 3 PARKED sessions after the migration, got %d", count)
 		}
@@ -228,11 +238,11 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 	})
 
 	t.Run("MarkAsPaid_WithoutPlate", func(t *testing.T) {
-		exitedAt := time.Now().UTC().Truncate(time.Millisecond)
+		paidAt := time.Now().UTC().Truncate(time.Millisecond)
 		amount := 12.50
 
 		// test-pg-session-1 never had its plate read: the ticket alone pays.
-		paid, err := repo.MarkAsPaid(ctx, "test-pg-session-1", exitedAt, amount)
+		paid, err := repo.MarkAsPaid(ctx, "test-pg-session-1", paidAt, amount)
 		if err != nil {
 			t.Fatalf("failed to mark session as paid: %v", err)
 		}
@@ -242,8 +252,12 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		if paid.AmountPaid == nil || *paid.AmountPaid != amount {
 			t.Fatalf("expected amount %f, got %v", amount, paid.AmountPaid)
 		}
-		if count, _ := repo.CountActive(ctx); count != 2 {
-			t.Fatalf("expected 2 PARKED sessions after the payment, got %d", count)
+		if paid.PaidAt == nil || !paid.PaidAt.Equal(paidAt) || paid.ExitedAt != nil {
+			t.Fatalf("expected paid_at set and no exit yet, got %v / %v", paid.PaidAt, paid.ExitedAt)
+		}
+		// Paying does not free the spot: the car is still inside.
+		if count, _ := repo.CountActive(ctx); count != 3 {
+			t.Fatalf("expected the paid car to keep holding its spot (3), got %d", count)
 		}
 	})
 
@@ -254,10 +268,77 @@ func TestMigrationsAndPostgresSessionRepo_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("UpdatePlate_PaidIsNotEditable", func(t *testing.T) {
+	t.Run("UpdatePlate_PaidIsEditable", func(t *testing.T) {
+		// A paid car can still gain a plate before it reaches the barrier.
 		updated, err := repo.UpdatePlate(ctx, "test-pg-session-1", "ABC1D23")
+		if err != nil || updated == nil || updated.Status != "PAID" || updated.PlateStatus != "MANUAL" {
+			t.Fatalf("expected PAID/MANUAL, got %+v, %v", updated, err)
+		}
+	})
+
+	t.Run("FindOccupyingByPlate", func(t *testing.T) {
+		// Same plate, but the OCR has not confirmed it: never a match.
+		pending := newSession("test-pg-pending-plate")
+		plate := "ABC1D23"
+		pending.LicensePlate = &plate
+		if err := repo.Create(ctx, pending); err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+
+		ids := func(plate string) []string {
+			sessions, err := repo.FindOccupyingByPlate(ctx, plate)
+			if err != nil {
+				t.Fatalf("FindOccupyingByPlate failed: %v", err)
+			}
+			var got []string
+			for _, s := range sessions {
+				got = append(got, s.ID)
+			}
+			return got
+		}
+		// The paid car comes first, then the unpaid one with the same plate.
+		if got := ids("ABC1D23"); len(got) != 2 || got[0] != "test-pg-session-1" || got[1] != "test-pg-manual" {
+			t.Fatalf("expected [test-pg-session-1 test-pg-manual], got %v", got)
+		}
+		if got := ids("LSN4I49"); len(got) != 1 || got[0] != "test-pg-unreadable" {
+			t.Fatalf("expected [test-pg-unreadable], got %v", got)
+		}
+		if got := ids("ZZZ9Z99"); len(got) != 0 {
+			t.Fatalf("expected no match, got %v", got)
+		}
+	})
+
+	t.Run("MarkAsExited_OnlyFromPaidAndOnce", func(t *testing.T) {
+		if s, err := repo.MarkAsExited(ctx, "test-pg-manual", time.Now().UTC()); err != nil || s != nil {
+			t.Fatalf("expected nil for an unpaid session, got %+v, %v", s, err)
+		}
+
+		exitedAt := time.Now().UTC().Truncate(time.Millisecond)
+		exited, err := repo.MarkAsExited(ctx, "test-pg-session-1", exitedAt)
+		if err != nil || exited == nil || exited.Status != "EXITED" {
+			t.Fatalf("expected EXITED, got %+v, %v", exited, err)
+		}
+		if exited.ExitedAt == nil || !exited.ExitedAt.Equal(exitedAt) || exited.PaidAt == nil {
+			t.Fatalf("expected exited_at set and paid_at kept, got %v / %v", exited.ExitedAt, exited.PaidAt)
+		}
+
+		// A second exit for the same car changes nothing.
+		if s, err := repo.MarkAsExited(ctx, "test-pg-session-1", time.Now().UTC()); err != nil || s != nil {
+			t.Fatalf("expected nil for an EXITED session, got %+v, %v", s, err)
+		}
+		// The spot left with the car.
+		if count, _ := repo.CountActive(ctx); count != 3 {
+			t.Fatalf("expected 3 cars inside (two PARKED + the pending plate), got %d", count)
+		}
+		if sessions, _ := repo.FindOccupyingByPlate(ctx, "ABC1D23"); len(sessions) != 1 || sessions[0].ID != "test-pg-manual" {
+			t.Fatalf("expected only the car still inside to match, got %v", sessions)
+		}
+	})
+
+	t.Run("UpdatePlate_ExitedIsNotEditable", func(t *testing.T) {
+		updated, err := repo.UpdatePlate(ctx, "test-pg-session-1", "LSN4I49")
 		if err != nil || updated != nil {
-			t.Fatalf("expected nil for a PAID session, got %+v, %v", updated, err)
+			t.Fatalf("expected nil for an EXITED session, got %+v, %v", updated, err)
 		}
 	})
 
@@ -425,12 +506,4 @@ func TestRedisSpotsRepo_Integration(t *testing.T) {
 			t.Fatalf("expected key to stay absent, got exists=%d", n)
 		}
 	})
-}
-
-func TestSQSEventPublisher_EmptyQueue(t *testing.T) {
-	pub := repository.NewSQSEventPublisher(nil, config.Config{SQSQueueURL: ""})
-	err := pub.Publish(context.Background(), map[string]string{"foo": "bar"})
-	if err != nil {
-		t.Fatalf("expected nil error when queue URL is empty, got %v", err)
-	}
 }

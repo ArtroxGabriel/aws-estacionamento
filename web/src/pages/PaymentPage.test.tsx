@@ -101,9 +101,9 @@ describe("PaymentPage", () => {
     const [, unreadRow, pendingRow] = rows();
     expect(within(unreadRow).getByText("Sem placa")).toBeInTheDocument();
     expect(within(unreadRow).getByText("eeee5555")).toBeInTheDocument();
-    expect(within(unreadRow).getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(within(unreadRow).getByRole("button", { name: "Pagar" })).toBeEnabled();
     expect(within(pendingRow).getByText("Lendo placa...")).toBeInTheDocument();
-    expect(within(pendingRow).getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(within(pendingRow).getByRole("button", { name: "Pagar" })).toBeEnabled();
     expect(screen.queryByText(/falha/i)).not.toBeInTheDocument();
   });
 
@@ -112,17 +112,17 @@ describe("PaymentPage", () => {
       ...unread,
       status: "PAID",
       amount_paid: 10,
-      exited_at: "2026-10-03T16:10:00Z",
+      paid_at: "2026-10-03T16:10:00Z",
     });
     const { user } = await renderWith([unread]);
 
-    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
     await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
 
     expect(mockedPayExit).toHaveBeenCalledWith(unread.id);
     expect(mockedUpdatePlate).not.toHaveBeenCalled();
     const receipt = await screen.findByRole("status");
-    expect(receipt).toHaveTextContent("Cancela de saída liberada");
+    expect(receipt).toHaveTextContent("Siga para a cancela de saída");
     expect(receipt).toHaveTextContent("eeee5555");
     expect(receipt).toHaveTextContent("sem placa");
   });
@@ -142,7 +142,7 @@ describe("PaymentPage", () => {
     fireEvent.error(screen.getByAltText("Foto de entrada do ticket eeee5555"));
 
     expect(screen.getByText("Foto indisponível")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pagar" })).toBeEnabled();
   });
 
   it("busca pelo ticket encontra o carro mesmo sem placa", async () => {
@@ -176,7 +176,7 @@ describe("PaymentPage", () => {
     mockedPayExit.mockReturnValue(new Promise(() => {}));
     const { user } = await renderWith([older]);
 
-    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
     const confirm = screen.getByRole("button", { name: /Confirmar pagamento/ });
     await user.click(confirm);
     await user.click(confirm);
@@ -189,11 +189,11 @@ describe("PaymentPage", () => {
   it("Cancelar não chama a API e volta ao botão de pagamento", async () => {
     const { user } = await renderWith([older]);
 
-    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
     await user.click(screen.getByRole("button", { name: "Cancelar" }));
 
     expect(mockedPayExit).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Pagar e liberar" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pagar" })).toBeInTheDocument();
   });
 
   it("sucesso exibe o recibo com o valor vindo da API e remove a linha", async () => {
@@ -201,15 +201,15 @@ describe("PaymentPage", () => {
       ...older,
       status: "PAID",
       amount_paid: 10,
-      exited_at: "2026-10-03T16:10:00Z",
+      paid_at: "2026-10-03T16:10:00Z",
     });
     const { user } = await renderWith([older, newer]); // a API ainda não refletiu o pagamento
 
-    await user.click(within(rows()[0]).getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(within(rows()[0]).getByRole("button", { name: "Pagar" }));
     await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
 
     const receipt = await screen.findByRole("status");
-    expect(receipt).toHaveTextContent("Cancela de saída liberada");
+    expect(receipt).toHaveTextContent("Siga para a cancela de saída");
     expect(receipt).toHaveTextContent("ABC1D23");
     expect(receipt).toHaveTextContent(/R\$\s10,00/);
     expect(rows()).toHaveLength(1);
@@ -221,18 +221,18 @@ describe("PaymentPage", () => {
     mockedPayExit.mockRejectedValue(new ApiError(404, "session not found"));
     const { user } = await renderWith([older]);
 
-    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
     await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Sessão não encontrada.");
-    expect(screen.getByRole("button", { name: "Pagar e liberar" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pagar" })).toBeEnabled();
   });
 
   it("erro 409 exibe que o ticket já foi pago", async () => {
     mockedPayExit.mockRejectedValue(new ApiError(409, "session is not in a payable status"));
     const { user } = await renderWith([older]);
 
-    await user.click(screen.getByRole("button", { name: "Pagar e liberar" }));
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
     await user.click(screen.getByRole("button", { name: /Confirmar pagamento/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Este ticket já foi pago.");

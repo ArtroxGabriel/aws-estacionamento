@@ -22,9 +22,13 @@ var (
 	ErrInvalidPhoto         = errors.New("photo is required")
 	ErrInvalidSessionStatus = errors.New("session is not in PARKED status")
 	ErrInvalidPlate         = errors.New("invalid license plate")
-	ErrSessionNotEditable   = errors.New("session plate can only be set while PARKED")
+	ErrSessionNotEditable   = errors.New("session plate can only be set while the car is inside (PARKED or PAID)")
 	ErrParkingFull          = errors.New("parking lot is full")
 	ErrPhotoNotFound        = errors.New("session photo not found")
+	ErrPaymentPending       = errors.New("payment pending: pay at the cashier before leaving")
+	ErrAlreadyExited        = errors.New("the car already left through the exit barrier")
+	ErrPlateNotFound        = errors.New("no car inside with this plate: use the ticket")
+	ErrInvalidTicket        = errors.New("ticket_id is required")
 )
 
 // Plates of the Mercosul countries typed by the cashier, after removing
@@ -176,8 +180,8 @@ func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, 
 	return session, nil
 }
 
-// PayExit charges a PARKED session by its ticket ID, with or without a plate,
-// and gives the spot back.
+// PayExit charges a PARKED session by its ticket ID, with or without a plate.
+// The car is still inside, so it keeps its spot until the exit barrier.
 func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.Session, error) {
 	session, err := s.sessionRepo.GetByID(ctx, sessionID)
 	if err != nil {
@@ -198,8 +202,6 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 		return nil, ErrInvalidSessionStatus
 	}
 
-	_, _ = s.spotsRepo.Increment(ctx)
-
 	_ = s.audit.LogEvent(ctx, "EXIT_PAYMENT", sessionID, map[string]any{
 		"amount_paid": s.fixedRate,
 		"status":      paidSession.Status,
@@ -208,9 +210,89 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	return paidSession, nil
 }
 
+// ExitBarrierByTicket opens the exit barrier for the paper ticket. It works
+// for any plate status: the ticket is what identifies the car (D20).
+func (s *ParkingService) ExitBarrierByTicket(ctx context.Context, ticketID string) (*model.Session, error) {
+	ticketID = strings.TrimSpace(ticketID)
+	if ticketID == "" {
+		return nil, ErrInvalidTicket
+	}
+	session, err := s.sessionRepo.GetByID(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve session: %w", err)
+	}
+	if session == nil {
+		return nil, ErrSessionNotFound
+	}
+	switch session.Status {
+	case model.StatusPaid:
+		return s.openBarrier(ctx, session, "ticket")
+	case model.StatusExited:
+		return nil, ErrAlreadyExited
+	default:
+		return nil, ErrPaymentPending
+	}
+}
+
+// ExitBarrierByPlate opens the exit barrier for the plate the exit camera
+// recognized (or the driver typed). Only a plate read by the OCR or typed by
+// the cashier can match, and only a car still inside; among several paid
+// cars with the same plate the one that paid first leaves. The plate is a
+// shortcut, never a requirement: whatever this route refuses, the ticket
+// opens.
+func (s *ParkingService) ExitBarrierByPlate(ctx context.Context, rawPlate string) (*model.Session, error) {
+	plate, err := normalizePlate(rawPlate)
+	if err != nil {
+		return nil, err
+	}
+	sessions, err := s.sessionRepo.FindOccupyingByPlate(ctx, plate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find session by plate: %w", err)
+	}
+	if len(sessions) == 0 {
+		return nil, ErrPlateNotFound
+	}
+	for _, session := range sessions {
+		if session.Status == model.StatusPaid {
+			return s.openBarrier(ctx, session, "plate")
+		}
+	}
+	return nil, ErrPaymentPending
+}
+
+// openBarrier lets a PAID car out and gives its spot back. The conditional
+// update decides races: only the request that moved the session to EXITED
+// increments the counter, so a spot is released exactly once.
+func (s *ParkingService) openBarrier(ctx context.Context, session *model.Session, method string) (*model.Session, error) {
+	exited, err := s.sessionRepo.MarkAsExited(ctx, session.ID, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("failed to update session: %w", err)
+	}
+	if exited == nil {
+		return nil, ErrAlreadyExited
+	}
+
+	// Best effort: when the counter is missing or Redis is down, the next read
+	// rebuilds it from PostgreSQL, where this car is already EXITED.
+	_, _ = s.spotsRepo.Increment(ctx)
+
+	var plate any
+	if known, ok := exited.KnownPlate(); ok {
+		plate = known
+	}
+	_ = s.audit.LogEvent(ctx, "EXIT_BARRIER_OPENED", exited.ID, map[string]any{
+		"status":        exited.Status,
+		"method":        method,
+		"license_plate": plate,
+	})
+
+	return exited, nil
+}
+
 // UpdatePlate lets the cashier type a plate the OCR did not read or fix a
-// misread one. It is a convenience (search by plate), never a requirement:
-// the session already holds its spot, so the counter is not touched.
+// misread one, while the car is inside (PARKED or PAID), so a paid car can
+// still leave by plate. It is a convenience, never a requirement: the session
+// already holds its spot, so the counter is not touched.
 func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate string) (*model.Session, error) {
 	plate, err := normalizePlate(rawPlate)
 	if err != nil {
@@ -223,7 +305,7 @@ func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate st
 	if session == nil {
 		return nil, ErrSessionNotFound
 	}
-	if session.Status != model.StatusParked {
+	if !session.Occupying() {
 		return nil, ErrSessionNotEditable
 	}
 
@@ -251,8 +333,9 @@ func (s *ParkingService) UpdatePlate(ctx context.Context, sessionID, rawPlate st
 	return updated, nil
 }
 
-// DeleteSession removes a session and its photo (the D of the CRUD). A PARKED
-// session gives its spot back; a PAID one already did at the payment.
+// DeleteSession removes a session and its photo (the D of the CRUD). A car
+// still inside (PARKED or PAID) gives its spot back; an EXITED one already did
+// at the barrier.
 func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*model.Session, error) {
 	session, err := s.sessionRepo.GetByID(ctx, sessionID)
 	if err != nil {
@@ -270,7 +353,7 @@ func (s *ParkingService) DeleteSession(ctx context.Context, sessionID string) (*
 		return nil, ErrSessionNotFound
 	}
 
-	if session.Status == model.StatusParked {
+	if session.Occupying() {
 		_, _ = s.spotsRepo.Increment(ctx)
 	}
 	// Best effort: an orphan photo costs cents, a failed delete must not

@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math/rand"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,10 +18,18 @@ import (
 )
 
 // FakeSessionRepo implements repository.SessionRepository for testing
+// It guards its map with a mutex and hands out copies, so concurrent exits
+// race on the conditional update like they would on PostgreSQL.
 type FakeSessionRepo struct {
+	mu        sync.Mutex
 	sessions  map[string]*model.Session
 	shouldErr bool
 	createErr bool
+}
+
+func clone(s *model.Session) *model.Session {
+	c := *s
+	return &c
 }
 
 func (f *FakeSessionRepo) Create(ctx context.Context, s *model.Session) error {
@@ -30,6 +41,8 @@ func (f *FakeSessionRepo) Create(ctx context.Context, s *model.Session) error {
 }
 
 func (f *FakeSessionRepo) GetByID(ctx context.Context, id string) (*model.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.shouldErr {
 		return nil, errors.New("db error")
 	}
@@ -37,10 +50,12 @@ func (f *FakeSessionRepo) GetByID(ctx context.Context, id string) (*model.Sessio
 	if !ok {
 		return nil, nil
 	}
-	return s, nil
+	return clone(s), nil
 }
 
-func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt time.Time, amount float64) (*model.Session, error) {
+func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, paidAt time.Time, amount float64) (*model.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.shouldErr {
 		return nil, errors.New("db error")
 	}
@@ -49,9 +64,50 @@ func (f *FakeSessionRepo) MarkAsPaid(ctx context.Context, id string, exitedAt ti
 		return nil, nil
 	}
 	s.Status = model.StatusPaid
-	s.ExitedAt = &exitedAt
+	s.PaidAt = &paidAt
 	s.AmountPaid = &amount
-	return s, nil
+	return clone(s), nil
+}
+
+func (f *FakeSessionRepo) MarkAsExited(ctx context.Context, id string, exitedAt time.Time) (*model.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	s, ok := f.sessions[id]
+	if !ok || s.Status != model.StatusPaid {
+		return nil, nil
+	}
+	s.Status = model.StatusExited
+	s.ExitedAt = &exitedAt
+	return clone(s), nil
+}
+
+func (f *FakeSessionRepo) FindOccupyingByPlate(ctx context.Context, plate string) ([]*model.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.shouldErr {
+		return nil, errors.New("db error")
+	}
+	var res []*model.Session
+	for _, s := range f.sessions {
+		if known, ok := s.KnownPlate(); ok && known == plate && s.Occupying() {
+			res = append(res, clone(s))
+		}
+	}
+	// Same order as the SQL: oldest payment first, unpaid last, then entry.
+	sort.Slice(res, func(i, j int) bool {
+		a, b := res[i], res[j]
+		if (a.PaidAt == nil) != (b.PaidAt == nil) {
+			return a.PaidAt != nil
+		}
+		if a.PaidAt != nil && !a.PaidAt.Equal(*b.PaidAt) {
+			return a.PaidAt.Before(*b.PaidAt)
+		}
+		return a.EnteredAt.Before(b.EnteredAt)
+	})
+	return res, nil
 }
 
 func (f *FakeSessionRepo) MarkPlateUnreadable(ctx context.Context, id string) error {
@@ -89,7 +145,7 @@ func (f *FakeSessionRepo) UpdatePlate(ctx context.Context, id, plate string) (*m
 		return nil, errors.New("db error")
 	}
 	s, ok := f.sessions[id]
-	if !ok || s.Status != model.StatusParked {
+	if !ok || !s.Occupying() {
 		return nil, nil
 	}
 	s.LicensePlate = &plate
@@ -114,7 +170,7 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 	}
 	var count int64
 	for _, s := range f.sessions {
-		if s.Status == model.StatusParked {
+		if s.Occupying() {
 			count++
 		}
 	}
@@ -125,6 +181,7 @@ func (f *FakeSessionRepo) CountActive(ctx context.Context) (int64, error) {
 // never creates the counter by itself: with missing=true only SetAvailable
 // brings it back.
 type FakeSpotsRepo struct {
+	mu        sync.Mutex
 	spots     int64
 	missing   bool
 	shouldErr bool
@@ -157,6 +214,8 @@ func (f *FakeSpotsRepo) SetAvailable(ctx context.Context, count int64) error {
 }
 
 func (f *FakeSpotsRepo) Increment(ctx context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.unavailable(); err != nil {
 		return 0, err
 	}
@@ -339,7 +398,8 @@ func TestGetAvailableSpots_RedisRecovery(t *testing.T) {
 		id := string(rune('a' + i))
 		repo.sessions[id] = &model.Session{ID: id, Status: model.StatusParked, PlateStatus: plateStatuses[i%len(plateStatuses)]}
 	}
-	repo.sessions["paid1"] = &model.Session{ID: "paid1", Status: model.StatusPaid} // already left
+	repo.sessions["paid1"] = &model.Session{ID: "paid1", Status: model.StatusPaid}   // paid, still inside
+	repo.sessions["gone1"] = &model.Session{ID: "gone1", Status: model.StatusExited} // already left
 
 	// Redis rebooted: the counter key is gone.
 	spots := &FakeSpotsRepo{missing: true}
@@ -350,11 +410,12 @@ func TestGetAvailableSpots_RedisRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected successful recovery from DB, got %v", err)
 	}
-	if available != 38 {
-		t.Fatalf("expected 38 recovered spots, got %d", available)
+	// 50 - 12 PARKED - 1 PAID (the EXITED car freed its spot).
+	if available != 37 {
+		t.Fatalf("expected 37 recovered spots, got %d", available)
 	}
-	if spots.missing || spots.spots != 38 {
-		t.Fatalf("expected redis to be rebuilt with 38, got %d (missing=%v)", spots.spots, spots.missing)
+	if spots.missing || spots.spots != 37 {
+		t.Fatalf("expected redis to be rebuilt with 37, got %d (missing=%v)", spots.spots, spots.missing)
 	}
 }
 
@@ -589,16 +650,20 @@ func TestPayExit_Success(t *testing.T) {
 	if paid.AmountPaid == nil || *paid.AmountPaid != 15.0 {
 		t.Fatalf("expected amount 15.0, got %v", paid.AmountPaid)
 	}
-	if spots.spots != 31 {
-		t.Fatalf("expected spots incremented to 31, got %d", spots.spots)
+	// The car is still inside: paying keeps its spot.
+	if spots.spots != 30 {
+		t.Fatalf("expected spots unchanged (30), got %d", spots.spots)
+	}
+	if paid.PaidAt == nil || paid.ExitedAt != nil {
+		t.Fatalf("expected paid_at set and no exit yet, got %v / %v", paid.PaidAt, paid.ExitedAt)
 	}
 	if len(audit.events) != 1 || audit.events[0] != "EXIT_PAYMENT" {
 		t.Fatalf("expected EXIT_PAYMENT audit event, got %v", audit.events)
 	}
 }
 
-// The heart of the feature: a car whose photo was never read (or is still in
-// the queue) leaves with its ticket, no manual validation, and frees its spot.
+// The heart of D20: a car whose photo was never read (or is still in the
+// queue) pays with its ticket, no manual validation.
 func TestPayExit_WithoutPlate(t *testing.T) {
 	for _, plateStatus := range []string{model.PlatePending, model.PlateUnreadable} {
 		svc, repo, spots, _, _, audit := setupService(false, false)
@@ -620,8 +685,8 @@ func TestPayExit_WithoutPlate(t *testing.T) {
 		if paid.PlateStatus != plateStatus {
 			t.Fatalf("%s: expected plate_status kept, got %s", plateStatus, paid.PlateStatus)
 		}
-		if spots.spots != 31 {
-			t.Fatalf("%s: expected the spot given back (31), got %d", plateStatus, spots.spots)
+		if spots.spots != 30 {
+			t.Fatalf("%s: expected the spot kept until the exit barrier (30), got %d", plateStatus, spots.spots)
 		}
 		if !hasEvent(audit, "EXIT_PAYMENT") {
 			t.Fatalf("%s: expected EXIT_PAYMENT audit event", plateStatus)
@@ -722,11 +787,17 @@ func TestUpdatePlate_RejectsInvalidPlate(t *testing.T) {
 	}
 }
 
-func TestUpdatePlate_OnlyWhileParked(t *testing.T) {
+func TestUpdatePlate_OnlyWhileInside(t *testing.T) {
 	svc, repo, _, _, _, _ := setupService(false, false)
 	repo.sessions["paid"] = &model.Session{ID: "paid", Status: model.StatusPaid, PlateStatus: model.PlateUnreadable}
+	repo.sessions["gone"] = &model.Session{ID: "gone", Status: model.StatusExited, PlateStatus: model.PlateUnreadable}
 
-	if _, err := svc.UpdatePlate(context.Background(), "paid", "ABC1D23"); !errors.Is(err, service.ErrSessionNotEditable) {
+	// A paid car can still gain a plate before it reaches the barrier.
+	got, err := svc.UpdatePlate(context.Background(), "paid", "ABC1D23")
+	if err != nil || got.Status != model.StatusPaid || got.PlateStatus != model.PlateManual {
+		t.Fatalf("expected PAID/MANUAL, got %+v, %v", got, err)
+	}
+	if _, err := svc.UpdatePlate(context.Background(), "gone", "ABC1D23"); !errors.Is(err, service.ErrSessionNotEditable) {
 		t.Fatalf("expected ErrSessionNotEditable, got %v", err)
 	}
 	if _, err := svc.UpdatePlate(context.Background(), "missing", "ABC1D23"); !errors.Is(err, service.ErrSessionNotFound) {
@@ -783,14 +854,27 @@ func TestDeleteSession_ParkedFreesTheSpotAndRemovesThePhoto(t *testing.T) {
 	}
 }
 
-func TestDeleteSession_PaidKeepsTheCounter(t *testing.T) {
+func TestDeleteSession_PaidFreesTheSpot(t *testing.T) {
 	svc, repo, spots, _, _, _ := setupService(false, false)
 	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusPaid, PlateStatus: model.PlateRead}
 
 	if _, err := svc.DeleteSession(context.Background(), "s1"); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	// The spot was already given back at the payment.
+	// A paid car is still inside until the barrier: deleting it frees its spot.
+	if spots.spots != 31 {
+		t.Fatalf("expected spots 31, got %d", spots.spots)
+	}
+}
+
+func TestDeleteSession_ExitedKeepsTheCounter(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusExited, PlateStatus: model.PlateRead}
+
+	if _, err := svc.DeleteSession(context.Background(), "s1"); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	// The spot was already given back at the exit barrier.
 	if spots.spots != 30 {
 		t.Fatalf("expected spots unchanged (30), got %d", spots.spots)
 	}
@@ -891,5 +975,309 @@ func TestFindSessions_FiltersByPlateStatus(t *testing.T) {
 	got, err = svc.FindSessions(context.Background(), repository.SessionFilter{Plate: "ABC1D23"})
 	if err != nil || len(got) != 1 || got[0].ID != "read" {
 		t.Fatalf("expected the session found by plate, got %v, %v", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exit barrier
+// ---------------------------------------------------------------------------
+
+func strptr(s string) *string { return &s }
+
+func timeAgo(d time.Duration) *time.Time {
+	t := time.Now().Add(-d)
+	return &t
+}
+
+func TestExitByTicket_PaidCarLeavesAndFreesTheSpot(t *testing.T) {
+	for _, plateStatus := range []string{model.PlatePending, model.PlateRead, model.PlateUnreadable, model.PlateManual} {
+		svc, repo, spots, _, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusPaid, PlateStatus: plateStatus, PaidAt: timeAgo(time.Minute)}
+
+		exited, err := svc.ExitBarrierByTicket(context.Background(), " s1 ")
+		if err != nil {
+			t.Fatalf("%s: expected the barrier to open, got %v", plateStatus, err)
+		}
+		if exited.Status != model.StatusExited || exited.ExitedAt == nil {
+			t.Fatalf("%s: expected EXITED with exited_at, got %+v", plateStatus, exited)
+		}
+		if spots.spots != 31 {
+			t.Fatalf("%s: expected the spot given back (31), got %d", plateStatus, spots.spots)
+		}
+		details := audit.detailsOf("EXIT_BARRIER_OPENED")
+		if details == nil || details["method"] != "ticket" || details["status"] != model.StatusExited {
+			t.Fatalf("%s: unexpected audit %v / %v", plateStatus, audit.events, details)
+		}
+	}
+}
+
+func TestExitByTicket_Refusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		ticket string
+		want   error
+	}{
+		{"unpaid", model.StatusParked, "s1", service.ErrPaymentPending},
+		{"already left", model.StatusExited, "s1", service.ErrAlreadyExited},
+		{"unknown ticket", model.StatusPaid, "nope", service.ErrSessionNotFound},
+		{"empty ticket", model.StatusPaid, "  ", service.ErrInvalidTicket},
+	}
+	for _, tc := range cases {
+		svc, repo, spots, _, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{ID: "s1", Status: tc.status, PlateStatus: model.PlateRead}
+
+		_, err := svc.ExitBarrierByTicket(context.Background(), tc.ticket)
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, err)
+		}
+		if repo.sessions["s1"].Status != tc.status || spots.spots != 30 || len(audit.events) != 0 {
+			t.Fatalf("%s: expected nothing changed, got %s, %d spots, %v", tc.name, repo.sessions["s1"].Status, spots.spots, audit.events)
+		}
+	}
+}
+
+func TestExitByTicket_DatabaseError(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(true, false)
+	if _, err := svc.ExitBarrierByTicket(context.Background(), "s1"); err == nil {
+		t.Fatal("expected a database error")
+	}
+}
+
+func TestExitByPlate_PaidCarLeaves(t *testing.T) {
+	for _, plateStatus := range []string{model.PlateRead, model.PlateManual} {
+		svc, repo, spots, _, _, audit := setupService(false, false)
+		repo.sessions["s1"] = &model.Session{
+			ID: "s1", Status: model.StatusPaid, PlateStatus: plateStatus,
+			LicensePlate: strptr("ABC1D23"), PaidAt: timeAgo(time.Minute),
+		}
+
+		exited, err := svc.ExitBarrierByPlate(context.Background(), "abc-1d23")
+		if err != nil || exited.ID != "s1" || exited.Status != model.StatusExited {
+			t.Fatalf("%s: expected s1 EXITED, got %+v, %v", plateStatus, exited, err)
+		}
+		if spots.spots != 31 {
+			t.Fatalf("%s: expected spots 31, got %d", plateStatus, spots.spots)
+		}
+		details := audit.detailsOf("EXIT_BARRIER_OPENED")
+		if details["method"] != "plate" || details["license_plate"] != "ABC1D23" {
+			t.Fatalf("%s: unexpected audit details %v", plateStatus, details)
+		}
+	}
+}
+
+func TestExitByPlate_UnpaidCarIsRefused(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: model.PlateRead, LicensePlate: strptr("ABC1D23")}
+
+	if _, err := svc.ExitBarrierByPlate(context.Background(), "ABC1D23"); !errors.Is(err, service.ErrPaymentPending) {
+		t.Fatalf("expected ErrPaymentPending, got %v", err)
+	}
+	if repo.sessions["s1"].Status != model.StatusParked || spots.spots != 30 || len(audit.events) != 0 {
+		t.Fatal("expected nothing changed")
+	}
+}
+
+// A plate the OCR has not confirmed, a car that already left or an unknown
+// plate never opens the barrier: the driver uses the ticket.
+func TestExitByPlate_NotFound(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["pending"] = &model.Session{ID: "pending", Status: model.StatusPaid, PlateStatus: model.PlatePending, LicensePlate: strptr("ABC1D23")}
+	repo.sessions["unreadable"] = &model.Session{ID: "unreadable", Status: model.StatusPaid, PlateStatus: model.PlateUnreadable, LicensePlate: strptr("ABC1D23")}
+	repo.sessions["gone"] = &model.Session{ID: "gone", Status: model.StatusExited, PlateStatus: model.PlateRead, LicensePlate: strptr("ABC1D23")}
+
+	for _, plate := range []string{"ABC1D23", "LSN4I49"} {
+		if _, err := svc.ExitBarrierByPlate(context.Background(), plate); !errors.Is(err, service.ErrPlateNotFound) {
+			t.Fatalf("%s: expected ErrPlateNotFound, got %v", plate, err)
+		}
+	}
+	if spots.spots != 30 {
+		t.Fatalf("expected spots unchanged, got %d", spots.spots)
+	}
+
+	// The paper ticket still works for the car whose plate was never read.
+	if _, err := svc.ExitBarrierByTicket(context.Background(), "unreadable"); err != nil {
+		t.Fatalf("expected the ticket to open the barrier, got %v", err)
+	}
+}
+
+func TestExitByPlate_InvalidPlate(t *testing.T) {
+	svc, _, _, _, _, _ := setupService(false, false)
+	for _, plate := range []string{"", "AB12345", "123"} {
+		if _, err := svc.ExitBarrierByPlate(context.Background(), plate); !errors.Is(err, service.ErrInvalidPlate) {
+			t.Fatalf("%q: expected ErrInvalidPlate, got %v", plate, err)
+		}
+	}
+}
+
+// Two cars with the same plate: the paid one leaves even if the unpaid one
+// entered first, and among paid ones the first to pay leaves first.
+func TestExitByPlate_RepeatedPlate(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["unpaid"] = &model.Session{ID: "unpaid", Status: model.StatusParked, PlateStatus: model.PlateRead,
+		LicensePlate: strptr("ABC1D23"), EnteredAt: time.Now().Add(-3 * time.Hour)}
+	repo.sessions["paid-late"] = &model.Session{ID: "paid-late", Status: model.StatusPaid, PlateStatus: model.PlateManual,
+		LicensePlate: strptr("ABC1D23"), EnteredAt: time.Now().Add(-2 * time.Hour), PaidAt: timeAgo(time.Minute)}
+	repo.sessions["paid-early"] = &model.Session{ID: "paid-early", Status: model.StatusPaid, PlateStatus: model.PlateRead,
+		LicensePlate: strptr("ABC1D23"), EnteredAt: time.Now().Add(-1 * time.Hour), PaidAt: timeAgo(10 * time.Minute)}
+
+	for _, want := range []string{"paid-early", "paid-late"} {
+		exited, err := svc.ExitBarrierByPlate(context.Background(), "ABC1D23")
+		if err != nil || exited.ID != want {
+			t.Fatalf("expected %s to leave, got %+v, %v", want, exited, err)
+		}
+	}
+	if _, err := svc.ExitBarrierByPlate(context.Background(), "ABC1D23"); !errors.Is(err, service.ErrPaymentPending) {
+		t.Fatalf("expected the unpaid car to be refused, got %v", err)
+	}
+	if repo.sessions["unpaid"].Status != model.StatusParked || spots.spots != 32 {
+		t.Fatalf("expected unpaid kept and 32 spots, got %s and %d", repo.sessions["unpaid"].Status, spots.spots)
+	}
+}
+
+// Property 2: whatever the interleaving, a car frees its spot once and only
+// one request opens the barrier.
+func TestExit_ConcurrentRequestsReleaseTheSpotOnce(t *testing.T) {
+	svc, repo, spots, _, _, audit := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusPaid, PlateStatus: model.PlateRead,
+		LicensePlate: strptr("ABC1D23"), PaidAt: timeAgo(time.Minute)}
+
+	const requests = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	opened, alreadyExited := 0, 0
+	for i := range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if i%2 == 0 {
+				_, err = svc.ExitBarrierByTicket(context.Background(), "s1")
+			} else {
+				_, err = svc.ExitBarrierByPlate(context.Background(), "ABC1D23")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				opened++
+			case errors.Is(err, service.ErrAlreadyExited), errors.Is(err, service.ErrPlateNotFound):
+				alreadyExited++
+			default:
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if opened != 1 || alreadyExited != requests-1 {
+		t.Fatalf("expected 1 opening and %d refusals, got %d and %d", requests-1, opened, alreadyExited)
+	}
+	if spots.spots != 31 {
+		t.Fatalf("expected the spot released once (31), got %d", spots.spots)
+	}
+	count := 0
+	for _, e := range audit.events {
+		if e == "EXIT_BARRIER_OPENED" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one EXIT_BARRIER_OPENED, got %d", count)
+	}
+}
+
+func TestExit_RedisDownStillOpensAndTheCounterIsRebuilt(t *testing.T) {
+	svc, repo, spots, _, _, _ := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusPaid, PlateStatus: model.PlateRead, PaidAt: timeAgo(time.Minute)}
+	repo.sessions["s2"] = &model.Session{ID: "s2", Status: model.StatusParked, PlateStatus: model.PlateRead}
+	spots.missing = true
+
+	if _, err := svc.ExitBarrierByTicket(context.Background(), "s1"); err != nil {
+		t.Fatalf("expected the barrier to open without the counter, got %v", err)
+	}
+	// 50 spots, one car (s2) still inside.
+	if got, err := svc.GetAvailableSpots(context.Background()); err != nil || got != 49 {
+		t.Fatalf("expected the counter rebuilt to 49, got %d, %v", got, err)
+	}
+}
+
+// Property 1: over any sequence of entries, payments, exits and deletions the
+// counter equals the free spots: total minus the cars inside (PARKED + PAID).
+// Property 3: no session reaches EXITED without having been PAID.
+func TestSpotConservation_RandomSequences(t *testing.T) {
+	const total = 5
+	for seed := int64(1); seed <= 200; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		repo := &FakeSessionRepo{sessions: make(map[string]*model.Session)}
+		spots := &FakeSpotsRepo{spots: total}
+		svc := service.NewParkingService(repo, spots, &FakeStorage{}, &FakePublisher{}, &FakeAuditLogger{},
+			config.Config{TotalParkingSpots: total, FixedParkingRate: 10})
+		everPaid := map[string]bool{}
+
+		pick := func(status string) string {
+			var ids []string
+			for id, s := range repo.sessions {
+				if s.Status == status {
+					ids = append(ids, id)
+				}
+			}
+			if len(ids) == 0 {
+				return ""
+			}
+			sort.Strings(ids)
+			return ids[rng.Intn(len(ids))]
+		}
+
+		for step := 0; step < 60; step++ {
+			switch rng.Intn(6) {
+			case 0, 1:
+				_, err := svc.CreateEntry(context.Background(), "car.jpg", photo(), "image/jpeg")
+				if err != nil && !errors.Is(err, service.ErrParkingFull) {
+					t.Fatalf("seed %d: entry failed: %v", seed, err)
+				}
+			case 2:
+				if id := pick(model.StatusParked); id != "" {
+					if _, err := svc.PayExit(context.Background(), id); err != nil {
+						t.Fatalf("seed %d: payment failed: %v", seed, err)
+					}
+					everPaid[id] = true
+				}
+			case 3:
+				if id := pick(model.StatusPaid); id != "" {
+					if _, err := svc.ExitBarrierByTicket(context.Background(), id); err != nil {
+						t.Fatalf("seed %d: exit failed: %v", seed, err)
+					}
+				}
+			case 4:
+				// Trying to leave without paying never works.
+				if id := pick(model.StatusParked); id != "" {
+					if _, err := svc.ExitBarrierByTicket(context.Background(), id); !errors.Is(err, service.ErrPaymentPending) {
+						t.Fatalf("seed %d: unpaid exit: expected ErrPaymentPending, got %v", seed, err)
+					}
+				}
+			case 5:
+				ids := make([]string, 0, len(repo.sessions))
+				for id := range repo.sessions {
+					ids = append(ids, id)
+				}
+				if len(ids) > 0 {
+					sort.Strings(ids)
+					if _, err := svc.DeleteSession(context.Background(), ids[rng.Intn(len(ids))]); err != nil {
+						t.Fatalf("seed %d: delete failed: %v", seed, err)
+					}
+				}
+			}
+
+			inside, _ := repo.CountActive(context.Background())
+			if spots.spots != total-inside {
+				t.Fatalf("seed %d step %d: counter %d, expected %d (total %d, inside %d)", seed, step, spots.spots, total-inside, total, inside)
+			}
+			for id, s := range repo.sessions {
+				if s.Status == model.StatusExited && !everPaid[id] {
+					t.Fatalf("seed %d: session %s left without paying", seed, id)
+				}
+			}
+		}
 	}
 }

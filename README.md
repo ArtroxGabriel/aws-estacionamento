@@ -1,8 +1,8 @@
 # AWS Estacionamento
 
-Sistema de gestão de estacionamento com leitura automática de placas. Usa os 6 serviços exigidos da AWS (EC2, RDS, S3, ElastiCache, DynamoDB e SQS), com Load Balancer e Auto Scaling. Usa também o Rekognition (leitura da placa) e o CloudFront (HTTPS); o motivo de cada um está em [docs/DECISOES.md](docs/DECISOES.md).
+Sistema de gestão de estacionamento com duas cancelas, caixa de pagamento e leitura automática de placas. No Trabalho 2, roda inteiro em containers com alternativas open source: RustFS no lugar do S3, PostgreSQL, Redis, RabbitMQ no lugar do SQS e OCR com OpenCV + Tesseract. A auditoria continua no DynamoDB, como a especificação exige, com o DynamoDB Local para rodar sem a AWS.
 
-Trabalho Prático 1 de Desenvolvimento de Software para Nuvem (UFC).
+Trabalhos Práticos 1 (AWS) e 2 (Docker Compose) de Desenvolvimento de Software para Nuvem (UFC).
 
 ## Equipe
 
@@ -13,60 +13,77 @@ Trabalho Prático 1 de Desenvolvimento de Software para Nuvem (UFC).
 | Lucas Lopes | Item2.3 |
 | Henrique Viana | Item2.4 |
 
+## Rodar
+
+Pré-requisito: Docker. Na raiz do repositório:
+
+```bash
+cd infra
+docker compose up -d --build
+```
+
+Ou `task up`, com o [Task](https://taskfile.dev) instalado.
+
+| Endereço | O que é |
+|---|---|
+| http://localhost:3000 | Sistema (painel, cancelas, caixa, auditoria) |
+| http://localhost:8080/health | API |
+| http://localhost:15672 | Painel do RabbitMQ (`guest` / `guest`) |
+| http://localhost:9001 | Console do RustFS (`minioadmin` / `minioadmin`) |
+
+Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam nos volumes.
+
 ## O que o sistema faz
 
-É a automação de um estacionamento, do jeito dos estacionamentos de shopping que leem a placa:
-
-1. **Entrada:** a câmera da cancela tira uma foto do carro. No sistema, a tela **Entrada** faz esse papel: envia a foto. A cancela abre na hora e o motorista recebe um ticket.
-2. **Leitura da placa:** em segundo plano, um worker lê a placa na foto com OCR e marca o carro como estacionado. Aceita placas dos 4 países do Mercosul: Brasil, Argentina, Paraguai e Uruguai. Se a placa for ilegível, a sessão fica com falha e o operador digita a placa no caixa.
-3. **Painel:** mostra quantas vagas livres restam, atualizando sozinho.
-4. **Caixa / Saída:** o operador acha o carro pela placa ou pelo ticket e cobra (tarifa fixa). Também pode informar ou corrigir a placa e excluir um registro.
-5. **Auditoria:** histórico de tudo (entrada, leitura, pagamento, correções, exclusões, falhas).
+1. **Cancela de entrada** (`/cancela-entrada`): a câmera tira uma foto do carro; no sistema, a tela envia a foto. A cancela abre na hora e o motorista recebe um ticket, já válido para pagar e sair. Se o pátio estiver lotado, a cancela não abre.
+2. **Leitura da placa:** em segundo plano, um worker lê a placa na foto com OCR. Aceita placas dos 4 países do Mercosul. Se a placa for ilegível, nada trava: o ticket continua valendo.
+3. **Painel** (`/`): vagas livres e carros no pátio, atualizando sozinho.
+4. **Caixa** (`/pagamento`): o operador acha o carro pelo ticket ou pela placa e cobra (tarifa fixa). O carro continua ocupando a vaga até sair. O operador também pode informar ou corrigir a placa e excluir um registro.
+5. **Cancela de saída** (`/cancela-saida`): a câmera lê a placa; se o carro pagou, a cancela abre e a vaga volta ao painel. Se a placa não for reconhecida, o motorista digita o ticket de papel. Carro que não pagou não sai.
+6. **Auditoria** (`/auditoria`): histórico de tudo (entrada, leitura, pagamento, saída, correções, exclusões, falhas).
 
 ## Arquitetura
 
 ```
- Navegador ──HTTPS──▶ CloudFront ──▶ ALB ──▶ EC2 (Auto Scaling 1–3)
-                                             ├─ web     nginx + React
-                                             ├─ api     Go
-                                             └─ worker  Python + Tesseract
-                                                   │
-       ┌──────────┬───────────┬──────────────┬─────┴──────┬──────────────┐
-       ▼          ▼           ▼              ▼            ▼              ▼
-      S3         SQS         RDS        ElastiCache    DynamoDB      CloudWatch
-     fotos    fila OCR    PostgreSQL       Redis       auditoria    alarmes de CPU
-             (+ DLQ)      (sessões)    (vagas livres)               (scale out/in)
+ Navegador ──▶ web :3000 (nginx + React) ──/api/──▶ api :8080 (Go)
+                                                     │
+          ┌──────────────┬──────────────┬────────────┼──────────────┬──────────────┐
+          ▼              ▼              ▼            ▼              ▼              │
+       RustFS        PostgreSQL       Redis      RabbitMQ       DynamoDB           │
+       fotos          sessões      vagas livres  fila OCR       auditoria          │
+                         ▲                       (+ retry,          ▲              │
+                         │                         + DLQ)           │              │
+                         │                          │               │              │
+                         └──────── worker (Python + OpenCV + Tesseract) ◀──────────┘
 ```
 
 | Serviço | Uso |
 |---|---|
-| **EC2** + ALB + Auto Scaling | API, frontend e worker em containers. De 1 a 3 instâncias: CPU acima de 70% por 1 min → +1; abaixo de 25% por 1 min → −1 |
-| **S3** | Fotos dos veículos (o arquivo binário exigido) |
-| **RDS (PostgreSQL)** | Sessões: placa, status, entrada, saída, valor |
-| **ElastiCache (Redis)** | Contador de vagas livres, consultado o tempo todo pelo painel |
-| **SQS** (+ DLQ) | Desacopla a entrada da leitura da placa: a cancela não espera o OCR |
+| **RustFS** | Fotos dos veículos (API compatível com S3) |
+| **PostgreSQL** | Sessões: placa, status, entrada, pagamento, saída, valor |
+| **Redis** | Contador de vagas livres, consultado o tempo todo pelo painel |
+| **RabbitMQ** | Desacopla a entrada da leitura da placa: a cancela não espera o OCR. Fila de espera de 30 s entre tentativas e DLQ na 3ª falha |
 | **DynamoDB** | Auditoria de toda ação, com tipo, dados e horário |
-| Rekognition | Leitura da placa na AWS (96% em 114 fotos reais), com Tesseract de reserva |
-| CloudFront | HTTPS sem domínio próprio, na frente do ALB |
 
-**Status de uma sessão:**
-- `PROCESSING` → `PARKED` (placa lida) → `PAID`
-- `PROCESSING` → `FAILED` (placa ilegível) → `PARKED` (placa digitada no caixa) → `PAID`
+**Status de uma sessão:** `PARKED` (no pátio, não pago) → `PAID` (no pátio, pago) → `EXITED` (saiu pela cancela). A leitura da placa fica em outro campo, `plate_status`: `PENDING` → `READ` ou `UNREADABLE`, ou `MANUAL` (digitada no caixa).
 
 **API:**
 
 | Rota | O que faz |
 |---|---|
-| `POST /entries` | Entrada com foto |
+| `POST /entries` | Entrada com foto (reserva a vaga; 409 se lotado) |
 | `GET /spots/available` | Vagas livres |
-| `POST /exits/{id}/pay` | Pagamento e saída |
+| `POST /exits/{id}/pay` | Pagamento no caixa (a vaga continua ocupada) |
+| `POST /barrier/exit/plate` | Cancela de saída pela placa |
+| `POST /barrier/exit/ticket` | Cancela de saída pelo ticket |
 | `GET /sessions` | Lista sessões |
+| `GET /sessions/{id}/photo` | Foto de entrada |
 | `PATCH /sessions/{id}` | Placa digitada ou corrigida no caixa |
 | `DELETE /sessions/{id}` | Exclui a sessão e a foto |
 | `GET /audit` | Auditoria |
-| `GET /health` | Health check do ALB |
+| `GET /health` | Health check |
 
-Mais detalhes em [docs/GOAL.md](docs/GOAL.md) e nos `AGENTS.md` de cada pasta (`api/`, `worker/`, `web/`, `infra/`).
+Mais detalhes em [docs/ARQUITETURA.md](docs/ARQUITETURA.md), [docs/DECISOES.md](docs/DECISOES.md) e nos `AGENTS.md` de cada pasta (`api/`, `worker/`, `web/`).
 
 ## Estrutura
 
@@ -74,60 +91,43 @@ Mais detalhes em [docs/GOAL.md](docs/GOAL.md) e nos `AGENTS.md` de cada pasta (`
 api/       API REST em Go
 worker/    Worker de OCR em Python (OpenCV + Tesseract)
 web/       Frontend React + Vite + Tailwind (nginx em produção)
-infra/     OpenTofu: Floci local (infra/), AWS (infra/aws), bootstrap OIDC (infra/bootstrap)
-examples/  Fotos, vídeo e datasets com gabarito (1.000 reais do Roboflow + 400 sintéticas no repo)
-scripts/   Smoke test, avaliação de OCR, download/geração de datasets; analise-ocr/ com as simulações das decisões
-docs/      Especificação, GOAL, deploy e checklist
+infra/     docker-compose.yaml e topologia do RabbitMQ (TP2); OpenTofu da AWS (TP1)
+.kiro/     Especificações (requisitos, design, tarefas) do worker e da API/cancela de saída
+examples/  Fotos, vídeo e datasets com gabarito
+scripts/   Smoke test, avaliação de OCR, download/geração de datasets
+docs/      Especificações, planos do TP2, arquitetura e decisões
 ```
 
-## Rodar localmente (emulador Floci)
+## Desenvolver
 
-Pré-requisitos: Docker, [Task](https://taskfile.dev), OpenTofu, Go, Python com uv e Node. As versões estão em `mise.toml`.
+Pré-requisitos: Docker, [Task](https://taskfile.dev), Go, Python com uv e Node. As versões estão em `mise.toml`.
 
 ```bash
-task bootstrap:local   # sobe o Floci (S3, SQS, DynamoDB, RDS, Redis) e cria os recursos
-task dev:api           # API em :8080
-task dev:worker        # worker de OCR
-task dev:web           # frontend em :5173
+task infra:up     # só as dependências (Postgres, Redis, RabbitMQ, RustFS, DynamoDB Local)
+task dev:api      # API em :8080 (pare o container estacionamento_api antes)
+task dev:worker   # worker de OCR
+task dev:web      # frontend em :5173
 ```
 
-Testes: `task test:api`, `cd worker && uv run pytest`, `task test:web`.
-
-## Deploy na AWS
-
-Passo a passo completo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md).
-
-- **GitHub Actions:** *Actions → Deploy AWS → apply / plan / destroy*. Autentica via OIDC, sem chaves salvas no GitHub.
-- **Máquina local:** `task deploy:aws`.
-- **Sempre destruir ao terminar:** `task tf:destroy:aws`.
-
-## Testar e demonstrar
+Testes: `task test` (API, worker e web), ou `task test:api`, `task test:worker` e `task test:web` separados.
 
 | Comando | O que faz |
 |---|---|
-| `task smoke:aws` | Fluxo completo no ar: entrada → OCR → pagamento; placa ilegível → placa digitada → pagamento; exclusão |
-| `task eval:aws` | Envia as fotos de uma pasta ao sistema no ar e compara com o gabarito (`DIR=examples/dataset/openalpr-br` → 110/114) |
-| `task dataset:baixar` / `task dataset:roboflow` / `task dataset:sintetico` | Baixa 114 fotos reais de estacionamento e 1.000 recortes do Roboflow, e gera placas sintéticas, com gabarito |
-| `task ocr:dataset` | Mede o OCR em todo o dataset (`ENGINE=rekognition` para o motor da AWS) |
-| `task ocr:local` | Roda o OCR localmente em fotos e vídeos de `examples/` |
-| `task load:aws` / `task stress:aws` | Carga para o vídeo de elasticidade |
+| `task ocr:local` | Roda o OCR em fotos e vídeos de `examples/` |
+| `task ocr:dataset` | Mede o OCR em todo o dataset com gabarito |
+| `task dataset:baixar` / `task dataset:roboflow` / `task dataset:sintetico` | Baixa e gera os datasets |
 
-**Precisão da leitura de placas** (1.520 fotos com gabarito):
-- 97% em 114 fotos reais de estacionamento;
-- 98% em 400 sintéticas dos 4 países do Mercosul;
-- 76% em 1.000 recortes reais do Roboflow, o conjunto mais difícil. Detalhes em [examples/README.md](examples/README.md). O sistema foi feito para fotos de câmera de cancela: perto e em boa resolução. Vídeo de câmera de mão em baixa resolução não serve, porque a placa fica pequena demais.
+## Trabalho 1 (AWS)
 
-## Situação atual e o que falta
-
-O que já foi feito e validado na AWS, e o que falta para a entrega (prazo: 10/10/2026): [docs/CHECKLIST-AWS.md](docs/CHECKLIST-AWS.md).
+O Trabalho 1 rodava na AWS (EC2 com ALB e Auto Scaling, RDS, S3, ElastiCache, DynamoDB, SQS, Rekognition e CloudFront), com deploy pelo GitHub Actions. O código de infraestrutura continua em `infra/` e `infra/aws`, e o passo a passo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md). As imagens atuais da API e do worker não funcionam nesse deploy, porque não usam mais o SQS.
 
 ## Documentação
 
-- [Especificação oficial](docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
-- [GOAL.md: visão geral, contratos e roteiro do vídeo](docs/GOAL.md)
-- [Deploy na AWS](docs/DEPLOY-AWS.md)
-- [Checklist: feito e falta](docs/CHECKLIST-AWS.md)
-- [Arquitetura: como funciona e o que mudou em relação à `main`](docs/ARQUITETURA.md)
+- [Especificação do Trabalho 2](docs/Especificacao%20Trabalho%20Docker%20e%20Docker%20Compose.md)
+- [Especificação do Trabalho 1](docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
+- [Plano do Trabalho 2](docs/PLANO-TP2.md) e [plano do worker](docs/PLANO-TP2-WORKER.md)
+- [Arquitetura](docs/ARQUITETURA.md)
 - [Decisões de arquitetura: o porquê de cada mudança](docs/DECISOES.md)
-- [Análise do OCR: scripts das medições](scripts/analise-ocr/README.md)
+- [Especificação da API e da cancela de saída](.kiro/specs/api-rabbitmq-exit-barrier/)
+- [Deploy na AWS (TP1)](docs/DEPLOY-AWS.md)
 - [Exemplos de fotos e vídeos](examples/README.md)

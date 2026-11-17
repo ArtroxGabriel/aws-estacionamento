@@ -28,9 +28,7 @@ import cv2
 from ocr.clean import normalize
 from ocr.processor import extract_text
 
-# Motor de OCR, escolhido por --engine antes de criar os processos: "tesseract"
-# (padrão, igual ao Floci) ou "rekognition" (igual à AWS, com Tesseract de
-# reserva; precisa de credenciais AWS no ambiente).
+# Motor de OCR: o mesmo pipeline local (OpenCV + Tesseract) do worker.
 OCR = extract_text
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png"}
@@ -56,25 +54,13 @@ def load_answers(folder: Path) -> dict[str, str]:
         return {row["arquivo"]: row["placa_esperada"] for row in csv.DictReader(f)}
 
 
-def use_engine(engine: str) -> None:
-    """Escolhe o motor em cada processo (o forkserver não herda o global)."""
-    global OCR
-    if engine == "rekognition":
-        import boto3
-        from ocr.rekognition import HybridOcr
-
-        OCR = HybridOcr(boto3.client("rekognition", region_name="us-east-1"))
-
-
 def read_file(path: Path) -> str | None:
     return read_plate(path.read_bytes())
 
 
-def run_images(paths: list[Path], only_errors: bool, jobs: int, engine: str) -> None:
+def run_images(paths: list[Path], only_errors: bool, jobs: int) -> None:
     started = time.monotonic()
-    with ProcessPoolExecutor(
-        max_workers=jobs, initializer=use_engine, initargs=(engine,)
-    ) as pool:
+    with ProcessPoolExecutor(max_workers=jobs) as pool:
         plates = list(pool.map(read_file, paths, chunksize=4))
 
     by_folder: dict[Path, list[tuple[Path, str | None]]] = {}
@@ -162,9 +148,6 @@ def main() -> int:
     parser.add_argument(
         "--jobs", type=int, default=os.cpu_count() or 1, help="processos em paralelo"
     )
-    parser.add_argument(
-        "--engine", choices=("tesseract", "rekognition"), default="tesseract"
-    )
     args = parser.parse_args()
 
     images: list[Path] = []
@@ -182,8 +165,7 @@ def main() -> int:
                 videos.append(file)
 
     if images:
-        run_images(images, args.erros, args.jobs, args.engine)
-    use_engine(args.engine)
+        run_images(images, args.erros, args.jobs)
     for video in videos:
         run_video(video, args.fps)
     return 0

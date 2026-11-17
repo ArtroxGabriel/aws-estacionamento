@@ -78,6 +78,7 @@ describe("statusLabel", () => {
   it("traduz os status", () => {
     expect(statusLabel("PARKED")).toBe("Estacionado");
     expect(statusLabel("PAID")).toBe("Pago");
+    expect(statusLabel("EXITED")).toBe("Saiu");
   });
 });
 
@@ -94,7 +95,7 @@ describe("actionLabel", () => {
   it("traduz as ações conhecidas", () => {
     expect(actionLabel("ENTRY")).toBe("Entrada");
     expect(actionLabel("OCR_PROCESSING")).toBe("Leitura de placa");
-    expect(actionLabel("EXIT_PAYMENT")).toBe("Pagamento/Saída");
+    expect(actionLabel("EXIT_PAYMENT")).toBe("Pagamento");
     expect(actionLabel("POISON_MESSAGE")).toBe("Falha no processamento");
     expect(actionLabel("OCR_FAILED")).toBe("Placa não lida");
   });

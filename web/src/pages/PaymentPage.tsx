@@ -136,7 +136,7 @@ export default function PaymentPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Caixa / Saída</h1>
+        <h1 className="text-2xl font-bold">Caixa / Pagamento</h1>
         <button
           type="button"
           onClick={refresh}
@@ -149,12 +149,15 @@ export default function PaymentPage() {
 
       {receipt && (
         <Alert variant="success">
-          <p className="font-semibold">Pagamento confirmado. Cancela de saída liberada.</p>
+          <p className="font-semibold">Pagamento confirmado. Siga para a cancela de saída.</p>
           <p>
             Ticket: <span className="font-mono">{shortId(receipt.id)}</span> · Placa:{" "}
             <span className="font-mono">{receipt.license_plate ?? "sem placa"}</span> · Valor pago:{" "}
-            {receipt.amount_paid !== undefined ? formatCurrency(receipt.amount_paid) : "—"} · Saída:{" "}
-            {receipt.exited_at ? formatDateTime(receipt.exited_at) : "—"}
+            {receipt.amount_paid !== undefined ? formatCurrency(receipt.amount_paid) : "—"} · Pago em:{" "}
+            {receipt.paid_at ? formatDateTime(receipt.paid_at) : "—"}
+          </p>
+          <p>
+            A cancela abre pela placa ou, se ela não for reconhecida, pelo número do ticket.
           </p>
         </Alert>
       )}
@@ -313,7 +316,7 @@ export default function PaymentPage() {
                                 disabled={payingId !== undefined}
                                 className={`${buttonBase} bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300`}
                               >
-                                Pagar e liberar
+                                Pagar
                               </button>
                               <button
                                 type="button"

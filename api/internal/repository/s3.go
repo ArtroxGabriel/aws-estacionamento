@@ -24,6 +24,21 @@ func NewS3BlobStorage(client *s3.Client, cfg config.Config) *S3BlobStorage {
 	return &S3BlobStorage{client: client, bucket: cfg.S3BucketName}
 }
 
+// EnsureBucket creates the bucket when it does not exist. It is meant for an
+// S3-compatible storage started empty (RustFS); see ensureBucket in main.go.
+func (s *S3BlobStorage) EnsureBucket(ctx context.Context) error {
+	if _, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)}); err == nil {
+		return nil
+	}
+	_, err := s.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(s.bucket)})
+	var owned *types.BucketAlreadyOwnedByYou
+	var exists *types.BucketAlreadyExists
+	if errors.As(err, &owned) || errors.As(err, &exists) {
+		return nil
+	}
+	return err
+}
+
 func (s *S3BlobStorage) Upload(ctx context.Context, key string, body io.Reader, contentType string) error {
 	// PutObject needs a seekable body; multipart files already are.
 	rs, ok := body.(io.ReadSeeker)
