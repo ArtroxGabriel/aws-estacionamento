@@ -5,9 +5,9 @@
 - Implementa os endpoints:
   - `POST /entries`: Recebe foto, reserva a vaga no Redis (lotado → 409), salva no storage S3 (RustFS), cria sessão no Postgres com `status` `PARKED` e `plate_status` `PENDING`, publica na fila RabbitMQ `ocr-processamento-fila` e grava auditoria no DynamoDB.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
-  - `POST /exits/{id}/pay`: Cobra a tarifa fixa de uma sessão `PARKED`: `status` `PAID`, `paid_at` e `amount_paid`. **Não** mexe no contador (o carro continua no pátio). Auditoria `EXIT_PAYMENT`; 409 se não estiver `PARKED`.
+  - `POST /exits/{id}/pay`: Cobra uma sessão `PARKED` pela permanência (tolerância de 15 min grátis; 1ª hora R$ 10; cada hora ou fração a mais R$ 5, ver D23): `status` `PAID`, `paid_at` e `amount_paid`. **Não** mexe no contador (o carro continua no pátio). Auditoria `EXIT_PAYMENT`; 409 se não estiver `PARKED`.
   - `POST /barrier/exit/ticket` (`{"ticket_id"}`) e `POST /barrier/exit/plate` (`{"plate"}`): cancela de saída. Abre para uma sessão `PAID`: `status` `EXITED`, `exited_at`, `INCR spots:available` e auditoria `EXIT_BARRIER_OPENED` (`status`, `method` `ticket`|`plate`, `license_plate`). Erros com `{"error", "code"}`: `payment_pending` (409), `already_exited` (409), `session_not_found`/`plate_not_found` (404), `invalid_ticket`/`invalid_plate`/`invalid_body` (400).
-  - `GET /sessions?status=PARKED|PAID|EXITED|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`).
+  - `GET /sessions?status=PARKED|PAID|EXITED|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`). Cada sessão `PARKED` traz `amount_due`: o valor que o caixa cobraria agora (D23).
   - `GET /sessions/{id}/photo`: Foto de entrada, lida do storage.
   - `PATCH /sessions/{id}`: Placa digitada/corrigida pelo caixa (`plate_status` → `MANUAL`).
   - `DELETE /sessions/{id}`: Exclui a sessão e a foto no storage.

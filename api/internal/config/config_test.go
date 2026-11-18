@@ -19,6 +19,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	_ = os.Unsetenv("AWS_SESSION_TOKEN")
 	_ = os.Unsetenv("TOTAL_PARKING_SPOTS")
 	_ = os.Unsetenv("FIXED_PARKING_RATE")
+	_ = os.Unsetenv("PARKING_EXTRA_HOUR_RATE")
+	_ = os.Unsetenv("PARKING_TOLERANCE_MINUTES")
 
 	cfg := config.LoadConfig()
 
@@ -47,6 +49,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.FixedParkingRate != 10.0 {
 		t.Fatalf("expected rate 10.0, got %f", cfg.FixedParkingRate)
+	}
+	if cfg.ParkingExtraHourRate != 5.0 || cfg.ParkingToleranceMinutes != 15 {
+		t.Fatalf("expected extra hour 5.0 and tolerance 15 min, got %f / %d", cfg.ParkingExtraHourRate, cfg.ParkingToleranceMinutes)
 	}
 }
 

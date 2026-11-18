@@ -27,6 +27,7 @@ export interface Session {
   paid_at?: string; // pagamento no caixa
   exited_at?: string; // passagem pela cancela de saída
   amount_paid?: number;
+  amount_due?: number; // só em GET /sessions de carros PARKED: o que seria cobrado agora
 }
 
 export interface AvailableSpotsResponse {

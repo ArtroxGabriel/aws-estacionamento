@@ -285,3 +285,22 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 **Consequências:** a fila fora do ar continua não derrubando a entrada (D20); a entrada só fica até 5 s mais lenta. O deploy do TP1 na AWS não funciona com essa imagem da API.
 
 **Onde:** `api/internal/repository/rabbitmq.go`, `api/internal/config/config.go`, `api/cmd/api/main.go`, `infra/docker-compose.yaml`.
+
+---
+
+## D23. Tarifa por Tempo de Permanência, com Tolerância de 15 Minutos
+
+**Contexto:** a tarifa era um valor fixo por sessão (`FIXED_PARKING_RATE`), igual para quem ficou 5 minutos e para quem ficou o dia todo.
+
+**Decisão:** seguir o modelo comum dos estacionamentos brasileiros, em três faixas e sem tabela por minuto:
+1. **Até 15 min (inclusive): grátis.** O pagamento continua sendo registrado, com `amount_paid` 0, porque o carro ainda precisa de uma sessão `PAID` para passar pela cancela de saída.
+2. **Acima de 15 min até 1 h: preço da 1ª hora** (R$ 10,00, o antigo `FIXED_PARKING_RATE`).
+3. **Depois da 1ª hora: R$ 5,00 por hora ou fração.** 1 h 01 min já cobra a 2ª hora.
+
+A permanência é `paid_at - entered_at`, calculada quando o caixa cobra. Valores em variáveis de ambiente (`PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE`); o cálculo é uma função pura, `CalculateFee`, em `api/internal/service/pricing.go`.
+
+**Valor a pagar antes de confirmar:** `GET /sessions` devolve `amount_due` nas sessões `PARKED`, calculado pela mesma `CalculateFee` do pagamento, e o caixa mostra o valor na linha e no botão "Confirmar pagamento". O front não recalcula nada, então a regra existe num lugar só. O valor é o do último carregamento da lista (a cada 15 s); o recibo mostra o valor realmente cobrado, que pode ser uma faixa acima se uma fronteira foi cruzada nesse intervalo.
+
+**Fora do escopo (de propósito):** diária com teto, tarifa noturna, mensalista e cobrança de quem demora para sair depois de pagar (não existe tolerância de saída: o valor é fechado no pagamento).
+
+**Onde:** `api/internal/service/pricing.go`, `api/internal/service/parking.go` (`PayExit`), `api/internal/config/config.go`, `infra/docker-compose.yaml`.

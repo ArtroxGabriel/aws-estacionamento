@@ -152,6 +152,10 @@ services:
       RABBITMQ_QUEUE_NAME: ocr-processamento-fila
       DATABASE_URL: postgres://app_user:app_password@postgres:5432/estacionamento?sslmode=disable
       REDIS_URL: redis:6379
+      # Tarifa: tolerância grátis, 1ª hora e cada hora (ou fração) a mais.
+      PARKING_TOLERANCE_MINUTES: 15
+      FIXED_PARKING_RATE: 10.00
+      PARKING_EXTRA_HOUR_RATE: 5.00
     depends_on:
       postgres:
         condition: service_healthy
