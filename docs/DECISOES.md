@@ -24,7 +24,7 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 ## D11. RustFS em substituição ao S3 e ao MinIO
 
-**Contexto:** O Trabalho 1 usava o Amazon S3 para armazenar as fotos dos veículos. A especificação do Trabalho 2 sugere o uso do MinIO. No entanto, o MinIO alterou sua licença de Apache 2.0 para GNU AGPLv3, impondo restrições severas de licenciamento e telemetria, além de apresentar alto consumo de recursos.
+**Contexto:** O Trabalho 1 usava o Amazon S3 para armazenar as fotos dos veículos. A especificação do Trabalho 2 pede o uso do MinIO. No entanto, o MinIO alterou sua licença de Apache 2.0 para GNU AGPLv3, impondo restrições severas de licenciamento e telemetria, além de apresentar alto consumo de recursos.
 
 **Decisão:** Adotar o **RustFS** (`rustfs/rustfs:latest`) como serviço de armazenamento de arquivos de alta performance.
 - O RustFS é 100% compatível com a API REST do S3 (inclusive suporte a AWS Signature Version 4).
@@ -35,6 +35,8 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 - **Zero Lock-in & Licença Permissiva:** Apache 2.0 contra as restrições da AGPLv3 do MinIO.
 - **Eficiência e Velocidade:** Implementação moderna em Rust, ideal para rodar leve em contêineres Docker locais.
 - **Compatibilidade Transparente:** Não exige bibliotecas proprietárias; o mesmo código do SDK da AWS conecta sem modificação nas chamadas de `PutObject`, `GetObject` e `DeleteObject`.
+
+**Aceite:** o professor confirmou que usar o RustFS no lugar do MinIO é aceitável para o Trabalho 2. Com isso, o projeto não usa mais nenhuma imagem do MinIO: o job `createbuckets` do compose usa `amazon/aws-cli` (a `minio/mc` saiu do Docker Hub) e as credenciais de desenvolvimento são `rustfsadmin`.
 
 **Alternativas Descartadas:**
 - *MinIO:* Descartado pela licença restritiva AGPLv3 e peso de inicialização.
@@ -303,4 +305,4 @@ A permanência é `paid_at - entered_at`, calculada quando o caixa cobra. Valore
 
 **Fora do escopo (de propósito):** diária com teto, tarifa noturna, mensalista e cobrança de quem demora para sair depois de pagar (não existe tolerância de saída: o valor é fechado no pagamento).
 
-**Onde:** `api/internal/service/pricing.go`, `api/internal/service/parking.go` (`PayExit`), `api/internal/config/config.go`, `infra/docker-compose.yaml`.
+**Onde:** `api/internal/service/pricing.go`, `api/internal/service/parking.go` (`PayExit` e `FindSessions`), `api/internal/config/config.go`, `infra/docker-compose.yaml`, `web/src/pages/PaymentPage.tsx` e `scripts/demo-tarifa.sh` (demonstração).

@@ -38,8 +38,9 @@ Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam n
 1. **Cancela de entrada** (`/cancela-entrada`): a câmera tira uma foto do carro; no sistema, a tela envia a foto. A cancela abre na hora e o motorista recebe um ticket, já válido para pagar e sair. Se o pátio estiver lotado, a cancela não abre.
 2. **Leitura da placa:** em segundo plano, um worker lê a placa na foto com OCR. Aceita placas dos 4 países do Mercosul. Se a placa for ilegível, nada trava: o ticket continua valendo.
 3. **Painel** (`/`): vagas livres e carros no pátio, atualizando sozinho.
-4. **Caixa** (`/pagamento`): o operador acha o carro pelo ticket ou pela placa e cobra pelo tempo de permanência: até 15 min é grátis, a 1ª hora custa R$ 10,00 e cada hora (ou fração) a mais, R$ 5,00. A tela mostra o tempo e o **valor a pagar** de cada carro antes de confirmar. Os valores são configuráveis no compose (`PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE`).
-   Para demonstrar as faixas de tarifa, `scripts/demo-tarifa.sh` registra 6 veículos com permanências de 5 min a 3h30 (só altera o horário de entrada no Postgres; o valor é calculado pela API). O carro continua ocupando a vaga até sair. O operador também pode informar ou corrigir a placa e excluir um registro.
+4. **Caixa** (`/pagamento`): o operador acha o carro pelo ticket ou pela placa e cobra pelo tempo de permanência: até 15 min é grátis, a 1ª hora custa R$ 10,00 e cada hora (ou fração) a mais, R$ 5,00. A tela mostra o tempo e o **valor a pagar** de cada carro antes de confirmar. Os valores são configuráveis no compose (`PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE`). O carro continua ocupando a vaga até sair. O operador também pode informar ou corrigir a placa e excluir um registro.
+
+   Para demonstrar as faixas de tarifa, rode `scripts/demo-tarifa.sh`: ele registra 6 veículos com permanências de 5 min a 3h30 (só altera o horário de entrada no Postgres; o valor continua sendo calculado pela API).
 5. **Cancela de saída** (`/cancela-saida`): a câmera lê a placa; se o carro pagou, a cancela abre e a vaga volta ao painel. Se a placa não for reconhecida, o motorista digita o ticket de papel. Carro que não pagou não sai.
 6. **Auditoria** (`/auditoria`): histórico de tudo (entrada, leitura, pagamento, saída, correções, exclusões, falhas).
 
@@ -95,7 +96,7 @@ web/       Frontend React + Vite + Tailwind (nginx em produção)
 infra/     docker-compose.yaml e topologia do RabbitMQ (TP2); OpenTofu da AWS (TP1)
 .kiro/     Especificações (requisitos, design, tarefas) do worker e da API/cancela de saída
 examples/  Fotos, vídeo e datasets com gabarito
-scripts/   Smoke test, avaliação de OCR, download/geração de datasets
+scripts/   Smoke test, demo da tarifa, avaliação de OCR, download/geração de datasets
 docs/      Especificações, planos do TP2, arquitetura e decisões
 ```
 
