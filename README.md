@@ -29,7 +29,7 @@ Ou `task up`, com o [Task](https://taskfile.dev) instalado.
 | http://localhost:3000 | Sistema (painel, cancelas, caixa, auditoria) |
 | http://localhost:8080/health | API |
 | http://localhost:15672 | Painel do RabbitMQ (`guest` / `guest`) |
-| http://localhost:9001 | Console do RustFS (`minioadmin` / `minioadmin`) |
+| http://localhost:9001 | Console do RustFS (`rustfsadmin` / `rustfsadmin`) |
 
 Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam nos volumes.
 
@@ -59,7 +59,7 @@ Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam n
 
 | Serviço | Uso |
 |---|---|
-| **RustFS** | Fotos dos veículos (API compatível com S3) |
+| **RustFS** | Fotos dos veículos (API compatível com S3). Usado no lugar do MinIO, com a concordância do professor; a decisão está na [D11](docs/DECISOES.md) |
 | **PostgreSQL** | Sessões: placa, status, entrada, pagamento, saída, valor |
 | **Redis** | Contador de vagas livres, consultado o tempo todo pelo painel |
 | **RabbitMQ** | Desacopla a entrada da leitura da placa: a cancela não espera o OCR. Fila de espera de 30 s entre tentativas e DLQ na 3ª falha |

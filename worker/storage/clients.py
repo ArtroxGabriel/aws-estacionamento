@@ -2,7 +2,7 @@
 
 This module is the single place that builds the boto3 session and the S3 and
 DynamoDB clients. Each service has its own endpoint, so the storage can be a
-local S3-compatible container (MinIO/RustFS) while the audit table lives in
+local S3-compatible container (RustFS) while the audit table lives in
 DynamoDB Local, and both can independently fall back to the real AWS:
 
 - ``cfg.s3_endpoint_url`` / ``cfg.dynamodb_endpoint_url`` set => that client

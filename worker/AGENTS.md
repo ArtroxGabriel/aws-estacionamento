@@ -1,7 +1,7 @@
 # AGENTS.md - Worker OCR (Python)
 
 ## Project Overview
-- Worker assíncrono em Python que consome mensagens da fila RabbitMQ (`ocr-processamento-fila`), descarrega a foto do storage S3 (RustFS/MinIO), aplica redimensionamento e OCR (Tesseract) para extrair a placa, grava a placa no RDS (`plate_status` `PENDING` → `READ`) e registra auditoria `OCR_PROCESSING` no DynamoDB. O worker só enriquece a sessão: ela já nasce `PARKED`, com a vaga reservada pela API, e o ticket já vale (`docs/DECISOES.md`, D20).
+- Worker assíncrono em Python que consome mensagens da fila RabbitMQ (`ocr-processamento-fila`), descarrega a foto do storage S3 (RustFS), aplica redimensionamento e OCR (Tesseract) para extrair a placa, grava a placa no RDS (`plate_status` `PENDING` → `READ`) e registra auditoria `OCR_PROCESSING` no DynamoDB. O worker só enriquece a sessão: ela já nasce `PARKED`, com a vaga reservada pela API, e o ticket já vale (`docs/DECISOES.md`, D20).
 
 ## Tech Stack
 - **Linguagem / Runtime**: Python 3.14 (`uv`)

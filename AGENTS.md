@@ -89,7 +89,7 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
 ## Common Commands
 
 - **Sistema inteiro (TP2)**:
-  - `task up` (`cd infra && docker compose up -d --build`): sobe tudo; web em `http://localhost:3000`, API em `:8080`, RabbitMQ em `:15672` (guest/guest), RustFS em `:9001` (minioadmin/minioadmin)
+  - `task up` (`cd infra && docker compose up -d --build`): sobe tudo; web em `http://localhost:3000`, API em `:8080`, RabbitMQ em `:15672` (guest/guest), RustFS em `:9001` (rustfsadmin/rustfsadmin)
   - `task down` / `task logs`: encerra (os volumes ficam) / acompanha os logs
   - `task test`: testes da API, do worker e do web
 - **Desenvolvimento fora dos containers**:
@@ -107,7 +107,7 @@ O compose já define todas as variáveis. Para `task dev:*`, o Taskfile aponta p
 - `RABBITMQ_URL=amqp://guest:guest@localhost:5672/`, `RABBITMQ_QUEUE_NAME=ocr-processamento-fila`
 - `S3_ENDPOINT_URL=http://localhost:9000`, `S3_BUCKET_NAME=estacionamento-fotos-veiculos-local`
 - `DYNAMODB_ENDPOINT_URL=http://localhost:8000`, `DYNAMODB_TABLE_NAME=AuditoriaEstacionamento`
-- `AWS_REGION=us-east-1`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=minioadmin`
+- `AWS_REGION=us-east-1`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=rustfsadmin`
 
 Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `REDIS_URL` (no worker) não são mais lidos.
 

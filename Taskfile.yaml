@@ -297,8 +297,8 @@ tasks:
     dir: "{{.API_DIR}}"
     env:
       AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
       S3_ENDPOINT_URL: http://localhost:9000
       S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
       DYNAMODB_ENDPOINT_URL: http://localhost:8000
@@ -327,8 +327,8 @@ tasks:
     dir: "{{.WORKER_DIR}}"
     env:
       AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
       S3_ENDPOINT_URL: http://localhost:9000
       S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
       DYNAMODB_ENDPOINT_URL: http://localhost:8000

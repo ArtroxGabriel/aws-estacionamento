@@ -29,7 +29,7 @@ Rubrica coberta: *"Rabbit ou Kafka para fila de mensagens: 1,0 produção e cons
 | Nova tentativa | Não apagar; volta após 300 s (visibility timeout) | Republicar numa fila de espera com TTL (ver 4.2) |
 | Contagem de entregas | `ApproximateReceiveCount` | Cabeçalho `x-attempt` gravado pelo próprio worker |
 | DLQ | Redrive policy do SQS (`maxReceiveCount=3`) | Fila `ocr-processamento-fila-dlq`, publicada pelo worker na 3ª falha |
-| Storage | S3 (`AWS_ENDPOINT_URL` comum a todos os clientes) | S3 compatível (MinIO/RustFS) via `S3_ENDPOINT_URL` |
+| Storage | S3 (`AWS_ENDPOINT_URL` comum a todos os clientes) | S3 compatível (RustFS) via `S3_ENDPOINT_URL` |
 | Auditoria | DynamoDB via `AWS_ENDPOINT_URL` | DynamoDB via `DYNAMODB_ENDPOINT_URL` (vazio = AWS real) |
 | OCR | `OCR_ENGINE`: Tesseract ou Rekognition + reserva | Só o pipeline local (OpenCV + Tesseract) |
 | Redis | Não usa (removido na D20) | Não usa |
@@ -43,7 +43,7 @@ Rubrica coberta: *"Rabbit ou Kafka para fila de mensagens: 1,0 produção e cons
 |---|---|---|---|
 | D-W1 | Como fazer nova tentativa | **Fila de espera com TTL** (4.2), 3 tentativas | O plano geral manda `basic_nack(requeue=False)`, que joga a mensagem na DLQ na 1ª falha. `requeue=True` reentrega na hora, em laço, enquanto o serviço está fora do ar |
 | D-W2 | Quem declara a topologia | **Arquivo `definitions.json` do RabbitMQ**, montado no compose | API e worker precisam declarar a fila com argumentos idênticos; se divergirem, o broker recusa com `PRECONDITION_FAILED`. Um arquivo só elimina o risco |
-| D-W3 | Storage | Tratar como "S3 compatível"; o worker não depende de ser MinIO ou RustFS | A especificação pede a imagem do **MinIO**; a troca fica só no compose |
+| D-W3 | Storage | Tratar como "S3 compatível"; o worker não depende do servidor, só do endpoint | A especificação cita o MinIO; o professor aceitou o RustFS (D11) |
 | D-W4 | Política de leitura sem Rekognition | Voltar ao normalizador completo (correção por posição, até 2 trocas) | A regra "só leitura exata" (D10) existia para a reserva do Rekognition; sem ele, ser tão restrito derruba a taxa de leitura. Com a D20 uma leitura errada não bloqueia ninguém, mas atrapalha a saída por placa; conferir a taxa de placas falsas no dataset antes de fechar |
 
 Este plano assume as recomendações. Se a equipe decidir diferente em D-W1 ou D-W2, só a seção 4 muda.
