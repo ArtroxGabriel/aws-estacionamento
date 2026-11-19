@@ -86,6 +86,7 @@ api/
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-11-18: Credenciais próprias para o DynamoDB (`DYNAMODB_ACCESS_KEY_ID`/`SECRET`/`SESSION_TOKEN`, D24), para usar o DynamoDB real do AWS Academy com o RustFS local.
 - 2026-11-18: Tarifa por permanência (D23): `CalculateFee` em `internal/service/pricing.go` (15 min grátis, 1ª hora `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE` por hora ou fração), `amount_due` nas sessões `PARKED` de `GET /sessions`, variáveis `PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE` e `PARKING_EXTRA_HOUR_RATE`.
 - 2026-11-17: Cancela de saída (fases 2 e 3 da spec): status `EXITED`, `paid_at` (migração 000003), pagamento sem `Increment`, `POST /barrier/exit/ticket` e `/plate` com códigos de erro, correção de placa e exclusão tratando `PAID` como carro no pátio.
 - 2026-11-16: Fase 1 do TP2 na API (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ (`rabbitmq.go`, sem SQS), endpoints separados para S3 e DynamoDB, bucket criado na subida em storage local.

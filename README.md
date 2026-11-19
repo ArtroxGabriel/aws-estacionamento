@@ -22,7 +22,7 @@ cd infra
 docker compose up -d --build
 ```
 
-Ou `task up`, com o [Task](https://taskfile.dev) instalado.
+Ou `task up`, com o [Task](https://taskfile.dev) instalado. O `task up` escolhe sozinho onde fica a auditoria (veja abaixo).
 
 | Endereço | O que é |
 |---|---|
@@ -31,7 +31,25 @@ Ou `task up`, com o [Task](https://taskfile.dev) instalado.
 | http://localhost:15672 | Painel do RabbitMQ (`guest` / `guest`) |
 | http://localhost:9001 | Console do RustFS (`rustfsadmin` / `rustfsadmin`) |
 
-Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam nos volumes.
+Para parar: `docker compose down` em `infra/` (ou `task down`). Os dados ficam nos volumes. Para começar do zero, `docker compose down -v`.
+
+### Auditoria no DynamoDB real (AWS Academy)
+
+Por padrão a auditoria vai para o DynamoDB Local, que sobe junto no compose. A especificação pede o banco NoSQL da AWS, então dá para trocar só ele pelo DynamoDB real do AWS Academy. A aplicação continua rodando toda localmente; só a tabela de auditoria fica na AWS.
+
+1. No Learner Lab, copie as credenciais (*AWS Details > AWS CLI > Show*).
+2. `cp infra/.env.aws.example infra/.env` e preencha `DYNAMODB_ACCESS_KEY_ID`, `DYNAMODB_SECRET_ACCESS_KEY` e `DYNAMODB_SESSION_TOKEN`. Deixe `DYNAMODB_ENDPOINT_URL` vazio (o `.env` não vai para o git).
+3. `scripts/dynamodb-aws.sh` cria a tabela `AuditoriaEstacionamento` (se faltar) e mostra quantos itens ela tem.
+4. `task up` recria a API e o worker apontando para a AWS. O RustFS continua com as credenciais locais.
+
+O `task up` decide sozinho: se `infra/.env` tiver `DYNAMODB_ACCESS_KEY_ID` preenchido, usa o DynamoDB real; caso contrário (ou sem o arquivo), usa o DynamoDB Local. Ele imprime `>> Auditoria: ...` dizendo qual escolheu. Para alternar:
+
+```bash
+mv infra/.env infra/.env.aws && task up   # DynamoDB Local
+mv infra/.env.aws infra/.env && task up   # DynamoDB real
+```
+
+As credenciais do Academy expiram quando o lab é reiniciado: atualize o `infra/.env` e rode `task up` de novo. Com `docker compose up` direto (sem o Task) vale a mesma regra, mas sem o aviso, e é preciso rodar `docker compose restart web` se só a API for recriada.
 
 ## O que o sistema faz
 
@@ -129,6 +147,7 @@ O Trabalho 1 rodava na AWS (EC2 com ALB e Auto Scaling, RDS, S3, ElastiCache, Dy
 - [Especificação do Trabalho 1](docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
 - [Plano do Trabalho 2](docs/PLANO-TP2.md) e [plano do worker](docs/PLANO-TP2-WORKER.md)
 - [Arquitetura](docs/ARQUITETURA.md)
+- [Roteiro enxuto da apresentação](docs/APRESENTACAO.md)
 - [Decisões de arquitetura: o porquê de cada mudança](docs/DECISOES.md)
 - [Especificação da API e da cancela de saída](.kiro/specs/api-rabbitmq-exit-barrier/)
 - [Deploy na AWS (TP1)](docs/DEPLOY-AWS.md)

@@ -146,7 +146,12 @@ services:
       AWS_SECRET_ACCESS_KEY: rustfsadmin
       S3_ENDPOINT_URL: http://rustfs:9000
       S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
-      DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      # Auditoria: DynamoDB Local por padrão. Para usar o DynamoDB real (AWS Academy),
+      # defina estas variáveis em infra/.env (modelo: infra/.env.aws.example).
+      DYNAMODB_ENDPOINT_URL: ${DYNAMODB_ENDPOINT_URL-http://dynamodb-local:8000}
+      DYNAMODB_ACCESS_KEY_ID: ${DYNAMODB_ACCESS_KEY_ID:-}
+      DYNAMODB_SECRET_ACCESS_KEY: ${DYNAMODB_SECRET_ACCESS_KEY:-}
+      DYNAMODB_SESSION_TOKEN: ${DYNAMODB_SESSION_TOKEN:-}
       DYNAMODB_TABLE_NAME: AuditoriaEstacionamento
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       RABBITMQ_QUEUE_NAME: ocr-processamento-fila
@@ -200,7 +205,12 @@ services:
       AWS_SECRET_ACCESS_KEY: rustfsadmin
       S3_ENDPOINT_URL: http://rustfs:9000
       S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
-      DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      # Auditoria: DynamoDB Local por padrão. Para usar o DynamoDB real (AWS Academy),
+      # defina estas variáveis em infra/.env (modelo: infra/.env.aws.example).
+      DYNAMODB_ENDPOINT_URL: ${DYNAMODB_ENDPOINT_URL-http://dynamodb-local:8000}
+      DYNAMODB_ACCESS_KEY_ID: ${DYNAMODB_ACCESS_KEY_ID:-}
+      DYNAMODB_SECRET_ACCESS_KEY: ${DYNAMODB_SECRET_ACCESS_KEY:-}
+      DYNAMODB_SESSION_TOKEN: ${DYNAMODB_SESSION_TOKEN:-}
       DYNAMODB_TABLE_NAME: AuditoriaEstacionamento
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       RABBITMQ_QUEUE_NAME: ocr-processamento-fila

@@ -27,9 +27,21 @@ tasks:
       - task --list
 
   up:
-    desc: "Sobe o sistema inteiro (API, worker, web e dependências) e reconstrói as imagens. Web em http://localhost:3000"
+    desc: "Sobe o sistema inteiro e reconstrói as imagens. Auditoria no DynamoDB real se infra/.env tiver DYNAMODB_ACCESS_KEY_ID; senão, DynamoDB Local. Web em http://localhost:3000"
     cmds:
-      - docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d --build
+      - |
+        ENV_FILE="$(dirname {{.DOCKER_COMPOSE_FILE}})/.env"
+        if grep -qE '^DYNAMODB_ACCESS_KEY_ID=.+' "$ENV_FILE" 2>/dev/null; then
+          echo ">> Auditoria: DynamoDB real (credenciais em $ENV_FILE)"
+          export DYNAMODB_ENDPOINT_URL=
+        else
+          echo ">> Auditoria: DynamoDB Local"
+          export DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
+          export DYNAMODB_ACCESS_KEY_ID= DYNAMODB_SECRET_ACCESS_KEY= DYNAMODB_SESSION_TOKEN=
+        fi
+        docker compose -f {{.DOCKER_COMPOSE_FILE}} up -d --build
+        # A API pode ter ganhado outro IP; o nginx do web só resolve o DNS ao iniciar.
+        docker compose -f {{.DOCKER_COMPOSE_FILE}} restart web
 
   down:
     desc: Encerra o sistema inteiro (os volumes com os dados ficam)

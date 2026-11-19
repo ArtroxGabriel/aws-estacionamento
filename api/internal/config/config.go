@@ -6,20 +6,25 @@ import (
 )
 
 type Config struct {
-	Port                string
-	AWSRegion           string
-	AWSAccessKeyID      string
-	AWSSecretAccessKey  string
-	AWSSessionToken     string
-	S3EndpointURL       string
-	S3BucketName        string
-	DynamoDBEndpointURL string
-	DynamoDBTableName   string
-	RabbitMQURL         string
-	RabbitMQQueueName   string
-	DatabaseURL         string
-	RedisURL            string
-	TotalParkingSpots   int
+	Port               string
+	AWSRegion          string
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+	AWSSessionToken    string
+	// Credentials used only by the DynamoDB client (real AWS, e.g. AWS Academy),
+	// while S3 keeps the ones above (local RustFS). Empty => same as above.
+	DynamoDBAccessKeyID     string
+	DynamoDBSecretAccessKey string
+	DynamoDBSessionToken    string
+	S3EndpointURL           string
+	S3BucketName            string
+	DynamoDBEndpointURL     string
+	DynamoDBTableName       string
+	RabbitMQURL             string
+	RabbitMQQueueName       string
+	DatabaseURL             string
+	RedisURL                string
+	TotalParkingSpots       int
 	// Tarifa: FixedParkingRate é o preço da 1ª hora; depois da tolerância
 	// grátis, cada hora (ou fração) a mais custa ParkingExtraHourRate.
 	FixedParkingRate        float64
@@ -45,6 +50,9 @@ func LoadConfig() Config {
 		AWSAccessKeyID:          os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey:      os.Getenv("AWS_SECRET_ACCESS_KEY"),
 		AWSSessionToken:         os.Getenv("AWS_SESSION_TOKEN"),
+		DynamoDBAccessKeyID:     os.Getenv("DYNAMODB_ACCESS_KEY_ID"),
+		DynamoDBSecretAccessKey: os.Getenv("DYNAMODB_SECRET_ACCESS_KEY"),
+		DynamoDBSessionToken:    os.Getenv("DYNAMODB_SESSION_TOKEN"),
 		S3EndpointURL:           os.Getenv("S3_ENDPOINT_URL"),
 		S3BucketName:            getEnv("S3_BUCKET_NAME", "estacionamento-fotos-veiculos-local"),
 		DynamoDBEndpointURL:     os.Getenv("DYNAMODB_ENDPOINT_URL"),

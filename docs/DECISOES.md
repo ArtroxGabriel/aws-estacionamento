@@ -306,3 +306,19 @@ A permanência é `paid_at - entered_at`, calculada quando o caixa cobra. Valore
 **Fora do escopo (de propósito):** diária com teto, tarifa noturna, mensalista e cobrança de quem demora para sair depois de pagar (não existe tolerância de saída: o valor é fechado no pagamento).
 
 **Onde:** `api/internal/service/pricing.go`, `api/internal/service/parking.go` (`PayExit` e `FindSessions`), `api/internal/config/config.go`, `infra/docker-compose.yaml`, `web/src/pages/PaymentPage.tsx` e `scripts/demo-tarifa.sh` (demonstração).
+
+---
+
+## D24. DynamoDB Real (AWS Academy) com Credenciais Próprias
+
+**Contexto:** a especificação do TP2 pede para continuar usando o banco NoSQL da AWS. A aplicação roda só localmente (apresentação local, sem deploy na AWS), então a AWS Academy entra apenas para o DynamoDB. O problema: API e worker usavam um único par de credenciais para S3 e DynamoDB. Com o par real, o RustFS recusaria o upload; com o `rustfsadmin`, a AWS recusaria a auditoria.
+
+**Decisão:**
+1. **Credenciais separadas só para o DynamoDB:** `DYNAMODB_ACCESS_KEY_ID`, `DYNAMODB_SECRET_ACCESS_KEY` e `DYNAMODB_SESSION_TOKEN`. Quando preenchidas, só o cliente do DynamoDB as usa; sem elas, vale o par comum (`AWS_*`). Meio par é erro de configuração no worker.
+2. **Padrão continua local:** o compose usa o DynamoDB Local. Para o real, `infra/.env` (fora do git, modelo em `infra/.env.aws.example`) esvazia `DYNAMODB_ENDPOINT_URL` e traz as credenciais.
+3. **`task up` escolhe sozinho:** com `DYNAMODB_ACCESS_KEY_ID` preenchido em `infra/.env`, usa o real; senão, o local (o `.env` vazio ou ausente cai no local, nunca na AWS com as chaves erradas). Para alternar, basta mover o `.env`.
+4. **Tabela criada à parte:** a API e o worker não criam a tabela no DynamoDB real; `scripts/dynamodb-aws.sh` a cria (chave `id` String, sob demanda) se faltar. O `createtables` do compose só atende o DynamoDB Local.
+
+**Consequências:** as credenciais do Academy expiram quando o lab reinicia; basta atualizar o `.env` e rodar `docker compose up -d`. O `dynamodb-local` continua subindo mesmo em modo AWS (inofensivo, sem uso).
+
+**Onde:** `api/cmd/api/main.go` (`NewDynamoDBClient`), `api/internal/config/config.go`, `worker/config.py`, `worker/storage/clients.py`, `infra/docker-compose.yaml`, `infra/.env.aws.example`, `scripts/dynamodb-aws.sh`, `Taskfile.yaml` (`up`).

@@ -60,6 +60,38 @@ def test_session_token_reaches_boto3():
     assert (creds.access_key, creds.secret_key, creds.token) == ("test", "test", "tok")
 
 
+def test_dynamodb_credentials_are_separate_from_s3():
+    """S3 keeps the RustFS keys; DynamoDB (real AWS) uses its own, token included."""
+    cfg = load_config(
+        {
+            **BASE_ENV,
+            "DYNAMODB_ACCESS_KEY_ID": "ASIAREAL",
+            "DYNAMODB_SECRET_ACCESS_KEY": "realsecret",
+            "DYNAMODB_SESSION_TOKEN": "realtok",
+        }
+    )
+
+    s3 = clients.build_boto3_session(cfg).get_credentials()
+    dynamo = clients.build_dynamodb_session(cfg).get_credentials()
+
+    assert (s3.access_key, s3.token) == ("test", None)
+    assert (dynamo.access_key, dynamo.secret_key, dynamo.token) == ("ASIAREAL", "realsecret", "realtok")
+
+
+def test_dynamodb_falls_back_to_the_common_credentials():
+    cfg = load_config(BASE_ENV)
+
+    creds = clients.build_dynamodb_session(cfg).get_credentials()
+
+    assert creds.access_key == "test"
+
+
+def test_half_a_dynamodb_key_pair_is_reported():
+    with pytest.raises(ConfigError) as err:
+        load_config({**BASE_ENV, "DYNAMODB_ACCESS_KEY_ID": "ASIAREAL"})
+    assert err.value.missing == ["DYNAMODB_SECRET_ACCESS_KEY"]
+
+
 @given(st.sets(st.sampled_from(ALWAYS_REQUIRED), min_size=1))
 def test_every_missing_variable_is_reported(missing):
     with pytest.raises(ConfigError) as err:
