@@ -5,9 +5,9 @@
 - Implementa os endpoints:
   - `POST /entries`: Recebe foto, reserva a vaga no Redis (lotado → 409), salva no storage S3 (RustFS), cria sessão no Postgres com `status` `PARKED` e `plate_status` `PENDING`, publica na fila RabbitMQ `ocr-processamento-fila` e grava auditoria no DynamoDB.
   - `GET /spots/available`: Retorna contagem de vagas lendo diretamente da memória do Redis (`spots:available`).
-  - `POST /exits/{id}/pay`: Cobra a tarifa fixa de uma sessão `PARKED`: `status` `PAID`, `paid_at` e `amount_paid`. **Não** mexe no contador (o carro continua no pátio). Auditoria `EXIT_PAYMENT`; 409 se não estiver `PARKED`.
+  - `POST /exits/{id}/pay`: Cobra uma sessão `PARKED` pela permanência (tolerância de 15 min grátis; 1ª hora R$ 10; cada hora ou fração a mais R$ 5, ver D23): `status` `PAID`, `paid_at` e `amount_paid`. **Não** mexe no contador (o carro continua no pátio). Auditoria `EXIT_PAYMENT`; 409 se não estiver `PARKED`.
   - `POST /barrier/exit/ticket` (`{"ticket_id"}`) e `POST /barrier/exit/plate` (`{"plate"}`): cancela de saída. Abre para uma sessão `PAID`: `status` `EXITED`, `exited_at`, `INCR spots:available` e auditoria `EXIT_BARRIER_OPENED` (`status`, `method` `ticket`|`plate`, `license_plate`). Erros com `{"error", "code"}`: `payment_pending` (409), `already_exited` (409), `session_not_found`/`plate_not_found` (404), `invalid_ticket`/`invalid_plate`/`invalid_body` (400).
-  - `GET /sessions?status=PARKED|PAID|EXITED|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`).
+  - `GET /sessions?status=PARKED|PAID|EXITED|ALL&plate=...&plate_status=...`: Lista sessões (array cru, `null` se vazio; `status` padrão `PARKED`). Cada sessão `PARKED` traz `amount_due`: o valor que o caixa cobraria agora (D23).
   - `GET /sessions/{id}/photo`: Foto de entrada, lida do storage.
   - `PATCH /sessions/{id}`: Placa digitada/corrigida pelo caixa (`plate_status` → `MANUAL`).
   - `DELETE /sessions/{id}`: Exclui a sessão e a foto no storage.
@@ -86,6 +86,8 @@ api/
 - **Padrão de Pacotes**: Nenhuma lógica de negócio dentro de `cmd/api`. Código privado mantido em `internal/` seguindo as convenções padrão do Go.
 
 ## Changelog
+- 2026-11-18: Credenciais próprias para o DynamoDB (`DYNAMODB_ACCESS_KEY_ID`/`SECRET`/`SESSION_TOKEN`, D24), para usar o DynamoDB real do AWS Academy com o RustFS local.
+- 2026-11-18: Tarifa por permanência (D23): `CalculateFee` em `internal/service/pricing.go` (15 min grátis, 1ª hora `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE` por hora ou fração), `amount_due` nas sessões `PARKED` de `GET /sessions`, variáveis `PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE` e `PARKING_EXTRA_HOUR_RATE`.
 - 2026-11-17: Cancela de saída (fases 2 e 3 da spec): status `EXITED`, `paid_at` (migração 000003), pagamento sem `Increment`, `POST /barrier/exit/ticket` e `/plate` com códigos de erro, correção de placa e exclusão tratando `PAID` como carro no pátio.
 - 2026-11-16: Fase 1 do TP2 na API (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ (`rabbitmq.go`, sem SQS), endpoints separados para S3 e DynamoDB, bucket criado na subida em storage local.
 - 2026-11-16: Sessão `PARKED` e vaga reservada na entrada (409 se lotado), `plate_status`, migração 000002, `GET /sessions/{id}/photo`, filtro `plate_status`; `PROCESSING`/`FAILED` e `ENTRY_FAILED` removidos.

@@ -2,7 +2,7 @@
 
 This module is the single place that builds the boto3 session and the S3 and
 DynamoDB clients. Each service has its own endpoint, so the storage can be a
-local S3-compatible container (MinIO/RustFS) while the audit table lives in
+local S3-compatible container (RustFS) while the audit table lives in
 DynamoDB Local, and both can independently fall back to the real AWS:
 
 - ``cfg.s3_endpoint_url`` / ``cfg.dynamodb_endpoint_url`` set => that client
@@ -47,6 +47,24 @@ def build_boto3_session(cfg: Config) -> boto3.Session:
     )
 
 
+def build_dynamodb_session(cfg: Config) -> boto3.Session:
+    """Session for DynamoDB: its own credentials when ``DYNAMODB_*`` are set.
+
+    This lets S3 stay on the local RustFS keys while the audit table lives in
+    the real AWS (AWS Academy temporary credentials). Without them, it is the
+    same session as the other clients.
+    """
+
+    if cfg.dynamodb_access_key_id and cfg.dynamodb_secret_access_key:
+        return boto3.Session(
+            aws_access_key_id=cfg.dynamodb_access_key_id,
+            aws_secret_access_key=cfg.dynamodb_secret_access_key,
+            aws_session_token=cfg.dynamodb_session_token,
+            region_name=cfg.aws_region,
+        )
+    return build_boto3_session(cfg)
+
+
 def s3_client(cfg: Config):
     """Build the S3 client for ``cfg.s3_endpoint_url`` (``None`` => real AWS).
 
@@ -65,5 +83,5 @@ def s3_client(cfg: Config):
 def dynamodb_client(cfg: Config):
     """Build the DynamoDB client for ``cfg.dynamodb_endpoint_url`` (``None`` => real AWS)."""
 
-    session = build_boto3_session(cfg)
+    session = build_dynamodb_session(cfg)
     return session.client("dynamodb", endpoint_url=cfg.dynamodb_endpoint_url)

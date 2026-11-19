@@ -193,8 +193,8 @@ api:
   ports: ['8080:8080']
   environment:
     AWS_REGION: us-east-1
-    AWS_ACCESS_KEY_ID: minioadmin
-    AWS_SECRET_ACCESS_KEY: minioadmin
+    AWS_ACCESS_KEY_ID: rustfsadmin
+    AWS_SECRET_ACCESS_KEY: rustfsadmin
     S3_ENDPOINT_URL: http://rustfs:9000
     S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
     DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000

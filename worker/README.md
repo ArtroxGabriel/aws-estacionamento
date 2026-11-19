@@ -45,7 +45,8 @@ worker/
 | `RABBITMQ_QUEUE_NAME` | não | Padrão `ocr-processamento-fila`; `-retry` e `-dlq` derivam dele |
 | `DATABASE_URL` | sim | `postgresql://...` |
 | `S3_BUCKET_NAME` | sim | |
-| `S3_ENDPOINT_URL` | não | Storage local (RustFS/MinIO); vazio = AWS |
+| `S3_ENDPOINT_URL` | não | Storage local (RustFS); vazio = AWS |
+| `DYNAMODB_ACCESS_KEY_ID`, `DYNAMODB_SECRET_ACCESS_KEY`, `DYNAMODB_SESSION_TOKEN` | não | Credenciais só do DynamoDB (AWS Academy), enquanto o S3 usa as `AWS_*`; sem elas vale o par comum. Meio par é erro |
 | `DYNAMODB_TABLE_NAME` | sim | |
 | `DYNAMODB_ENDPOINT_URL` | não | DynamoDB Local; vazio = AWS |
 | `AWS_REGION` | sim | |
