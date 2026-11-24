@@ -39,7 +39,7 @@ install -d -m 700 /etc/estacionamento
 cat > /etc/estacionamento/api.env <<'EOF'
 AWS_REGION=${region}
 S3_BUCKET_NAME=${bucket}
-SQS_QUEUE_URL=${queue_url}
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
 DYNAMODB_TABLE_NAME=${table}
 DATABASE_URL=postgres://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}?sslmode=require
 REDIS_URL=${redis_host}:6379
@@ -49,15 +49,51 @@ EOF
 cat > /etc/estacionamento/worker.env <<'EOF'
 AWS_REGION=${region}
 S3_BUCKET_NAME=${bucket}
-SQS_QUEUE_URL=${queue_url}
+RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
 DYNAMODB_TABLE_NAME=${table}
 DATABASE_URL=postgresql://${db_user}:${db_password}@${db_host}:${db_port}/${db_name}?sslmode=require
-OCR_ENGINE=rekognition
 EOF
 
 chmod 600 /etc/estacionamento/*.env
 
+# Fila do OCR: um RabbitMQ por instância, só na rede interna do Docker (a API e o
+# worker da mesma instância se falam por ele). Mesma topologia de
+# infra/rabbitmq/definitions.json (fila, espera de 30 s e DLQ).
+install -d /etc/estacionamento/rabbitmq
+cat > /etc/estacionamento/rabbitmq/rabbitmq.conf <<'EOF'
+load_definitions = /etc/rabbitmq/definitions.json
+EOF
+cat > /etc/estacionamento/rabbitmq/definitions.json <<'EOF'
+{
+  "vhosts": [{ "name": "/" }],
+  "users": [{ "name": "guest", "password": "guest", "tags": ["administrator"] }],
+  "permissions": [{ "user": "guest", "vhost": "/", "configure": ".*", "write": ".*", "read": ".*" }],
+  "queues": [
+    {
+      "name": "ocr-processamento-fila", "vhost": "/", "durable": true, "auto_delete": false,
+      "arguments": { "x-dead-letter-exchange": "", "x-dead-letter-routing-key": "ocr-processamento-fila-dlq" }
+    },
+    {
+      "name": "ocr-processamento-fila-retry", "vhost": "/", "durable": true, "auto_delete": false,
+      "arguments": { "x-message-ttl": 30000, "x-dead-letter-exchange": "", "x-dead-letter-routing-key": "ocr-processamento-fila" }
+    },
+    { "name": "ocr-processamento-fila-dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} }
+  ]
+}
+EOF
+
 docker network create estacionamento || true
+
+docker run -d --name rabbitmq --network estacionamento --restart unless-stopped \
+  -v /etc/estacionamento/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-definitions.conf:ro \
+  -v /etc/estacionamento/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro \
+  rabbitmq:3-alpine
+
+# `ping` responde antes da porta AMQP aceitar conexões; a API e o worker dependem da porta.
+until docker exec rabbitmq rabbitmq-diagnostics -q check_port_connectivity >/dev/null 2>&1; do
+  echo "Esperando o RabbitMQ..."
+  sleep 3
+done
 
 docker run -d --name api --network estacionamento --restart unless-stopped \
   --env-file /etc/estacionamento/api.env "$API_IMAGE"

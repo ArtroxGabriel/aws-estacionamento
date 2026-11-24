@@ -1,0 +1,69 @@
+# Configuração sem segredo, lida por API e worker (envFrom). As credenciais ficam
+# em 02-secrets.yaml. Os nomes dos hosts são os dos Services deste namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/part-of: estacionamento
+data:
+  AWS_REGION: us-east-1
+  S3_ENDPOINT_URL: http://rustfs:9000
+  S3_BUCKET_NAME: estacionamento-fotos-veiculos-local
+  # Auditoria no DynamoDB Local. Para o DynamoDB real (AWS Academy), deixe este
+  # valor vazio e crie o Secret opcional `dynamodb-aws` (ver k8s/README.md).
+  DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+  DYNAMODB_TABLE_NAME: AuditoriaEstacionamento
+  RABBITMQ_QUEUE_NAME: ocr-processamento-fila
+  REDIS_URL: redis:6379
+  # Tarifa: tolerância grátis, 1ª hora e cada hora (ou fração) a mais.
+  PARKING_TOLERANCE_MINUTES: "15"
+  FIXED_PARKING_RATE: "10.00"
+  PARKING_EXTRA_HOUR_RATE: "5.00"
+---
+# Topologia do RabbitMQ: mesmo conteúdo de infra/rabbitmq/rabbitmq.conf.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/part-of: estacionamento
+data:
+  20-definitions.conf: |
+    load_definitions = /etc/rabbitmq/definitions.json
+---
+# Espera as dependências antes de a API e o worker subirem (o equivalente do
+# `depends_on` do compose). Uso: wait-for-deps.sh host:porta ...; depois confere
+# o bucket e a tabela criados pelos Jobs `create-bucket` e `create-table`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wait-for-deps
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/part-of: estacionamento
+data:
+  wait-for-deps.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    for target in "$@"; do
+      host="${target%%:*}"; port="${target##*:}"
+      until (echo > "/dev/tcp/${host}/${port}") 2>/dev/null; do
+        echo "waiting for ${target}"; sleep 2
+      done
+    done
+
+    until aws s3api head-bucket --endpoint-url "${S3_ENDPOINT_URL}" --bucket "${S3_BUCKET_NAME}" >/dev/null 2>&1; do
+      echo "waiting for bucket ${S3_BUCKET_NAME}"; sleep 2
+    done
+
+    # DynamoDB real (endpoint vazio): a tabela é criada por scripts/dynamodb-aws.sh.
+    if [ -n "${DYNAMODB_ENDPOINT_URL}" ]; then
+      until aws dynamodb describe-table --endpoint-url "${DYNAMODB_ENDPOINT_URL}" --table-name "${DYNAMODB_TABLE_NAME}" >/dev/null 2>&1; do
+        echo "waiting for table ${DYNAMODB_TABLE_NAME}"; sleep 2
+      done
+    fi
+    echo "dependencies ready"

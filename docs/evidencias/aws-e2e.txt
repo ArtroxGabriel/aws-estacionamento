@@ -1,0 +1,28 @@
+# AWS real (conta 707991310385, us-east-1), via CloudFront https://d21ht9xppdju71.cloudfront.net, 2026-11-22
+1. health:      {"status":"UP"}
+2. vagas:       {"available_spots":50}
+3. entrada:     {"id":"f7a0a84277781d5e789cfd45f1b28d3a","status":"PARKED","plate_status":"PENDING","s3_photo_key":"photos/f7a0a84277781d5e789cfd45f1b28d3a_placa-real-mercosul-lsn4i49.jpg","entered_at":"2026-11-22T13:33:30.082114773Z"}
+4. sessão:      {'id': 'f7a0a84277781d5e789cfd45f1b28d3a', 'license_plate': 'LSN4I49', 'status': 'PARKED', 'plate_status': 'READ', 's3_photo_key': 'photos/f7a0a84277781d5e789cfd45f1b28d3a_placa-real-mercosul-lsn4i49.jpg', 'entered_at': '2026-11-22T13:33:30.08
+5. vagas após entrada: {"available_spots":49}
+6. foto da sessão: HTTP 200
+7. pagamento:   {"id":"f7a0a84277781d5e789cfd45f1b28d3a","license_plate":"LSN4I49","status":"PAID","plate_status":"READ","s3_photo_key":"photos/f7a0a84277781d5e789cfd45f1b28d3a_placa-real-mercosul-lsn4i49.jpg","entered_at":"2026-11-22T1
+8. vagas após pagar:  {"available_spots":49}
+9. saída (placa): {"id":"f7a0a84277781d5e789cfd45f1b28d3a","license_plate":"LSN4I49","status":"EXITED","plate_status":"READ","s3_photo_key":"photos/f7a0a84277781d5e789cfd45f1b28d3a_placa-real-mercosul-lsn4i49.jpg","entered_at":"2026-11-22
+10. vagas após sair: {"available_spots":50}
+11. auditoria:
+    EXIT_BARRIER_OPENED 2026-11-22T13:33:35.54228331Z
+    EXIT_PAYMENT 2026-11-22T13:33:34.963492728Z
+    OCR_PROCESSING 2026-11-22T13:33:31.187840938Z
+    ENTRY 2026-11-22T13:33:30.088511335Z
+    EXIT_BARRIER_OPENED 2026-11-22T13:32:55.132658035Z
+    EXIT_PAYMENT 2026-11-22T13:32:54.191618568Z
+
+# Carro sem placa legível, sem pagar e depois pagando
+sessão:        UNREADABLE
+saída sem pagar: {"code":"payment_pending","error":"payment pending: pay at the cashier before leaving"}
+saída pelo ticket (pago): EXITED
+vagas: {"available_spots":50}
+
+# Recursos
+DynamoDB itens: 12
+S3 objetos: 3

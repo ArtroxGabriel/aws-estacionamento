@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker
+        app.kubernetes.io/part-of: estacionamento
+    spec:
+      # O worker termina a mensagem em andamento ao receber SIGTERM (no máximo 30 s).
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: wait-for-deps
+          image: amazon/aws-cli:latest
+          command: [/bin/bash, /scripts/wait-for-deps.sh, "postgres:5432", "rabbitmq:5672", "rustfs:9000"]
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ACCESS_KEY
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_SECRET_KEY
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: worker
+          # Imagem local (task k8s:build); a de produção viria de um registry.
+          image: estacionamento-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ACCESS_KEY
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_SECRET_KEY
+            # Só para o DynamoDB real (Secret `dynamodb-aws`, opcional).
+            - name: DYNAMODB_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_ACCESS_KEY_ID
+                  optional: true
+            - name: DYNAMODB_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_SECRET_ACCESS_KEY
+                  optional: true
+            - name: DYNAMODB_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_SESSION_TOKEN
+                  optional: true
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/estacionamento
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_URL
+              value: amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: wait-for-deps

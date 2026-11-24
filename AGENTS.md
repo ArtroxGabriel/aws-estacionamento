@@ -4,7 +4,7 @@
 
 - **Objetivo**: Sistema de Gestão de Vagas de Estacionamento com duas cancelas (entrada e saída), caixa de pagamento, leitura assíncrona de placas por OCR e trilha de auditoria.
 - **Contexto**: Trabalhos Práticos 1 (AWS) e 2 (Docker Compose com alternativas open source) da disciplina de Desenvolvimento de Software para Nuvem (UFC - Profs. Dr. Paulo A. L. Rego e Dr. Fernando Antonio Mota Trinta).
-- **Estágio**: TP2. O sistema inteiro sobe com um `docker compose` (`infra/docker-compose.yaml`). O deploy do TP1 na AWS (`infra/*.tf`, `infra/aws`) ficou como histórico e não funciona com as imagens atuais (a API e o worker não usam mais SQS).
+- **Estágio**: TP2. O sistema inteiro sobe com um `docker compose` (`infra/docker-compose.yaml`). O deploy na AWS (`infra/*.tf`, `infra/aws`, do TP1) também roda o sistema do TP2: o `user_data` sobe um RabbitMQ por instância no lugar do SQS.
 
 ## Mapeamento de Serviços (TP1 → TP2)
 
@@ -74,6 +74,7 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
 ├── worker/                 # Worker assíncrono OCR em Python
 ├── web/                    # Frontend React + Vite
 ├── infra/                  # docker-compose.yaml + rabbitmq/ (TP2); OpenTofu do TP1 (aws/, bootstrap/)
+├── k8s/                    # Manifestos do Kubernetes (bônus do TP2), testados em k3s
 ├── .kiro/specs/            # Especificações (requirements, design, tasks) do worker e da API/cancela
 ├── .github/                # Workflow "Deploy AWS" (OIDC, TP1)
 ├── examples/               # Fotos, vídeo e datasets com gabarito (examples/README.md)
@@ -96,7 +97,8 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
   - `task infra:up`: sobe só as dependências (Postgres, Redis, RabbitMQ, RustFS, DynamoDB Local)
   - `task dev:api` / `task dev:worker` / `task dev:web` (Vite em `:5173`, proxy `/api` → `:8080`)
   - `task test:api` / `task test:worker` / `task test:web` / `task lint:web` / `task build:web`
-- **AWS (TP1, histórico)**: `task tf:apply:aws`, `task deploy:aws`, `task tf:destroy:aws` (ver `docs/DEPLOY-AWS.md`). Não funcionam com as imagens do TP2.
+- **Kubernetes (bônus, k3s no Colima)**: `task k8s:k3s:up` (cluster), `task k8s:build` (imagens no Docker do cluster), `task k8s:apply`, `task k8s:status`, `task k8s:forward` (web em `:3000`), `task k8s:logs APP=worker`, `task k8s:delete`, `task k8s:k3s:down`. Detalhes em `k8s/README.md`.
+- **AWS (deploy do TP1, atualizado para o TP2)**: `task tf:apply:aws`, `task deploy:aws`, `task tf:destroy:aws` (ver `docs/DEPLOY-AWS.md`).
 
 ## Environment / Setup
 
@@ -134,9 +136,13 @@ Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `
 - **Fila do RabbitMQ**: as filas `ocr-processamento-fila`, `-retry` (TTL 30 s) e `-dlq` vêm de `infra/rabbitmq/definitions.json`; o worker sai com código 2 se faltar alguma. Sem o broker, a API continua aceitando entradas e a placa fica `UNREADABLE`.
 - **Healthcheck do RabbitMQ**: usa `check_port_connectivity`. O `ping` fica saudável antes de a porta 5672 aceitar conexões, e API e worker tomavam "connection refused" na subida.
 - **Migrações com dados antigos**: a `000003` converte sessões `PAID` antigas em `EXITED` (pela regra anterior, já tinham saído). O rollback (`down`) faz o caminho inverso; depois dele, apague `spots:available` para a API recalcular.
-- **Deploy do TP1**: o `user_data` do OpenTofu ainda exporta `SQS_QUEUE_URL`/`OCR_ENGINE`. As imagens atuais da API e do worker não processam fotos nesse deploy. Se for usá-lo, `task tf:destroy:aws` ao terminar (créditos da AWS Academy).
+- **Deploy na AWS**: cada instância do ASG roda `rabbitmq:3-alpine` (só na rede do Docker), api, worker e web; a fila do SQS e o `OCR_ENGINE` não são mais usados (a fila e a DLQ do SQS ainda são criadas pelo OpenTofu, sem uso). Use `t3.small` (`-var instance_type=t3.small`): com 1 GiB (`t3.micro`) fica no limite. Cobra enquanto estiver no ar: `task tf:destroy:aws` ao terminar. Num Mac com Colima, se o `docker login` no ECR der timeout, desative o IPv6 da VM (`colima ssh -- sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1`).
 
 ## Changelog
+
+- 2026-11-22: Deploy na AWS validado com as imagens do TP2: o `user_data` sobe um RabbitMQ em container por instância (no lugar do SQS), `infra/aws` ganhou a variável `instance_type`. Fluxo entrada → OCR → pagamento → saída conferido pelo CloudFront, com DynamoDB, S3, RDS e ElastiCache reais; infra derrubada ao final (`docs/evidencias/aws-e2e.txt`).
+
+- 2026-11-22: Bônus Kubernetes (`k8s/`): Deployments, Services `ClusterIP` e `NodePort`, ConfigMaps, Secrets, Jobs de bucket e tabela, testado em k3s (Colima) com o fluxo ponta a ponta; tasks `k8s:*`. Evidências (prints e saídas de `docker compose ps` e `kubectl get`) em `docs/evidencias/`, linkadas no README. Base: tarifa por tempo e DynamoDB real (branch `feat/rustfs-e-tarifa-por-tempo`).
 
 - 2026-11-18: `task up` escolhe sozinho entre DynamoDB real e local conforme `infra/.env`; roteiro da apresentação em `docs/APRESENTACAO.md`. Auditoria pode usar o DynamoDB real do AWS Academy com credenciais próprias (`DYNAMODB_*`, D24), o resto continua local; `infra/.env.aws.example` e `scripts/dynamodb-aws.sh`.
 

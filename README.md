@@ -112,6 +112,7 @@ api/       API REST em Go
 worker/    Worker de OCR em Python (OpenCV + Tesseract)
 web/       Frontend React + Vite + Tailwind (nginx em produção)
 infra/     docker-compose.yaml e topologia do RabbitMQ (TP2); OpenTofu da AWS (TP1)
+k8s/       Manifestos do Kubernetes (bônus do TP2), testados em k3s
 .kiro/     Especificações (requisitos, design, tarefas) do worker e da API/cancela de saída
 examples/  Fotos, vídeo e datasets com gabarito
 scripts/   Smoke test, demo da tarifa, avaliação de OCR, download/geração de datasets
@@ -137,9 +138,37 @@ Testes: `task test` (API, worker e web), ou `task test:api`, `task test:worker` 
 | `task ocr:dataset` | Mede o OCR em todo o dataset com gabarito |
 | `task dataset:baixar` / `task dataset:roboflow` / `task dataset:sintetico` | Baixa e gera os datasets |
 
+## Kubernetes (bônus)
+
+Os mesmos serviços do compose rodam em um cluster k3s, com Deployments, Services (`ClusterIP` e `NodePort`), ConfigMaps e Secrets. Os manifestos e o passo a passo estão em [k8s/](k8s/README.md).
+
+```bash
+task k8s:k3s:up    # cluster k3s local (Colima)
+task k8s:build     # imagens api, worker e web
+task k8s:apply     # aplica k8s/ e espera os Deployments
+task k8s:forward   # web em http://localhost:3000
+```
+
+## Evidências de funcionamento
+
+Capturas do sistema rodando com `docker compose up`, depois de uma entrada com foto, pagamento, saída pela cancela e seis veículos de teste (`scripts/demo-tarifa.sh`).
+
+| | |
+|---|---|
+| **Caixa**: valor a pagar por tempo de permanência (R$ 0 até 15 min, R$ 10, R$ 15 e R$ 25) | ![Caixa](docs/evidencias/caixa-tarifa.png) |
+| **Auditoria** (DynamoDB): entrada, leitura da placa, pagamento e saída pela cancela | ![Auditoria](docs/evidencias/auditoria.png) |
+| **Painel** de vagas e carros no pátio | ![Painel](docs/evidencias/painel.png) |
+| **Cancela de saída**: placa ou ticket de papel | ![Cancela de saída](docs/evidencias/cancela-saida.png) |
+| **RabbitMQ**: a fila `ocr-processamento-fila`, a de espera (`-retry`, TTL 30 s) e a DLQ, todas vazias porque o worker já consumiu | ![Filas](docs/evidencias/rabbitmq-filas.png) |
+| **RustFS**: o bucket com as fotos enviadas pela API | ![Bucket](docs/evidencias/rustfs-bucket.png) |
+
+Na AWS real (EC2 com ALB, RDS, ElastiCache, S3 e DynamoDB, atrás do CloudFront), o mesmo fluxo, com a auditoria vinda do DynamoDB da AWS: [painel](docs/evidencias/aws-painel.png), [auditoria](docs/evidencias/aws-auditoria.png) e o roteiro de testes em [aws-e2e.txt](docs/evidencias/aws-e2e.txt).
+
+Em texto: os 8 containers do compose e o log do worker em [compose-status.txt](docs/evidencias/compose-status.txt), e os pods, Services, Jobs e volumes do cluster em [k8s-status.txt](docs/evidencias/k8s-status.txt).
+
 ## Trabalho 1 (AWS)
 
-O Trabalho 1 rodava na AWS (EC2 com ALB e Auto Scaling, RDS, S3, ElastiCache, DynamoDB, SQS, Rekognition e CloudFront), com deploy pelo GitHub Actions. O código de infraestrutura continua em `infra/` e `infra/aws`, e o passo a passo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md). As imagens atuais da API e do worker não funcionam nesse deploy, porque não usam mais o SQS.
+O Trabalho 1 rodava na AWS (EC2 com ALB e Auto Scaling, RDS, S3, ElastiCache, DynamoDB, SQS, Rekognition e CloudFront), com deploy pelo GitHub Actions. O código de infraestrutura continua em `infra/` e `infra/aws`, e o passo a passo em [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md). O `user_data` das instâncias roda um RabbitMQ em container no lugar do SQS (a fila do OCR), então as imagens do TP2 funcionam nesse deploy: a API e o worker usam S3, DynamoDB, RDS e ElastiCache da AWS. Validado em 2026-11-22 (entrada, OCR, pagamento e saída pelo CloudFront; [evidência](docs/evidencias/aws-e2e.txt)). Ele cobra enquanto estiver no ar: rode `task tf:destroy:aws` ao terminar.
 
 ## Documentação
 
@@ -147,6 +176,7 @@ O Trabalho 1 rodava na AWS (EC2 com ALB e Auto Scaling, RDS, S3, ElastiCache, Dy
 - [Especificação do Trabalho 1](docs/Especificao%20Trabalho%20AWS%20-%20Desenvolvimento%20para%20Nuvem.md)
 - [Plano do Trabalho 2](docs/PLANO-TP2.md) e [plano do worker](docs/PLANO-TP2-WORKER.md)
 - [Arquitetura](docs/ARQUITETURA.md)
+- [Kubernetes (bônus)](k8s/README.md)
 - [Roteiro enxuto da apresentação](docs/APRESENTACAO.md)
 - [Decisões de arquitetura: o porquê de cada mudança](docs/DECISOES.md)
 - [Especificação da API e da cancela de saída](.kiro/specs/api-rabbitmq-exit-barrier/)

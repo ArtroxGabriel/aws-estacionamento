@@ -48,9 +48,9 @@ flowchart TD
     end
 
     subgraph Caixa["3. Terminal de Pagamento"]
-        Motorista["Motorista"] -->|Paga Ticket/Placa| API_Pay["POST /sessions/{id}/pay"]
+        Motorista["Motorista"] -->|Paga Ticket/Placa| API_Pay["POST /exits/{id}/pay"]
         API_Pay -->|Status 'PAID' (Vaga mantida)| PG
-        API_Pay -->|Log PAYMENT_RECEIVED| DynamoDB
+        API_Pay -->|Log EXIT_PAYMENT| DynamoDB
     end
 
     subgraph Saida["4. Cancela de Saída"]
@@ -75,7 +75,7 @@ flowchart TD
 > 5. **Novas Rotas de Cancela:** Inclusão de `/barrier/exit/plate` e `/barrier/exit/ticket` para a automação da cancela de saída.
 > 6. **Ambiente Kubernetes Local:** Utilização do **k3s** para validação rápida, leve e reproduzível dos manifestos Kubernetes.
 > 7. **O ticket identifica o carro (D20, `docs/DECISOES.md`):** a sessão nasce `PARKED` com a vaga reservada pela API na entrada; `plate_status` (`PENDING`/`READ`/`UNREADABLE`/`MANUAL`) é separado de `status`. Nenhuma regra pode exigir placa lida para o carro pagar ou sair. O worker não usa Redis e não muda `status`.
-> 8. **Estado desta revisão (2026-11-16):** o Componente 3 (Worker) e o serviço `worker` + topologia RabbitMQ do Componente 1 estão implementados (`docs/PLANO-TP2-WORKER.md`). API, frontend, Kubernetes e o restante do compose estão pendentes. Ver a seção 5.
+> 8. **Estado desta revisão (2026-11-16):** o Componente 3 (Worker) e o serviço `worker` + topologia RabbitMQ do Componente 1 estão implementados (`docs/PLANO-TP2-WORKER.md`). A API, o frontend e o compose foram concluídos em 2026-11-17 e o Kubernetes em 2026-11-22. Ver a seção 5.
 
 > [!WARNING]
 > **Atendimento às Regras de Avaliação do Trabalho 2:**
@@ -87,7 +87,7 @@ flowchart TD
 
 ### Componente 1: Infraestrutura e Orquestração Local (`infra/docker-compose.yaml` e `Taskfile.yaml`)
 
-> **Estado: FEITO** (exceto as tasks `k8s:*`). O arquivo é `infra/docker-compose.yaml` (não há compose na raiz), com os 8 serviços mais `createbuckets` e `createtables`. O healthcheck do RabbitMQ usa `check_port_connectivity` (o `ping` ficava saudável antes da porta 5672 aceitar conexões). `task up`/`down`/`logs`/`test` existem; `task infra:up` sobe só as dependências.
+> **Estado: FEITO** (as tasks `k8s:*` também). O arquivo é `infra/docker-compose.yaml` (não há compose na raiz), com os 8 serviços mais `createbuckets` e `createtables`. O healthcheck do RabbitMQ usa `check_port_connectivity` (o `ping` ficava saudável antes da porta 5672 aceitar conexões). `task up`/`down`/`logs`/`test` existem; `task infra:up` sobe só as dependências; `task k8s:k3s:up`/`k8s:build`/`k8s:apply`/`k8s:forward`/`k8s:delete` cuidam do cluster.
 
 #### [NEW] `infra/docker-compose.yaml` (completar)
 Substitui a dependência do Floci por containers oficiais e especializados:
@@ -218,6 +218,8 @@ Página interativa da Cancela de Saída:
 
 ### Componente 5: Bônus Kubernetes (`k8s/` testado via k3s)
 
+> **Estado: FEITO** (2026-11-22). Manifestos em `k8s/` (ver `k8s/README.md`), testados num k3s local (Colima): os 8 Deployments e os 2 Jobs sobem, e o fluxo entrada, OCR, pagamento e saída fechou pelo `web`. Além dos arquivos abaixo há `dynamodb-local.yaml` e `init-jobs.yaml` (`create-bucket` e `create-table`), e o `rustfs-console` também é `NodePort` (31901).
+
 Criar diretório `k8s/` com manifestos declarativos:
 - `k8s/00-namespace.yaml`: Namespace `estacionamento`.
 - `k8s/01-configmap.yaml` & `k8s/02-secrets.yaml`: Credenciais e variáveis de ambiente.
@@ -292,17 +294,17 @@ curl -I http://localhost:30080
 
 | Componente | Estado |
 |---|---|
-| 1. Compose / Taskfile | **Feito.** 8 serviços em `infra/docker-compose.yaml`; `task up`/`down`/`logs`/`test`. Faltam só as tasks `k8s:*` (bônus) |
+| 1. Compose / Taskfile | **Feito.** 8 serviços em `infra/docker-compose.yaml`; `task up`/`down`/`logs`/`test`. As tasks `k8s:*` (bônus) também |
 | 2. API Go | **Feito e verificado** (`.kiro/specs/api-rabbitmq-exit-barrier`): RabbitMQ, endpoints próprios, `EXITED`, cancela de saída |
-| 3. Worker | **Feito e verificado** (`PLANO-TP2-WORKER.md`). Pendente só o item 7.3 (prints para o README) |
+| 3. Worker | **Feito e verificado** (`PLANO-TP2-WORKER.md`). Prints do README feitos em 2026-11-22 |
 | 4. Frontend | **Feito e verificado**: cancela de entrada, caixa, cancela de saída, painel com carros no pátio |
-| 5. Kubernetes (bônus) | **Não iniciado** |
+| 5. Kubernetes (bônus) | **Feito e verificado** em k3s: `k8s/`, tasks `k8s:*`, fluxo ponta a ponta |
 
 A seção 4.2 foi conferida num stack novo (`docker compose -p ...` com volumes vazios): os passos 1 a 7 passaram pelo nginx do web, e a entrada com o pátio lotado devolveu 409.
 
 ### 5.2. Decisões em aberto
 
-> **Atualização (2026-11-17):** as decisões 1 a 7 foram fechadas pela especificação `.kiro/specs/api-rabbitmq-exit-barrier/` (`design.md`, D-A1 a D-A12) e registradas em `docs/DECISOES.md` (D21 e D22): as duas cancelas ficam, o pagamento mantém `POST /exits/{id}/pay` e `EXIT_PAYMENT`, a saída por placa recebe a placa em JSON, sem OCR, as páginas novas substituem as antigas (com redirecionamento) e a API não recria o contador na subida. A 10 foi feita, exceto os `scripts/analise-ocr/rek_dump*.py`. Continuam abertas a 8 (deploy do TP1) e a 9 (Kubernetes). A tabela abaixo fica como registro.
+> **Atualização (2026-11-17):** as decisões 1 a 7 foram fechadas pela especificação `.kiro/specs/api-rabbitmq-exit-barrier/` (`design.md`, D-A1 a D-A12) e registradas em `docs/DECISOES.md` (D21 e D22): as duas cancelas ficam, o pagamento mantém `POST /exits/{id}/pay` e `EXIT_PAYMENT`, a saída por placa recebe a placa em JSON, sem OCR, as páginas novas substituem as antigas (com redirecionamento) e a API não recria o contador na subida. A 10 foi feita, exceto os `scripts/analise-ocr/rek_dump*.py`. A 9 (Kubernetes) foi feita em 2026-11-22. Continua aberta a 8 (deploy do TP1). A tabela abaixo fica como registro.
 
 | # | O que definir | Opções e impacto |
 |---|---|---|

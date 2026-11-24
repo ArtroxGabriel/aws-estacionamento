@@ -43,7 +43,7 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 [Caixa / Totem Pagamento] ──(Paga Ticket/Placa)──> [API Go]
                                                     ├── Valida valor no PostgreSQL
                                                     ├── Registra pagamento: status 'PAID' (vaga segue retida!)
-                                                    └── Grava auditoria no DynamoDB (ação: 'PAYMENT_RECEIVED')
+                                                    └── Grava auditoria no DynamoDB (ação: 'EXIT_PAYMENT')
 
 ========================================================================================================
 3. SAÍDA (Cancela de Saída com Dupla Validação)
@@ -69,7 +69,7 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 ### 2.1. Frontend Web & Simulação dos Totens (`web/` — React + Vite + TypeScript)
 * **Totem da Cancela de Entrada (`/cancela-entrada`):** Simula a câmera de entrada. Envia foto via `POST /entries`, exibe o ticket (com ID único e horário), já válido, e sinaliza a abertura da cancela de entrada. A placa aparece quando for lida; se não for, nada é exigido do motorista. Pátio lotado: mensagem clara e cancela fechada.
 * **Painel de Vagas em Tempo Real (`/`):** Exibe contagem de vagas em alta frequência via `GET /spots/available` sem onerar o banco relacional.
-* **Caixa / Terminal de Autoatendimento (`/pagamento`):** Permite buscar sessões por ID do ticket ou placa, mostra a foto da entrada para conferência e cobra com ou sem placa lida ("Informar placa" é opcional). Processa o pagamento via `POST /sessions/{id}/pay`, alterando o status para `PAID`. Informa claramente que o cliente agora possui permissão para se dirigir à cancela de saída.
+* **Caixa / Terminal de Autoatendimento (`/pagamento`):** Permite buscar sessões por ID do ticket ou placa, mostra a foto da entrada para conferência e cobra com ou sem placa lida ("Informar placa" é opcional). Processa o pagamento via `POST /exits/{id}/pay`, alterando o status para `PAID`. Informa claramente que o cliente agora possui permissão para se dirigir à cancela de saída.
 * **Totem da Cancela de Saída (`/cancela-saida`):** Simula o dispositivo na barreira de saída:
   * **Modo Câmera (Placa):** Envia leitura/foto para `POST /barrier/exit/plate`. Se reconhecido e pago, aciona a animação de abertura da cancela.
   * **Modo Contingência (Ticket em Papel):** Se a placa não for identificada ou estiver ilegível, motorista insere o ID do ticket em `POST /barrier/exit/ticket` para destravar a cancela.
@@ -136,7 +136,7 @@ O sistema automatiza o ciclo completo de um estacionamento inteligente do mundo 
 
 O worker só grava enquanto o valor é `PENDING`: uma placa digitada pelo operador nunca é sobrescrita pelo OCR.
 
-> **Estado atual da implementação:** as rotas da cancela de saída e o estado `EXITED` ainda não existem. Até lá o ciclo é `PARKED` $\rightarrow$ `PAID`, a vaga é devolvida no pagamento (`POST /exits/{id}/pay`) e só `PARKED` conta como sessão ativa.
+> **Estado da implementação:** o ciclo completo `PARKED` $\rightarrow$ `PAID` $\rightarrow$ `EXITED` existe. O pagamento (`POST /exits/{id}/pay`) não devolve a vaga; ela volta na cancela de saída (`POST /barrier/exit/plate` ou `/ticket`), e `PARKED` e `PAID` contam como sessão ativa.
 
 ### 3.2. Chaves de Cache no Redis
 * **Chave:** `spots:available`
@@ -151,7 +151,7 @@ Ações registradas:
 * `OCR_PROCESSING`: Worker reconheceu a placa (`plate_status = READ`).
 * `OCR_FAILED`: Worker não identificou placa válida (`plate_status = UNREADABLE`). Não exige ação: o ticket segue válido.
 * `PLATE_CORRECTION`: Operador digitou ou corrigiu a placa no caixa.
-* `PAYMENT_RECEIVED`: Pagamento efetuado com sucesso no terminal/caixa.
+* `EXIT_PAYMENT`: Pagamento efetuado com sucesso no terminal/caixa.
 * `EXIT_BARRIER_OPENED`: Cancela de saída destravada (por placa ou por ticket) e vaga restituída.
 * `SESSION_DELETE`: Sessão cancelada/excluída administrativamente.
 
@@ -188,13 +188,13 @@ Ações registradas:
 
 ## 5. Checklist de Verificação Rápida
 
-- [ ] **Comando Único:** `docker compose up -d` inicia PostgreSQL, RustFS, RabbitMQ, Redis, DynamoDB Local, API, Worker e Web sem falhas.
-- [ ] **Fluxo da Cancela de Entrada:** Upload da foto no RustFS $\rightarrow$ vaga reservada no Redis $\rightarrow$ sessão `PARKED` no Postgres $\rightarrow$ mensagem no RabbitMQ $\rightarrow$ ticket emitido (já válido) $\rightarrow$ cancela de entrada abre.
-- [ ] **Worker Assíncrono:** Consome do RabbitMQ $\rightarrow$ baixa do RustFS $\rightarrow$ OCR Tesseract $\rightarrow$ grava a placa (`plate_status = READ`) ou `UNREADABLE`, sem mexer no status nem nas vagas. Com o worker parado, entrada e pagamento continuam funcionando.
-- [ ] **Fluxo do Caixa de Pagamento:** Consulta por ID ou placa $\rightarrow$ pagamento registrado (`PAID`) $\rightarrow$ vaga **continua** retida $\rightarrow$ ticket habilitado para saída.
-- [ ] **Fluxo da Cancela de Saída:**
+- [x] **Comando Único:** `docker compose up -d` inicia PostgreSQL, RustFS, RabbitMQ, Redis, DynamoDB Local, API, Worker e Web sem falhas.
+- [x] **Fluxo da Cancela de Entrada:** Upload da foto no RustFS $\rightarrow$ vaga reservada no Redis $\rightarrow$ sessão `PARKED` no Postgres $\rightarrow$ mensagem no RabbitMQ $\rightarrow$ ticket emitido (já válido) $\rightarrow$ cancela de entrada abre.
+- [x] **Worker Assíncrono:** Consome do RabbitMQ $\rightarrow$ baixa do RustFS $\rightarrow$ OCR Tesseract $\rightarrow$ grava a placa (`plate_status = READ`) ou `UNREADABLE`, sem mexer no status nem nas vagas. Com o worker parado, entrada e pagamento continuam funcionando.
+- [x] **Fluxo do Caixa de Pagamento:** Consulta por ID ou placa $\rightarrow$ pagamento registrado (`PAID`) $\rightarrow$ vaga **continua** retida $\rightarrow$ ticket habilitado para saída.
+- [x] **Fluxo da Cancela de Saída:**
   - Tentativa 1 (Câmera/Placa): Detecta placa paga $\rightarrow$ atualiza para `EXITED` $\rightarrow$ incrementa vaga no Redis $\rightarrow$ cancela de saída abre.
   - Tentativa 2 (Contingência Ticket Papel): Digita ID do ticket pago $\rightarrow$ cancela de saída abre e vaga é liberada.
   - Tentativa 3 (Ticket Não Pago): Cancela permanece fechada e alerta o condutor.
-- [ ] **Auditoria Completa:** Todas as ações registradas no DynamoDB e visualizáveis na aba `/auditoria`.
-- [ ] **Manifestos Kubernetes:** Pasta `k8s/` testada e validada com kubectl.
+- [x] **Auditoria Completa:** Todas as ações registradas no DynamoDB e visualizáveis na aba `/auditoria`.
+- [x] **Manifestos Kubernetes:** Pasta `k8s/` testada num k3s local (ver `k8s/README.md`).

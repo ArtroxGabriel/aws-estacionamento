@@ -20,6 +20,12 @@ variable "instance_profile_name" {
   description = "Instance profile já existente (\"LabInstanceProfile\" na AWS Academy). Vazio cria a role estacionamento-app."
 }
 
+variable "instance_type" {
+  type        = string
+  default     = "t3.micro"
+  description = "Tipo das instâncias EC2 do ASG. A instância roda api, worker (Tesseract), web e RabbitMQ: com 1 GiB (t3.micro) fica no limite."
+}
+
 variable "image_tag" {
   type        = string
   default     = "latest"
@@ -33,4 +39,5 @@ module "app" {
   aws_root              = true
   instance_profile_name = var.instance_profile_name
   image_tag             = var.image_tag
+  instance_type         = var.instance_type
 }

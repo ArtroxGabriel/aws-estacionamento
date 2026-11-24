@@ -94,7 +94,7 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
     - Done 2026-11-16: with the broker stopped the entry answered 201 in 5.2 s, `UNREADABLE`, `ENTRY` audit with `ocr_queued: false`; once the broker listened again the next entry was queued and read
     - _Requirements: 2.1, 2.2, 1.7_
 
-- [ ] 6. Documentation
+- [x] 6. Documentation
   - [x] 6.1 `AGENTS.md` (root, `api/`, `web/`) and `README.md`: flow, routes, variables, status model, changelog
     - _Requirements: 12.3_
   - [x] 6.2 `docs/DECISOES.md`: new entries for the two barriers and for the API on RabbitMQ
@@ -102,7 +102,8 @@ Tests are written with each task. `go test ./...`, `task test:web` and `task lin
     - Done as D21 (two barriers) and D22 (API on RabbitMQ, one endpoint per service); D13, D14, D15 and D20 corrected where they described the plan instead of the code
   - [x] 6.3 `docs/ARQUITETURA.md` and `docs/PLANO-TP2.md` (state of section 5, decisions closed by this spec)
     - _Requirements: 12.3_
-  - [ ] 6.4 Screenshots for the README (queue in the RabbitMQ panel, Worker log, exit barrier), closing item 7.3 of `docs/PLANO-TP2-WORKER.md`
+  - [x] 6.4 Screenshots for the README (queue in the RabbitMQ panel, Worker log, exit barrier), closing item 7.3 of `docs/PLANO-TP2-WORKER.md`
+    - Done 2026-11-22: `docs/evidencias/` (cashier with the fare, audit, dashboard, exit barrier, RabbitMQ queues, RustFS bucket, `docker compose ps` and the Worker log), linked from the README
 
 ## Notes
 

@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rustfs-data
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs
+        app.kubernetes.io/part-of: estacionamento
+    spec:
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:latest
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: RUSTFS_VOLUMES
+              value: /data/rustfs0
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "true"
+            - name: RUSTFS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ACCESS_KEY
+            - name: RUSTFS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_SECRET_KEY
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          # Root com as capabilities padrão, como no compose (`user: root`): o volume novo é do
+          # root; sem as capabilities padrão a imagem não consegue preparar o diretório.
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data/rustfs0
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rustfs-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rustfs
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+---
+# Console do RustFS para fora do cluster: http://<ip-do-nó>:31901
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-console
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: rustfs
+  ports:
+    - name: console
+      port: 9001
+      targetPort: console
+      nodePort: 31901

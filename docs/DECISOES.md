@@ -169,14 +169,20 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 **Contexto:** A especificação prevê 1 ponto extra para a implantação no Kubernetes utilizando Deployments, Services (NodePort e ClusterIP), ConfigMaps e Secrets.
 
-**Decisão:** Criar a pasta `k8s/` contendo manifestos YAML declarativos e limpos:
-- `k8s/namespace.yaml`: Namespace dedicado `estacionamento`.
-- `k8s/secrets.yaml` & `k8s/configmap.yaml`: Configurações de ambiente e credenciais desacopladas.
-- `k8s/postgres.yaml`, `k8s/rustfs.yaml`, `k8s/rabbitmq.yaml`, `k8s/redis.yaml`: Deployments e Services internos do tipo `ClusterIP`.
-- `k8s/api.yaml` & `k8s/worker.yaml`: Deployment do backend e do consumidor assíncrono.
-- `k8s/web.yaml`: Deployment do frontend com Service do tipo `NodePort` (porta 30080) para acesso externo facilitado em ambientes Minikube/Kind.
+**Decisão:** Criar a pasta `k8s/` com manifestos YAML declarativos, testados em um **k3s** local (Colima, `task k8s:k3s:up`):
+- `00-namespace.yaml`, `01-configmap.yaml` e `02-secrets.yaml`: namespace `estacionamento`, configuração sem segredo (`app-config`) e credenciais em Secrets, lidas por `secretKeyRef`. As URLs de conexão são montadas no pod com `$(VAR)`, então cada senha existe em um lugar só.
+- `postgres.yaml`, `rustfs.yaml`, `rabbitmq.yaml`, `dynamodb-local.yaml` (Deployment, PVC e Service `ClusterIP`) e `redis.yaml` (sem volume, a API recalcula o contador).
+- `init-jobs.yaml`: Jobs `create-bucket` e `create-table`, no lugar dos serviços `createbuckets` e `createtables` do compose.
+- `api.yaml` e `worker.yaml`: Deployments com um initContainer `wait-for-deps` (o `depends_on` do compose), sem root e sem capabilities extras.
+- `web.yaml`: Deployment com Service `NodePort` 30080. O painel do RabbitMQ (31672) e o console do RustFS (31901) também são `NodePort`.
 
-**Por quê:** Garante a pontuação extra de 1,0 ponto sem interferir na simplicidade da execução padrão com Docker Compose.
+**Detalhes que o teste no cluster mostrou:**
+- `RABBITMQ_NODENAME=rabbit@localhost`: o nome do nó vai para o caminho dos dados e o hostname muda a cada pod, então sem isso as filas se perderiam ao trocar o pod. Com ele, o pod recriado volta com as 3 filas e o worker reconecta sozinho.
+- RustFS e DynamoDB Local rodam como root com as capabilities padrão, como no compose. Com `drop: [ALL]` o RustFS não cria `/data` e o DynamoDB Local não lê o jar.
+- A imagem da API é `FROM scratch`, sem shell: as probes são `httpGet /health`.
+- As imagens são locais (`imagePullPolicy: IfNotPresent`); o k3s do Colima roda sobre o Docker, então `task k8s:build` basta, sem registry.
+
+**Por quê:** Garante a pontuação extra de 1,0 ponto sem interferir na simplicidade da execução padrão com Docker Compose. Os Secrets do repositório são credenciais de desenvolvimento, as mesmas do compose; `k8s/README.md` mostra como criar os próprios sem passar pelo git.
 
 **Onde:** `k8s/`.
 

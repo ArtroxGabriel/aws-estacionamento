@@ -1,0 +1,155 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/part-of: estacionamento
+    spec:
+      initContainers:
+        - name: wait-for-deps
+          image: amazon/aws-cli:latest
+          command: [/bin/bash, /scripts/wait-for-deps.sh, "postgres:5432", "redis:6379", "rabbitmq:5672", "rustfs:9000"]
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ACCESS_KEY
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_SECRET_KEY
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: api
+          # Imagem local (task k8s:build); a de produção viria de um registry.
+          image: estacionamento-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: app-config
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ACCESS_KEY
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_SECRET_KEY
+            # Só para o DynamoDB real (Secret `dynamodb-aws`, opcional).
+            - name: DYNAMODB_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_ACCESS_KEY_ID
+                  optional: true
+            - name: DYNAMODB_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_SECRET_ACCESS_KEY
+                  optional: true
+            - name: DYNAMODB_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dynamodb-aws
+                  key: DYNAMODB_SESSION_TOKEN
+                  optional: true
+            # $(VAR) só expande variáveis definidas antes na lista.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/estacionamento?sslmode=disable
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_URL
+              value: amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: wait-for-deps
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: estacionamento
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: estacionamento
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

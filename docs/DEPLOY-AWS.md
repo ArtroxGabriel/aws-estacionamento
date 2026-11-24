@@ -1,6 +1,8 @@
 # Deploy na AWS
 
-Sobe os 6 serviços na AWS real com ALB + Auto Scaling (Parte 2) usando OpenTofu.
+Sobe o sistema na AWS real com ALB + Auto Scaling (Parte 2) usando OpenTofu.
+
+> **Atualização (2026-11-22):** as instâncias rodam as imagens do TP2. Como o SQS saiu, o `user_data` sobe um RabbitMQ em container em cada instância (só na rede do Docker; a API e o worker da mesma instância se falam por ele). S3, DynamoDB, RDS e ElastiCache continuam sendo os da AWS. Use `t3.small` (`tofu apply -var instance_type=t3.small`): a instância roda api, worker (Tesseract), web e RabbitMQ, e 1 GiB fica no limite. O smoke test (`task smoke:aws`) é do modelo antigo (`FAILED`); o fluxo atual foi conferido em [evidencias/aws-e2e.txt](evidencias/aws-e2e.txt).
 
 Há dois caminhos, que usam o mesmo state remoto no S3:
 

@@ -1,0 +1,20 @@
+$ docker compose -f infra/docker-compose.yaml ps
+NAME                      IMAGE                          STATUS                   PORTS
+estacionamento_api        estacionamento-api             Up 2 minutes             0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+estacionamento_dynamodb   amazon/dynamodb-local:latest   Up 2 minutes (healthy)   0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+estacionamento_postgres   postgres:16-alpine             Up 2 minutes (healthy)   0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp
+estacionamento_rabbitmq   rabbitmq:3-management-alpine   Up 2 minutes (healthy)   4369/tcp, 5671/tcp, 0.0.0.0:5672->5672/tcp, [::]:5672->5672/tcp, 15671/tcp, 15691-15692/tcp, 25672/tcp, 0.0.0.0:15672->15672/tcp, [::]:15672->15672/tcp
+estacionamento_redis      redis:7-alpine                 Up 2 minutes (healthy)   0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp
+estacionamento_rustfs     rustfs/rustfs:latest           Up 2 minutes (healthy)   0.0.0.0:9000-9001->9000-9001/tcp, [::]:9000-9001->9000-9001/tcp
+estacionamento_web        estacionamento-web             Up 2 minutes             0.0.0.0:3000->80/tcp, [::]:3000->80/tcp
+estacionamento_worker     estacionamento-worker          Up 2 minutes             
+
+$ docker compose -f infra/docker-compose.yaml logs worker | grep -E "worker started|processor"
+2026-11-22 13:05:22,999 INFO consumer: worker started; consuming ocr-processamento-fila (broker=rabbitmq:5672/)
+2026-11-22 13:05:44,502 INFO processor: session e3bc600ad79c5ce43a4b2fb983e1af5a plate read: LSN4I49
+2026-11-22 13:06:01,095 INFO processor: session 552faa06bb3c28549ce2775f423275c1 plate read: LSN4I49
+2026-11-22 13:06:01,772 INFO processor: session 010742cb688a1f545eab1be7f794f338 plate read: KLV8465
+2026-11-22 13:06:02,402 INFO processor: session baf6b1882b6c3b8bf9dde2b147fc1155 plate read: BRA2E19
+2026-11-22 13:06:03,495 WARNING processor: unreadable plate: no_match for 169ad433a6389f74ec25bb237fc6fbf6; recording plate as UNREADABLE
+2026-11-22 13:06:04,365 WARNING processor: unreadable plate: no_match for 84c494bcbe3751b9515ef47e07926697; recording plate as UNREADABLE
+2026-11-22 13:06:05,351 WARNING processor: unreadable plate: no_match for 4c0e6a22740dccb3b75b7765ba6d98a7; recording plate as UNREADABLE

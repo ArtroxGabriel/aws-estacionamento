@@ -171,7 +171,7 @@ Cliente S3 com `Config(s3={"addressing_style": "path"})`: storage local não res
 ### Fase 7 — Documentação
 - [x] 7.1 `worker/README.md` e `worker/AGENTS.md`: RabbitMQ, variáveis e comandos do compose.
 - [x] 7.2 `.kiro/specs/python-ocr-worker`: requisitos 1, 9, 12, 13 e 16 (SQS → RabbitMQ), 14 e 15 (variáveis e endpoint por serviço) e o design do transporte. Os requisitos 6, 7 e 10 já foram atualizados pela D20.
-- [ ] 7.3 Prints para o README do projeto: fila no painel do RabbitMQ e log do worker (evidência da rubrica).
+- [x] 7.3 Prints para o README do projeto: fila no painel do RabbitMQ e log do worker (evidência da rubrica). *Feito em 2026-11-22: `docs/evidencias/`, linkado no README.*
 
 ### Resultado da verificação (2026-11-16)
 

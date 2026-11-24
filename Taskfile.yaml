@@ -9,6 +9,12 @@ vars:
   WORKER_DIR: worker
   WEB_DIR: web
   DOCKER_COMPOSE_FILE: "{{.TERRAFORM_DIR}}/docker-compose.yaml"
+  K8S_DIR: k8s
+  K8S_NAMESPACE: estacionamento
+  # Perfil do Colima com k3s: gera o contexto do kubectl e o do Docker `colima-k3s`.
+  K3S_PROFILE: k3s
+  K8S_CONTEXT: colima-k3s
+  K8S_DOCKER_CONTEXT: colima-k3s
   AWS_REGION_REAL: us-east-1
   ASG_NAME: estacionamento-asg
   # O .env aponta AWS_ENDPOINT_URL para o Floci e usa chaves falsas; o AWS CLI e
@@ -74,6 +80,60 @@ tasks:
     desc: Acompanha os logs dos containers locais
     cmds:
       - docker compose -f {{.DOCKER_COMPOSE_FILE}} logs -f
+
+  k8s:k3s:up:
+    desc: "Sobe um cluster k3s local (Colima, perfil k3s: 4 CPUs, 6 GiB) para testar os manifestos de k8s/"
+    cmds:
+      - colima start --profile {{.K3S_PROFILE}} --kubernetes --runtime docker --cpu 4 --memory 6 --disk 40
+
+  k8s:k3s:down:
+    desc: Para o cluster k3s local (o estado do cluster fica no disco da VM)
+    cmds:
+      - colima stop --profile {{.K3S_PROFILE}}
+
+  k8s:build:
+    desc: Constrói as imagens api, worker e web no Docker do k3s (o cluster as usa sem registry)
+    cmds:
+      - |
+        for app in api worker web; do
+          docker --context {{.K8S_DOCKER_CONTEXT}} build -t estacionamento-${app}:latest ./${app}
+        done
+
+  k8s:apply:
+    desc: Aplica os manifestos de k8s/ e espera os Deployments ficarem prontos. Web em http://localhost:3000 (task k8s:forward)
+    cmds:
+      - kubectl --context {{.K8S_CONTEXT}} apply -f {{.K8S_DIR}}/
+      - |
+        for app in postgres redis rabbitmq rustfs dynamodb-local api worker web; do
+          kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} rollout status deployment/${app} --timeout=300s
+        done
+
+  k8s:status:
+    desc: Mostra pods, serviços, volumes e jobs do namespace estacionamento
+    cmds:
+      - kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} get pods,svc,jobs,pvc
+
+  k8s:forward:
+    desc: Expõe web (3000), painel do RabbitMQ (15672) e console do RustFS (9001) em localhost
+    cmds:
+      - |
+        trap 'kill 0' EXIT
+        kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} port-forward svc/web 3000:80 &
+        kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} port-forward svc/rabbitmq-management 15672:15672 &
+        kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} port-forward svc/rustfs-console 9001:9001 &
+        wait
+
+  k8s:logs:
+    desc: "Acompanha os logs de um Deployment (ex.: task k8s:logs APP=worker)"
+    vars:
+      APP: '{{.APP | default "api"}}'
+    cmds:
+      - kubectl --context {{.K8S_CONTEXT}} -n {{.K8S_NAMESPACE}} logs -f deployment/{{.APP}}
+
+  k8s:delete:
+    desc: Remove o namespace estacionamento e tudo dentro dele, inclusive os volumes (apaga os dados)
+    cmds:
+      - kubectl --context {{.K8S_CONTEXT}} delete -f {{.K8S_DIR}}/ --ignore-not-found
 
   tf:clean:
     desc: Remove arquivos de estado e cache locais do OpenTofu/Terraform
