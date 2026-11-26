@@ -54,7 +54,7 @@ type ParkingService struct {
 	publisher   repository.EventPublisher
 	audit       repository.AuditLogger
 	totalSpots  int
-	fixedRate   float64
+	pricing     Pricing
 }
 
 func NewParkingService(
@@ -72,7 +72,11 @@ func NewParkingService(
 		publisher:   publisher,
 		audit:       audit,
 		totalSpots:  cfg.TotalParkingSpots,
-		fixedRate:   cfg.FixedParkingRate,
+		pricing: Pricing{
+			Tolerance: time.Duration(cfg.ParkingToleranceMinutes) * time.Minute,
+			FirstHour: cfg.FixedParkingRate,
+			ExtraHour: cfg.ParkingExtraHourRate,
+		},
 	}
 }
 
@@ -181,6 +185,8 @@ func (s *ParkingService) CreateEntry(ctx context.Context, photoFileName string, 
 }
 
 // PayExit charges a PARKED session by its ticket ID, with or without a plate.
+// The amount depends on how long the car stayed (see CalculateFee); a stay
+// within the tolerance is paid with R$ 0,00 and still produces the receipt.
 // The car is still inside, so it keeps its spot until the exit barrier.
 func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.Session, error) {
 	session, err := s.sessionRepo.GetByID(ctx, sessionID)
@@ -194,7 +200,10 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 		return nil, ErrInvalidSessionStatus
 	}
 
-	paidSession, err := s.sessionRepo.MarkAsPaid(ctx, sessionID, time.Now().UTC(), s.fixedRate)
+	paidAt := time.Now().UTC()
+	amount := CalculateFee(paidAt.Sub(session.EnteredAt), s.pricing)
+
+	paidSession, err := s.sessionRepo.MarkAsPaid(ctx, sessionID, paidAt, amount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update session: %w", err)
 	}
@@ -203,7 +212,7 @@ func (s *ParkingService) PayExit(ctx context.Context, sessionID string) (*model.
 	}
 
 	_ = s.audit.LogEvent(ctx, "EXIT_PAYMENT", sessionID, map[string]any{
-		"amount_paid": s.fixedRate,
+		"amount_paid": amount,
 		"status":      paidSession.Status,
 	})
 
@@ -432,8 +441,21 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
+// FindSessions lists sessions. PARKED ones carry AmountDue, the same amount
+// PayExit would charge at this moment, so the cashier sees it before confirming.
 func (s *ParkingService) FindSessions(ctx context.Context, filter repository.SessionFilter) ([]*model.Session, error) {
-	return s.sessionRepo.FindAll(ctx, filter)
+	sessions, err := s.sessionRepo.FindAll(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for _, session := range sessions {
+		if session.Status == model.StatusParked {
+			due := CalculateFee(now.Sub(session.EnteredAt), s.pricing)
+			session.AmountDue = &due
+		}
+	}
+	return sessions, nil
 }
 
 func (s *ParkingService) GetAuditLogs(ctx context.Context, limit int) ([]*model.AuditLog, error) {

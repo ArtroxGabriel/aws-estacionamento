@@ -40,8 +40,8 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
 
 [Painel: /] ──> GET /spots/available (Redis) e carros no pátio (PARKED e PAID)
 
-[Caixa: /pagamento] ──> POST /exits/{id}/pay
-    ├── Tarifa fixa; status "PAID" e paid_at
+[Caixa: /pagamento] ──> GET /sessions (PARKED, com amount_due: o valor a pagar agora) e POST /exits/{id}/pay
+    ├── Tarifa por permanência (15 min grátis; 1ª hora R$ 10; +R$ 5 por hora ou fração); status "PAID", paid_at e amount_paid
     ├── A vaga continua ocupada (o carro ainda está no pátio)
     └── Auditoria "EXIT_PAYMENT"
     Opcional: PATCH /sessions/{id} (placa digitada, "MANUAL", auditoria "PLATE_CORRECTION")
@@ -77,7 +77,7 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
 ├── .kiro/specs/            # Especificações (requirements, design, tasks) do worker e da API/cancela
 ├── .github/                # Workflow "Deploy AWS" (OIDC, TP1)
 ├── examples/               # Fotos, vídeo e datasets com gabarito (examples/README.md)
-├── scripts/                # Smoke, avaliação de OCR, datasets; analise-ocr/ = simulações das decisões
+├── scripts/                # Smoke, demo da tarifa (demo-tarifa.sh), avaliação de OCR, datasets; analise-ocr/ = simulações das decisões
 └── docs/                   # Especificações, PLANO-TP2, ARQUITETURA, DECISOES, DEPLOY-AWS (TP1)
 ```
 
@@ -89,7 +89,7 @@ Status de uma sessão: `PARKED` (no pátio, não pago) → `PAID` (no pátio, pa
 ## Common Commands
 
 - **Sistema inteiro (TP2)**:
-  - `task up` (`cd infra && docker compose up -d --build`): sobe tudo; web em `http://localhost:3000`, API em `:8080`, RabbitMQ em `:15672` (guest/guest), RustFS em `:9001` (minioadmin/minioadmin)
+  - `task up`: sobe tudo (`docker compose up -d --build`). Usa o DynamoDB real se `infra/.env` tiver `DYNAMODB_ACCESS_KEY_ID`, senão o DynamoDB Local; imprime qual escolheu. Depois reinicia o `web` (o nginx só resolve o DNS da API ao iniciar). Em seguida: web em `http://localhost:3000`, API em `:8080`, RabbitMQ em `:15672` (guest/guest), RustFS em `:9001` (rustfsadmin/rustfsadmin)
   - `task down` / `task logs`: encerra (os volumes ficam) / acompanha os logs
   - `task test`: testes da API, do worker e do web
 - **Desenvolvimento fora dos containers**:
@@ -107,7 +107,11 @@ O compose já define todas as variáveis. Para `task dev:*`, o Taskfile aponta p
 - `RABBITMQ_URL=amqp://guest:guest@localhost:5672/`, `RABBITMQ_QUEUE_NAME=ocr-processamento-fila`
 - `S3_ENDPOINT_URL=http://localhost:9000`, `S3_BUCKET_NAME=estacionamento-fotos-veiculos-local`
 - `DYNAMODB_ENDPOINT_URL=http://localhost:8000`, `DYNAMODB_TABLE_NAME=AuditoriaEstacionamento`
-- `AWS_REGION=us-east-1`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=minioadmin`
+- `AWS_REGION=us-east-1`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=rustfsadmin`
+
+DynamoDB real (opcional, AWS Academy só para a auditoria): `DYNAMODB_ENDPOINT_URL` vazio e `DYNAMODB_ACCESS_KEY_ID`/`DYNAMODB_SECRET_ACCESS_KEY`/`DYNAMODB_SESSION_TOKEN` em `infra/.env` (modelo `infra/.env.aws.example`, tabela criada por `scripts/dynamodb-aws.sh`). Essas credenciais valem só para o DynamoDB; o S3 (RustFS) segue com `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
+
+Tarifa (opcional, o compose já define): `PARKING_TOLERANCE_MINUTES=15`, `FIXED_PARKING_RATE=10.00` (1ª hora) e `PARKING_EXTRA_HOUR_RATE=5.00`.
 
 Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `REDIS_URL` (no worker) não são mais lidos.
 
@@ -117,6 +121,7 @@ Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `
 - **Duas cancelas** (`docs/DECISOES.md`, D15 e D21): pagar não libera a vaga; ela volta quando o carro passa pela cancela de saída (`PAID` → `EXITED`). A transição é um `UPDATE ... WHERE status = 'PAID'`, e só quem mudou a linha incrementa o contador: a vaga sai uma vez só.
 - **Desacoplamento Assíncrono**: entrada e saída **nunca** executam OCR de forma síncrona. A API grava a foto, publica na fila e libera a requisição; a cancela de saída recebe a placa já reconhecida.
 - **Topologia do RabbitMQ**: declarada só em `infra/rabbitmq/definitions.json`. API e worker fazem declaração passiva; declarar com outros argumentos causa `PRECONDITION_FAILED`.
+- **Credenciais separadas por serviço**: o DynamoDB aceita `DYNAMODB_ACCESS_KEY_ID`/`SECRET`/`SESSION_TOKEN` (D24), usados só no cliente dele; sem elas vale o par comum. Assim o RustFS e a AWS real convivem.
 - **Auditoria Imutável**: toda alteração de estado registra evento no DynamoDB (`ENTRY`, `OCR_PROCESSING`, `OCR_FAILED`, `POISON_MESSAGE`, `EXIT_PAYMENT`, `EXIT_BARRIER_OPENED`, `PLATE_CORRECTION`, `SESSION_DELETE`).
 - **Cache de Alta Frequência**: a consulta de vagas disponíveis bate no Redis. Sem a chave, a API recalcula pelo Postgres (`total - COUNT(status IN ('PARKED','PAID'))`).
 - **Consistência de Contadores**: só a API mexe em `spots:available`: reserva atômica na entrada (`POST /entries`) e incremento na cancela de saída (ou na exclusão de um carro no pátio). O worker não usa Redis.
@@ -132,6 +137,11 @@ Endpoint vazio = AWS real. `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL`, `OCR_ENGINE` e `
 - **Deploy do TP1**: o `user_data` do OpenTofu ainda exporta `SQS_QUEUE_URL`/`OCR_ENGINE`. As imagens atuais da API e do worker não processam fotos nesse deploy. Se for usá-lo, `task tf:destroy:aws` ao terminar (créditos da AWS Academy).
 
 ## Changelog
+
+- 2026-11-18: `task up` escolhe sozinho entre DynamoDB real e local conforme `infra/.env`; roteiro da apresentação em `docs/APRESENTACAO.md`. Auditoria pode usar o DynamoDB real do AWS Academy com credenciais próprias (`DYNAMODB_*`, D24), o resto continua local; `infra/.env.aws.example` e `scripts/dynamodb-aws.sh`.
+
+- 2026-11-18: Tarifa por tempo de permanência (D23): 15 min de tolerância, 1ª hora R$ 10 e R$ 5 por hora ou fração; `amount_due` em `GET /sessions` e valor a pagar no caixa; `scripts/demo-tarifa.sh` (6 veículos com permanências diferentes) para a apresentação.
+- 2026-11-18: RustFS é o único armazenamento de arquivos (professor aceitou no lugar do MinIO, D11): `createbuckets` usa `amazon/aws-cli` (`minio/mc` saiu do Docker Hub) e as credenciais `minioadmin` viraram `rustfsadmin`.
 
 - 2026-11-17: API e cancela de saída do TP2 (`.kiro/specs/api-rabbitmq-exit-barrier`): status `EXITED` e `paid_at` (migração 000003), pagamento sem liberar a vaga, `POST /barrier/exit/plate` e `/ticket`, páginas `/cancela-entrada`, `/pagamento` e `/cancela-saida`, serviços `api` e `web` no compose, `task up/down/logs/test`, healthcheck do RabbitMQ por porta. Este arquivo passou a descrever o TP2.
 - 2026-11-16: API migrada para o TP2, fase 1 (`.kiro/specs/api-rabbitmq-exit-barrier`): publica no RabbitMQ no lugar do SQS e usa `S3_ENDPOINT_URL`/`DYNAMODB_ENDPOINT_URL`. O fluxo foto → API → fila → worker → placa volta a fechar no compose. O deploy do TP1 na AWS (`infra/*.tf`) não funciona com as imagens novas.

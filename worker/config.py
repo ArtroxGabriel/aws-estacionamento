@@ -71,6 +71,11 @@ class Config:
     rabbitmq_url: str
     rabbitmq_queue_name: str
     database_url: str
+    # Credentials used only by the DynamoDB client (real AWS, e.g. AWS Academy)
+    # while S3 keeps the ones above (local RustFS). None => same as above.
+    dynamodb_access_key_id: str | None = None
+    dynamodb_secret_access_key: str | None = None
+    dynamodb_session_token: str | None = None
 
     @property
     def retry_queue_name(self) -> str:
@@ -172,6 +177,9 @@ def load_config(env: Mapping[str, str]) -> Config:
     s3_bucket_name = _clean(env.get("S3_BUCKET_NAME"))
     dynamodb_endpoint = _clean(env.get("DYNAMODB_ENDPOINT_URL"))
     dynamodb_table_name = _clean(env.get("DYNAMODB_TABLE_NAME"))
+    dynamodb_access_key = _clean(env.get("DYNAMODB_ACCESS_KEY_ID"))
+    dynamodb_secret_key = _clean(env.get("DYNAMODB_SECRET_ACCESS_KEY"))
+    dynamodb_session_token = _clean(env.get("DYNAMODB_SESSION_TOKEN"))
 
     values = {
         "AWS_REGION": region,
@@ -188,6 +196,10 @@ def load_config(env: Mapping[str, str]) -> Config:
         missing.append("AWS_SECRET_ACCESS_KEY")
     if secret_key and not access_key:
         missing.append("AWS_ACCESS_KEY_ID")
+    if dynamodb_access_key and not dynamodb_secret_key:
+        missing.append("DYNAMODB_SECRET_ACCESS_KEY")
+    if dynamodb_secret_key and not dynamodb_access_key:
+        missing.append("DYNAMODB_ACCESS_KEY_ID")
 
     # Collect every malformed URL/connection string among the present values.
     # Only validate a value when it is non-empty so a missing var is reported
@@ -217,4 +229,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         rabbitmq_url=rabbitmq_url,
         rabbitmq_queue_name=queue_name,
         database_url=database_url,
+        dynamodb_access_key_id=dynamodb_access_key or None,
+        dynamodb_secret_access_key=dynamodb_secret_key or None,
+        dynamodb_session_token=dynamodb_session_token or None,
     )

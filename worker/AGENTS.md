@@ -1,7 +1,7 @@
 # AGENTS.md - Worker OCR (Python)
 
 ## Project Overview
-- Worker assíncrono em Python que consome mensagens da fila RabbitMQ (`ocr-processamento-fila`), descarrega a foto do storage S3 (RustFS/MinIO), aplica redimensionamento e OCR (Tesseract) para extrair a placa, grava a placa no RDS (`plate_status` `PENDING` → `READ`) e registra auditoria `OCR_PROCESSING` no DynamoDB. O worker só enriquece a sessão: ela já nasce `PARKED`, com a vaga reservada pela API, e o ticket já vale (`docs/DECISOES.md`, D20).
+- Worker assíncrono em Python que consome mensagens da fila RabbitMQ (`ocr-processamento-fila`), descarrega a foto do storage S3 (RustFS), aplica redimensionamento e OCR (Tesseract) para extrair a placa, grava a placa no RDS (`plate_status` `PENDING` → `READ`) e registra auditoria `OCR_PROCESSING` no DynamoDB. O worker só enriquece a sessão: ela já nasce `PARKED`, com a vaga reservada pela API, e o ticket já vale (`docs/DECISOES.md`, D20).
 
 ## Tech Stack
 - **Linguagem / Runtime**: Python 3.14 (`uv`)
@@ -52,6 +52,7 @@ worker/
 - `_binarize` aplica mediana 5×5 antes do Otsu: remove o ruído do JPEG que quebrava caracteres em foto real (`KLV-8465`). Num benchmark de 40 placas sintéticas o acerto ficou igual (38/40).
 
 ## Changelog
+- 2026-11-18: Credenciais próprias para o DynamoDB (`DYNAMODB_*`, D24), para usar o DynamoDB real do AWS Academy com o RustFS local.
 - 2026-11-16: Migração para o TP2: RabbitMQ no lugar do SQS (`consumer.py`, fila de espera com TTL, DLQ, `x-attempt`), regras de negócio isoladas em `processor.py`, endpoints de S3 e DynamoDB separados, Rekognition e `floci.env` removidos (`docs/PLANO-TP2-WORKER.md`).
 - 2026-11-16: O worker passa a só gravar a placa (`plate_status` `PENDING` → `READ` | `UNREADABLE`): não altera `status`, não usa Redis (`storage/spots.py` e `REDIS_URL` removidos) e fecha a leitura como `UNREADABLE` ao desistir da mensagem.
 - 2026-10-03: Placas dos 4 países do Mercosul (Argentina, Paraguai e Uruguai além do Brasil), com o nome do país como evidência para os formatos ambíguos.

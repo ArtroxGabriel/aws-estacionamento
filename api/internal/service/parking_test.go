@@ -341,7 +341,7 @@ func setupService(shouldErrDB, shouldErrStorage bool) (*service.ParkingService, 
 	storage := &FakeStorage{shouldErr: shouldErrStorage}
 	publisher := &FakePublisher{}
 	audit := &FakeAuditLogger{}
-	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 15.0}
+	cfg := config.Config{TotalParkingSpots: 50, FixedParkingRate: 15.0, ParkingExtraHourRate: 5.0, ParkingToleranceMinutes: 15}
 
 	svc := service.NewParkingService(repo, spots, storage, publisher, audit, cfg)
 	return svc, repo, spots, storage, publisher, audit
@@ -637,7 +637,7 @@ func TestPayExit_Success(t *testing.T) {
 		Status:       model.StatusParked,
 		PlateStatus:  model.PlateRead,
 		S3PhotoKey:   "photos/s1.jpg",
-		EnteredAt:    time.Now().Add(-2 * time.Hour),
+		EnteredAt:    time.Now().Add(-100 * time.Minute),
 	}
 
 	paid, err := svc.PayExit(context.Background(), "s1")
@@ -647,8 +647,9 @@ func TestPayExit_Success(t *testing.T) {
 	if paid.Status != model.StatusPaid {
 		t.Fatalf("expected status PAID, got %s", paid.Status)
 	}
-	if paid.AmountPaid == nil || *paid.AmountPaid != 15.0 {
-		t.Fatalf("expected amount 15.0, got %v", paid.AmountPaid)
+	if paid.AmountPaid == nil || *paid.AmountPaid != 20.0 {
+		// 1 h 40 min: 1ª hora (15) + 1 hora extra, por fração (5).
+		t.Fatalf("expected amount 20.0, got %v", paid.AmountPaid)
 	}
 	// The car is still inside: paying keeps its spot.
 	if spots.spots != 30 {
@@ -1281,3 +1282,49 @@ func TestSpotConservation_RandomSequences(t *testing.T) {
 		}
 	}
 }
+
+func TestPayExit_WithinToleranceIsFree(t *testing.T) {
+	svc, repo, _, _, _, audit := setupService(false, false)
+	repo.sessions["s1"] = &model.Session{ID: "s1", Status: model.StatusParked, PlateStatus: model.PlateRead, EnteredAt: time.Now().Add(-10 * time.Minute)}
+
+	paid, err := svc.PayExit(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if paid.Status != model.StatusPaid || paid.AmountPaid == nil || *paid.AmountPaid != 0 {
+		t.Fatalf("expected PAID with amount 0, got %s / %v", paid.Status, paid.AmountPaid)
+	}
+	if len(audit.events) != 1 || audit.events[0] != "EXIT_PAYMENT" {
+		t.Fatalf("expected EXIT_PAYMENT audit, got %v", audit.events)
+	}
+}
+
+func TestFindSessions_ParkedCarryAmountDue(t *testing.T) {
+	svc, repo, _, _, _, _ := setupService(false, false)
+	repo.sessions["free"] = &model.Session{ID: "free", Status: model.StatusParked, EnteredAt: time.Now().Add(-5 * time.Minute)}
+	repo.sessions["first"] = &model.Session{ID: "first", Status: model.StatusParked, EnteredAt: time.Now().Add(-40 * time.Minute)}
+	repo.sessions["extra"] = &model.Session{ID: "extra", Status: model.StatusParked, EnteredAt: time.Now().Add(-100 * time.Minute)}
+	paidAt := time.Now()
+	repo.sessions["paid"] = &model.Session{ID: "paid", Status: model.StatusPaid, EnteredAt: time.Now().Add(-3 * time.Hour), PaidAt: &paidAt}
+
+	got, err := svc.FindSessions(context.Background(), repository.SessionFilter{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	// Tarifa do setupService: 1ª hora 15, hora extra 5, tolerância 15 min.
+	want := map[string]*float64{"free": f64(0), "first": f64(15), "extra": f64(20), "paid": nil}
+	for _, session := range got {
+		w, ok := want[session.ID]
+		if !ok {
+			continue
+		}
+		switch {
+		case w == nil && session.AmountDue != nil:
+			t.Fatalf("%s: a paid session must not carry amount_due, got %v", session.ID, *session.AmountDue)
+		case w != nil && (session.AmountDue == nil || *session.AmountDue != *w):
+			t.Fatalf("%s: expected amount_due %.2f, got %v", session.ID, *w, session.AmountDue)
+		}
+	}
+}
+
+func f64(v float64) *float64 { return &v }

@@ -1,7 +1,7 @@
 # AGENTS.md - Frontend Web (React / Vite)
 
 ## Project Overview
-- Interface Web do operador e dos totens: painel (vagas disponíveis e carros no pátio), cancela de entrada (foto do veículo + ticket já válido, com a placa aparecendo quando for lida), caixa (busca por ticket ou placa, foto da entrada, cobrança), cancela de saída (placa ou ticket) e trilha de auditoria do DynamoDB.
+- Interface Web do operador e dos totens: painel (vagas disponíveis e carros no pátio), cancela de entrada (foto do veículo + ticket já válido, com a placa aparecendo quando for lida), caixa (busca por ticket ou placa, foto da entrada, tempo estacionado, valor a pagar e cobrança), cancela de saída (placa ou ticket) e trilha de auditoria do DynamoDB.
 - Plano completo e contratos: `docs/frontend.md`.
 
 ## Tech Stack
@@ -50,7 +50,7 @@ Na Auditoria, a placa e o resultado da leitura vêm da sessão (`GET /sessions?s
 
 No Caixa, cada linha tem a miniatura da foto de entrada, **Pagar**, **Informar placa** (opcional, sessão sem placa) ou **Corrigir placa** (leitura errada) e **Excluir**, com confirmação. A placa é validada no navegador (`isValidPlate`, mesma regra da API: formatos dos 4 países do Mercosul) e enviada normalizada via `PATCH /sessions/{id}`; a exclusão usa `DELETE /sessions/{id}`. Na Auditoria, `PLATE_CORRECTION` mostra a placa nova e a anterior, e `SESSION_DELETE` o status que a sessão tinha.
 
-As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}` nem o valor a pagar antes da cobrança: o valor aparece no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED` (já paga) retorna 409. Na Auditoria, `EXIT_PAYMENT` aparece como "Pagamento" e `EXIT_BARRIER_OPENED` como "Saída pela cancela" ("Cancela aberta pela placa" ou "pelo ticket"). A URL da foto vem de `sessionPhotoUrl` em `src/services/api.ts`.
+As listagens da API são arrays crus e vêm como `null` quando vazias; `src/services/api.ts` normaliza para `[]`. A API não expõe `GET /sessions/{id}`. O valor a pagar vem em `amount_due` de cada sessão `PARKED` de `GET /sessions` (atualizado a cada 15 s) e aparece na coluna "Valor a pagar" e no botão de confirmar; o valor realmente cobrado está no recibo (`amount_paid` de `POST /exits/{id}/pay`). Pagamento de sessão fora de `PARKED` (já paga) retorna 409. Na Auditoria, `EXIT_PAYMENT` aparece como "Pagamento" e `EXIT_BARRIER_OPENED` como "Saída pela cancela" ("Cancela aberta pela placa" ou "pelo ticket"). A URL da foto vem de `sessionPhotoUrl` em `src/services/api.ts`.
 
 Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produção o nginx do container faz o mesmo para `API_UPSTREAM` (padrão `http://api:8080`). Mesma origem, sem CORS. O `nginx-api-upstream.envsh` extrai `host:porta` de `API_UPSTREAM` para um bloco `upstream` com keepalive. Sem keepalive, cada request abre um TCP novo, e sob carga isso lota a tabela conntrack do Docker.
 
@@ -66,11 +66,12 @@ Em dev o Vite faz proxy de `/api/*` para `http://localhost:8080/*`; em produçã
 - Páginas não chamam `fetch`; tudo passa por `src/services/api.ts`. Erros da API chegam como `{"error":"..."}`; o corpo é lido como texto e o JSON é tentado sem depender do `Content-Type` (respostas fora da API, como o 404 padrão do Go ou do nginx, são texto puro).
 - Identificadores em inglês, textos da interface em pt-BR; campos JSON em `snake_case` sem camada de mapeamento.
 - Estado local (`useState`), sem estado global. Toda requisição exibe carregando, erro e sucesso; botões de ação ficam `disabled` durante a requisição (evita pagamento duplo).
-- O frontend nunca calcula tarifa: o valor exibido é o `amount_paid` devolvido pela API.
+- O frontend nunca calcula tarifa: os valores exibidos são o `amount_due` (antes de pagar) e o `amount_paid` (recibo) devolvidos pela API, calculados em `api/internal/service/pricing.go` (D23).
 - Sem animações além do `animate-spin` do `Spinner`.
 - DoD: `npm run lint`, `npm run test -- --run` e `npm run build` sem erros nem warnings.
 
 ## Changelog
+- 2026-11-18: Caixa mostra o valor a pagar (`amount_due`) na linha e no botão "Confirmar pagamento de R$ ..." (D23).
 - 2026-11-17: Duas cancelas (fase 4 da spec `api-rabbitmq-exit-barrier`): `ExitBarrierPage` em `/cancela-saida`, rotas `/cancela-entrada` e `/pagamento` (as antigas redirecionam), caixa sem liberar a vaga, painel com os carros no pátio, `SessionStatus` com `EXITED`, `paid_at`, `EXIT_BARRIER_OPENED` e `ApiError.code`.
 - 2026-11-16: Ticket válido na emissão: `SessionStatus` só `PARKED`/`PAID`, novo `PlateStatus`, totem sem "procure o operador" e com aviso de pátio lotado, Caixa lista só `PARKED` com a foto de entrada, Auditoria com link para a foto.
 - 2026-10-03: Caixa com placa digitada/corrigida e exclusão de registro; Auditoria com `PLATE_CORRECTION` e `SESSION_DELETE`.

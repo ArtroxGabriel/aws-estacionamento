@@ -101,6 +101,14 @@ func NewS3Client(awsCfg aws.Config, cfg config.Config) *s3.Client {
 }
 
 func NewDynamoDBClient(awsCfg aws.Config, cfg config.Config) *dynamodb.Client {
+	// DynamoDB can live in the real AWS (AWS Academy) while S3 is the local
+	// RustFS: each one then needs its own credentials.
+	if cfg.DynamoDBAccessKeyID != "" && cfg.DynamoDBSecretAccessKey != "" {
+		awsCfg = awsCfg.Copy()
+		awsCfg.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(
+			cfg.DynamoDBAccessKeyID, cfg.DynamoDBSecretAccessKey, cfg.DynamoDBSessionToken,
+		))
+	}
 	return dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) {
 		if cfg.DynamoDBEndpointURL != "" {
 			o.BaseEndpoint = &cfg.DynamoDBEndpointURL

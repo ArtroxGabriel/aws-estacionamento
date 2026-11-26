@@ -87,6 +87,28 @@ describe("PaymentPage", () => {
     expect(within(second).getByText("12min")).toBeInTheDocument();
   });
 
+  it("mostra o valor a pagar de cada carro e destaca a tolerância", async () => {
+    await renderWith([
+      { ...older, amount_due: 15 },
+      { ...unread, amount_due: 10 },
+      { ...pending, amount_due: 0 },
+    ]);
+
+    const [first, second, third] = rows();
+    expect(within(first).getByText(/R\$\s15,00/)).toBeInTheDocument();
+    expect(within(second).getByText(/R\$\s10,00/)).toBeInTheDocument();
+    expect(within(third).getByText(/R\$\s0,00/)).toBeInTheDocument();
+    expect(within(third).getByText("(tolerância)")).toBeInTheDocument();
+  });
+
+  it("repete o valor no botão de confirmar pagamento", async () => {
+    const { user } = await renderWith([{ ...unread, amount_due: 10 }]);
+
+    await user.click(screen.getByRole("button", { name: "Pagar" }));
+
+    expect(screen.getByRole("button", { name: /Confirmar pagamento de R\$\s10,00/ })).toBeInTheDocument();
+  });
+
   it("consulta uma única lista: todo carro no pátio está PARKED", async () => {
     await renderWith([older]);
 

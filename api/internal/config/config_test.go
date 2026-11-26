@@ -19,6 +19,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	_ = os.Unsetenv("AWS_SESSION_TOKEN")
 	_ = os.Unsetenv("TOTAL_PARKING_SPOTS")
 	_ = os.Unsetenv("FIXED_PARKING_RATE")
+	_ = os.Unsetenv("DYNAMODB_ACCESS_KEY_ID")
+	_ = os.Unsetenv("DYNAMODB_SECRET_ACCESS_KEY")
+	_ = os.Unsetenv("DYNAMODB_SESSION_TOKEN")
+	_ = os.Unsetenv("PARKING_EXTRA_HOUR_RATE")
+	_ = os.Unsetenv("PARKING_TOLERANCE_MINUTES")
 
 	cfg := config.LoadConfig()
 
@@ -47,6 +52,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.FixedParkingRate != 10.0 {
 		t.Fatalf("expected rate 10.0, got %f", cfg.FixedParkingRate)
+	}
+	if cfg.DynamoDBAccessKeyID != "" || cfg.DynamoDBSecretAccessKey != "" || cfg.DynamoDBSessionToken != "" {
+		t.Fatalf("expected no DynamoDB-specific credentials by default")
+	}
+	if cfg.ParkingExtraHourRate != 5.0 || cfg.ParkingToleranceMinutes != 15 {
+		t.Fatalf("expected extra hour 5.0 and tolerance 15 min, got %f / %d", cfg.ParkingExtraHourRate, cfg.ParkingToleranceMinutes)
 	}
 }
 
@@ -85,5 +96,21 @@ func TestLoadConfig_CustomEnv(t *testing.T) {
 	}
 	if cfg.RabbitMQURL != "amqp://guest:guest@rabbitmq:5672/" || cfg.RabbitMQQueueName != "outra-fila" {
 		t.Fatalf("unexpected broker config %s / %s", cfg.RabbitMQURL, cfg.RabbitMQQueueName)
+	}
+}
+
+func TestLoadConfig_DynamoDBCredentialsAreSeparate(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "rustfsadmin")
+	t.Setenv("DYNAMODB_ACCESS_KEY_ID", "ASIAREAL")
+	t.Setenv("DYNAMODB_SECRET_ACCESS_KEY", "realsecret")
+	t.Setenv("DYNAMODB_SESSION_TOKEN", "realtoken")
+
+	cfg := config.LoadConfig()
+
+	if cfg.AWSAccessKeyID != "rustfsadmin" {
+		t.Fatalf("expected the common key to stay for S3, got %s", cfg.AWSAccessKeyID)
+	}
+	if cfg.DynamoDBAccessKeyID != "ASIAREAL" || cfg.DynamoDBSecretAccessKey != "realsecret" || cfg.DynamoDBSessionToken != "realtoken" {
+		t.Fatalf("unexpected DynamoDB credentials: %+v", cfg)
 	}
 }

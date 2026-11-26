@@ -209,6 +209,7 @@ export default function PaymentPage() {
                     <th scope="col" className="px-3 py-2">Ticket</th>
                     <th scope="col" className="px-3 py-2">Entrada</th>
                     <th scope="col" className="px-3 py-2">Tempo estacionado</th>
+                    <th scope="col" className="px-3 py-2">Valor a pagar</th>
                     <th scope="col" className="px-3 py-2">Ação</th>
                   </tr>
                 </thead>
@@ -230,6 +231,9 @@ export default function PaymentPage() {
                         <td className="px-3 py-2 font-mono" title={s.id}>{shortId(s.id)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(s.entered_at)}</td>
                         <td className="px-3 py-2">{formatDuration(s.entered_at, lastUpdated)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          <AmountDue amount={s.amount_due} />
+                        </td>
                         <td className="px-3 py-2">
                           {editingId === s.id ? (
                             <form
@@ -298,6 +302,7 @@ export default function PaymentPage() {
                               >
                                 {paying && <Spinner label="Processando pagamento" className="size-4" />}
                                 Confirmar pagamento
+                                {s.amount_due !== undefined && ` de ${formatCurrency(s.amount_due)}`}
                               </button>
                               <button
                                 type="button"
@@ -352,6 +357,19 @@ export default function PaymentPage() {
       )}
     </div>
   );
+}
+
+// Valor que o caixa cobraria agora (calculado pela API). Até a tolerância não há cobrança.
+function AmountDue({ amount }: { amount?: number }) {
+  if (amount === undefined) return <span className="text-slate-500">—</span>;
+  if (amount === 0) {
+    return (
+      <span className="font-semibold text-green-700">
+        {formatCurrency(0)} <span className="text-xs font-normal">(tolerância)</span>
+      </span>
+    );
+  }
+  return <span className="font-semibold">{formatCurrency(amount)}</span>;
 }
 
 // Miniatura da foto de entrada, para o caixa conferir o veículo com o ticket. Abre em

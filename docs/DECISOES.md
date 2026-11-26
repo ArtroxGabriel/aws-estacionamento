@@ -24,7 +24,7 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 
 ## D11. RustFS em substituição ao S3 e ao MinIO
 
-**Contexto:** O Trabalho 1 usava o Amazon S3 para armazenar as fotos dos veículos. A especificação do Trabalho 2 sugere o uso do MinIO. No entanto, o MinIO alterou sua licença de Apache 2.0 para GNU AGPLv3, impondo restrições severas de licenciamento e telemetria, além de apresentar alto consumo de recursos.
+**Contexto:** O Trabalho 1 usava o Amazon S3 para armazenar as fotos dos veículos. A especificação do Trabalho 2 pede o uso do MinIO. No entanto, o MinIO alterou sua licença de Apache 2.0 para GNU AGPLv3, impondo restrições severas de licenciamento e telemetria, além de apresentar alto consumo de recursos.
 
 **Decisão:** Adotar o **RustFS** (`rustfs/rustfs:latest`) como serviço de armazenamento de arquivos de alta performance.
 - O RustFS é 100% compatível com a API REST do S3 (inclusive suporte a AWS Signature Version 4).
@@ -35,6 +35,8 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 - **Zero Lock-in & Licença Permissiva:** Apache 2.0 contra as restrições da AGPLv3 do MinIO.
 - **Eficiência e Velocidade:** Implementação moderna em Rust, ideal para rodar leve em contêineres Docker locais.
 - **Compatibilidade Transparente:** Não exige bibliotecas proprietárias; o mesmo código do SDK da AWS conecta sem modificação nas chamadas de `PutObject`, `GetObject` e `DeleteObject`.
+
+**Aceite:** o professor confirmou que usar o RustFS no lugar do MinIO é aceitável para o Trabalho 2. Com isso, o projeto não usa mais nenhuma imagem do MinIO: o job `createbuckets` do compose usa `amazon/aws-cli` (a `minio/mc` saiu do Docker Hub) e as credenciais de desenvolvimento são `rustfsadmin`.
 
 **Alternativas Descartadas:**
 - *MinIO:* Descartado pela licença restritiva AGPLv3 e peso de inicialização.
@@ -285,3 +287,38 @@ Registro histórico e técnico das decisões tomadas no projeto, motivações, a
 **Consequências:** a fila fora do ar continua não derrubando a entrada (D20); a entrada só fica até 5 s mais lenta. O deploy do TP1 na AWS não funciona com essa imagem da API.
 
 **Onde:** `api/internal/repository/rabbitmq.go`, `api/internal/config/config.go`, `api/cmd/api/main.go`, `infra/docker-compose.yaml`.
+
+---
+
+## D23. Tarifa por Tempo de Permanência, com Tolerância de 15 Minutos
+
+**Contexto:** a tarifa era um valor fixo por sessão (`FIXED_PARKING_RATE`), igual para quem ficou 5 minutos e para quem ficou o dia todo.
+
+**Decisão:** seguir o modelo comum dos estacionamentos brasileiros, em três faixas e sem tabela por minuto:
+1. **Até 15 min (inclusive): grátis.** O pagamento continua sendo registrado, com `amount_paid` 0, porque o carro ainda precisa de uma sessão `PAID` para passar pela cancela de saída.
+2. **Acima de 15 min até 1 h: preço da 1ª hora** (R$ 10,00, o antigo `FIXED_PARKING_RATE`).
+3. **Depois da 1ª hora: R$ 5,00 por hora ou fração.** 1 h 01 min já cobra a 2ª hora.
+
+A permanência é `paid_at - entered_at`, calculada quando o caixa cobra. Valores em variáveis de ambiente (`PARKING_TOLERANCE_MINUTES`, `FIXED_PARKING_RATE`, `PARKING_EXTRA_HOUR_RATE`); o cálculo é uma função pura, `CalculateFee`, em `api/internal/service/pricing.go`.
+
+**Valor a pagar antes de confirmar:** `GET /sessions` devolve `amount_due` nas sessões `PARKED`, calculado pela mesma `CalculateFee` do pagamento, e o caixa mostra o valor na linha e no botão "Confirmar pagamento". O front não recalcula nada, então a regra existe num lugar só. O valor é o do último carregamento da lista (a cada 15 s); o recibo mostra o valor realmente cobrado, que pode ser uma faixa acima se uma fronteira foi cruzada nesse intervalo.
+
+**Fora do escopo (de propósito):** diária com teto, tarifa noturna, mensalista e cobrança de quem demora para sair depois de pagar (não existe tolerância de saída: o valor é fechado no pagamento).
+
+**Onde:** `api/internal/service/pricing.go`, `api/internal/service/parking.go` (`PayExit` e `FindSessions`), `api/internal/config/config.go`, `infra/docker-compose.yaml`, `web/src/pages/PaymentPage.tsx` e `scripts/demo-tarifa.sh` (demonstração).
+
+---
+
+## D24. DynamoDB Real (AWS Academy) com Credenciais Próprias
+
+**Contexto:** a especificação do TP2 pede para continuar usando o banco NoSQL da AWS. A aplicação roda só localmente (apresentação local, sem deploy na AWS), então a AWS Academy entra apenas para o DynamoDB. O problema: API e worker usavam um único par de credenciais para S3 e DynamoDB. Com o par real, o RustFS recusaria o upload; com o `rustfsadmin`, a AWS recusaria a auditoria.
+
+**Decisão:**
+1. **Credenciais separadas só para o DynamoDB:** `DYNAMODB_ACCESS_KEY_ID`, `DYNAMODB_SECRET_ACCESS_KEY` e `DYNAMODB_SESSION_TOKEN`. Quando preenchidas, só o cliente do DynamoDB as usa; sem elas, vale o par comum (`AWS_*`). Meio par é erro de configuração no worker.
+2. **Padrão continua local:** o compose usa o DynamoDB Local. Para o real, `infra/.env` (fora do git, modelo em `infra/.env.aws.example`) esvazia `DYNAMODB_ENDPOINT_URL` e traz as credenciais.
+3. **`task up` escolhe sozinho:** com `DYNAMODB_ACCESS_KEY_ID` preenchido em `infra/.env`, usa o real; senão, o local (o `.env` vazio ou ausente cai no local, nunca na AWS com as chaves erradas). Para alternar, basta mover o `.env`.
+4. **Tabela criada à parte:** a API e o worker não criam a tabela no DynamoDB real; `scripts/dynamodb-aws.sh` a cria (chave `id` String, sob demanda) se faltar. O `createtables` do compose só atende o DynamoDB Local.
+
+**Consequências:** as credenciais do Academy expiram quando o lab reinicia; basta atualizar o `.env` e rodar `docker compose up -d`. O `dynamodb-local` continua subindo mesmo em modo AWS (inofensivo, sem uso).
+
+**Onde:** `api/cmd/api/main.go` (`NewDynamoDBClient`), `api/internal/config/config.go`, `worker/config.py`, `worker/storage/clients.py`, `infra/docker-compose.yaml`, `infra/.env.aws.example`, `scripts/dynamodb-aws.sh`, `Taskfile.yaml` (`up`).

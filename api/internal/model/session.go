@@ -30,6 +30,9 @@ type Session struct {
 	PaidAt       *time.Time `json:"paid_at,omitempty"`
 	ExitedAt     *time.Time `json:"exited_at,omitempty"`
 	AmountPaid   *float64   `json:"amount_paid,omitempty"`
+	// AmountDue is what the cashier would charge right now. It is only filled in
+	// by listings of PARKED sessions and never stored.
+	AmountDue *float64 `json:"amount_due,omitempty"`
 }
 
 // Occupying reports whether the session holds a spot in the lot.
